@@ -1,0 +1,40 @@
+default_language_version:
+  python: python3.12
+
+default_stages: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv --no-config run ruff check .
+        language: system
+        pass_filenames: false
+
+      - id: ruff-format
+        name: ruff format check
+        entry: uv --no-config run ruff format --check .
+        language: system
+        pass_filenames: false
+
+      - id: tests
+        name: tests with coverage ratchet
+        entry: uv --no-config run pytest --cov --cov-report=term-missing
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: type-check
+        name: type check
+        entry: uv --no-config run mypy src tests
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: build
+        name: build distributions
+        entry: uv --no-config build
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

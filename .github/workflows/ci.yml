@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv --no-config sync --all-groups --locked
+      - run: uv --no-config run pre-commit run --all-files
+      - run: uv --no-config run pytest --cov --cov-report=term-missing
+      - run: uv --no-config run mypy src tests
+
+  package:
+    name: Package distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.12"
+      - run: uv --no-config build
+      - name: Smoke-test wheel
+        run: uv --no-config run --no-project --with ./dist/*.whl drei --version
+        shell: bash
+      - name: Smoke-test source distribution
+        run: uv --no-config run --no-project --with ./dist/*.tar.gz drei --version
+        shell: bash

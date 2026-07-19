@@ -1,0 +1,71 @@
+[project]
+name = "drei"
+version = "0.1.0"
+description = "An Emacs-like editor designed for autonomous, verifiable development."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Matthias Hölzl", email = "tc@xantira.com" },
+]
+keywords = ["editor", "emacs", "terminal", "tui", "agents"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Editors",
+]
+dependencies = []
+
+[project.scripts]
+drei = "drei.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.0",
+    "mypy>=1.0",
+    "pre-commit>=4.0",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.11",
+    "uv-build==0.11.29",
+]
+
+[build-system]
+requires = ["uv_build==0.11.29"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "integration: tests crossing process or adapter boundaries",
+    "termverify: end-to-end tests driven through TermVerify",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["drei"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 100
+precision = 2
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+files = ["src", "tests"]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
