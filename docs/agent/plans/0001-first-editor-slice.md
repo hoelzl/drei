@@ -1,16 +1,16 @@
 # First editor vertical slice
 
-**Status:** gated by the live-state architecture spike in `../design/0002-live-editor-state-architecture-spike.md`
+**Status:** ready — architecture gate accepted by `../design/0002-live-editor-state-architecture-spike.md`
 
-**Goal:** After the architecture gate is accepted, edit and render one in-memory buffer through the same semantic path used by a terminal entry point and an in-process verification harness.
+**Goal:** Edit and render one in-memory buffer through the same semantic path used by a terminal entry point and an in-process verification harness.
 
 ## Architecture gate
 
-Before production editor types are introduced, complete `spikes/001-editor-state-architecture/` and record the selected live-model design in an accepted design record. The spike must exercise identity, shared buffers/windows, moving markers, undo, structured modes, asynchronous input, extension references, immutable observations, replay, and realistic edit/history costs.
+Accepted. The three experiments under `spikes/001-editor-state-architecture/` select hybrid ownership: stable live identities around owner-controlled values, immutable command/event/observation evidence, explicit external delivery, and atomic command rollback.
 
-Do not name a one-buffer observation `EditorState`; use vocabulary from design 0002. The implementation plan below remains provisional until the spike determines whether the production live model is persistent, controlled-mutable, or hybrid.
+Do not name a one-buffer observation `EditorState`; use the vocabulary and ownership invariants from design 0002. Text storage remains a slice-local measured decision rather than being copied from the disposable chunk experiment.
 
-## Provisional sequence after the gate
+## Sequence
 
 1. Define the smallest production buffer and point contract justified by the spike.
 2. Define insertion and horizontal movement one behavior at a time; commands produce explicit immutable event and observation records regardless of live-model mutability.
@@ -28,4 +28,4 @@ The architecture gate is accepted; the full quality gate passes on Python 3.12-3
 
 ## Deferred
 
-Files, kill ring, minibuffer, multiple buffers/windows, modes, syntax highlighting, and extensions remain later production slices, but the architecture spike must represent their state/identity demands before the first slice commits the core model.
+Files, kill ring, minibuffer, multiple buffers/windows, modes, syntax highlighting, and extensions remain later production slices. The completed architecture spike represents their state and identity demands; each production slice must still prove its own concrete behavior.
