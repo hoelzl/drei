@@ -40,7 +40,7 @@ uv --no-config sync --all-groups --locked
 uv --no-config run pytest --cov --cov-report=term-missing
 uv --no-config run ruff check .
 uv --no-config run ruff format --check .
-uv --no-config run mypy src tests spikes/001-editor-state-architecture/experiment.py
+uv --no-config run mypy src tests spikes/001-editor-state-architecture
 uv --no-config run pre-commit run --all-files
 uv --no-config run pre-commit run --hook-stage pre-push --all-files
 uv --no-config build

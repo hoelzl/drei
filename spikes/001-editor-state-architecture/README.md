@@ -1,6 +1,6 @@
 # 001: Live editor state architecture
 
-**Status:** in progress — preliminary experiment complete, no verdict yet
+**Status:** in progress — two experiments complete, no verdict yet
 
 ## Question
 
@@ -37,13 +37,13 @@ Recursive://Neon's living implementation supplies additional candidate cases: mu
 | 1 | Given a large line table and retained history, when localized edits run, then report elapsed, current traced, and peak traced allocations without treating them as a portable storage verdict | Implemented preliminarily for persistent and controlled mutable |
 | 2 | Given two windows sharing one buffer, when edits cross both points, then both points track correctly and independently | Implemented preliminarily |
 | 3 | Given extension-held references, when the buffer changes, then characterize direct references versus stable-handle resolution | Implemented preliminarily |
-| 4 | Given markers and overlays with left/right insertion affinity, when edits hit boundaries, then all ranges remain valid | Markers partial; overlays pending |
-| 5 | Given grouped edits and undo/redo, when history branches, then semantics and memory remain tractable | Pending |
+| 4 | Given markers and overlays with left/right insertion affinity, when edits hit boundaries, then all ranges remain valid | Markers in experiment 1; overlay boundary affinity in experiment 2 |
+| 5 | Given grouped edits and undo/redo, when history branches, then semantics remain equal and replayable | Implemented in experiment 2; large-history cost remains pending |
 | 6 | Given a Dired-like buffer backed by entries, when the provider changes, then model identity and generated text stay coherent | Pending |
-| 7 | Given timestamped process output, when delivery is replayed, then live behavior and immutable observations agree | Pending |
-| 8 | Given mode-local data and incremental invalidation, when extensions retain references, then updates remain localized and deterministic | Pending |
-| 9 | Given a mail/news-like model with stable message identity and asynchronous delivery, when generated views refresh, then selection, unread state, and extension references remain coherent | Pending |
-| 10 | Given stable identity shells over persistent text/history roots, when equivalent edits run, then compare the distinct hybrid ownership model | Pending |
+| 7 | Given sequence-stamped process output, when delivery is replayed, then live behavior, immutable events, and observations agree | Implemented in experiment 2 |
+| 8 | Given mode-local data and incremental invalidation, when extensions retain references, then updates remain localized and deterministic | Invalidation implemented in experiment 2; mode-local extension data pending |
+| 9 | Given a mail/news-like model with stable message identity and asynchronous delivery, when generated views refresh, then selection, unread state, and extension references remain coherent | Implemented minimally in experiment 2; realistic provider scale pending |
+| 10 | Given stable identity shells over persistent text/history roots, when equivalent edits run, then compare the distinct hybrid ownership model | Implemented semantically in experiment 2; large-workload cost pending |
 
 ## Running the preliminary experiment
 
@@ -68,7 +68,29 @@ This result is deliberately **not** a verdict. The persistent prototype copies a
 
 ## Next experiment
 
-Implement grouped branching undo plus overlay boundaries in both models, add the distinct hybrid identity-shell/persistent-root model, then replay a deterministic process-output schedule and a mail-like delivery/refresh schedule through the same command boundary. This tests whether controlled mutation preserves replay discipline and whether structural sharing avoids the preliminary cost without pushing pervasive handle resolution into extension code.
+The planned second experiment is now implemented:
+
+```bash
+uv --no-config run python spikes/001-editor-state-architecture/experiment2.py
+```
+
+It executes the same nine accepted actions against fully persistent, controlled-mutable, and hybrid adapters. The scenario performs a grouped edit, moves an overlay with explicit boundary affinity, delivers process output, selects and marks a message read before refreshing that same stable message ID, creates two undo branches, selects both redo branches, rejects negative and out-of-range branch selectors, rolls back a valid insertion followed by a duplicate external sequence in the same transaction, and replays every accepted action from a fresh model.
+
+All three adapters produced directly equal complete observation streams and event records at every accepted step; each adapter's fresh replay reproduced its original stream. The history contained five nodes and two children at the process-output branch point. The final alternative branch retained overlay range `(4, 6)`, process output, stable mail IDs, selection, and unread state. The failed mixed transaction restored semantic state, history position, event stream, and each architecture's intended identity boundary.
+
+| Model | Live identity behavior | History/evidence behavior | Experiment-specific pressure |
+| --- | --- | --- | --- |
+| Fully persistent | Direct values became stale; buffer and overlay handles resolved current values | History nodes reused immutable roots directly | 22 whole-root replacements and handle indirection |
+| Controlled mutable | Buffer and overlay object references remained current, including across restore | Each history/evidence boundary materialized an immutable snapshot | 19 in-place operations and 23 snapshot materializations; restore required identity-preserving reconciliation |
+| Hybrid | Buffer identity shell remained current; overlay ID resolved within the current value root | History reused immutable domain roots while live shells retained identity | 13 text-root and 15 mail-root replacements; two ownership disciplines must remain explicit |
+
+The sub-millisecond differences between adapters are not performance evidence: this scenario is deliberately tiny, tracemalloc and interpreter noise dominate, and all adapters share the same history driver. The useful result is semantic and architectural: deterministic replay and immutable evidence worked with controlled mutation, while the hybrid preserved stable top-level identity without requiring a fully persistent whole-editor root.
+
+## Current finding
+
+All three models remain feasible. Whole-editor persistence is no longer justified merely by replay or verification: the other models produced identical evidence. Controlled mutation offers the most direct extension references but makes atomic rollback and identity-preserving restoration explicit implementation obligations. The hybrid currently offers the strongest balance—stable live identities with immutable, shareable domain values—but this is a **leading hypothesis**, not a decision.
+
+The next risk-reducing experiment should combine the large edit/history workload with a structurally shared hybrid text root, then add a Dired-like provider refresh and mode-local extension object. Until that work is complete, the architecture gate remains open.
 
 ## Verdict: PENDING
 
