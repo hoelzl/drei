@@ -68,6 +68,12 @@ def test_width_zero() -> None:
     assert frame.cursor == (0, 0)
 
 
+def test_height_two_has_no_body() -> None:
+    frame = render(obs("hello", 5), width=10, height=2)
+    assert frame.rows == ("Drei: scra", "          ")
+    assert frame.cursor == (0, 0)
+
+
 def test_echo_area_reflects_quit() -> None:
     frame = render(obs("", 0), width=10, height=4, echo="Quit")
     assert frame.rows == (

@@ -70,5 +70,5 @@ def _cursor_position(
             return (min(row, body_height - 1), col)
         remaining -= line_len + 1
 
-    # Point is past all lines; clamp to last body row
-    return (body_height - 1, 0)
+    # Unreachable: point <= len(text) always lands inside some line.
+    return (body_height - 1, 0)  # pragma: no cover

@@ -57,11 +57,9 @@ class EditorSession:
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
 
-        try:
-            self.buffer.replace(new_value)
-        except ValueError:
-            self.buffer.replace(current)
-            raise
+        # Validation happens in BufferValue.__post_init__ before any
+        # mutation, so command failure is atomic by construction.
+        self.buffer.replace(new_value)
 
         self._transcript.extend(events)
         observation = BufferObservation(
