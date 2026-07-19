@@ -30,7 +30,7 @@ jobs:
       - run: uv --no-config sync --all-groups --locked
       - run: uv --no-config run pre-commit run --all-files
       - run: uv --no-config run pytest --cov --cov-report=term-missing
-      - run: uv --no-config run mypy src tests
+      - run: uv --no-config run mypy src tests spikes/001-editor-state-architecture/experiment.py
 
   package:
     name: Package distributions

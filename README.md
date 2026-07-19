@@ -6,7 +6,7 @@ Drei follows Eine ("Eine Is Not Emacs") and Zwei ("Zwei Was Eine Initially"), ed
 
 ## Status
 
-Bootstrap only. The package identity is executable; editor behavior starts with the vertical slice in `docs/agent/plans/0001-first-editor-slice.md`.
+Bootstrap only. Before production editor behavior begins, the active architecture spike in `spikes/001-editor-state-architecture/` is stress-testing persistent, controlled-mutable, and hybrid live models. The first vertical slice in `docs/agent/plans/0001-first-editor-slice.md` is gated on that decision.
 
 ## Setup
 
@@ -26,7 +26,7 @@ See `CONTRIBUTING.md`, `AGENTS.md`, and `docs/knowledge/index.md` before changin
 
 ## Direction
 
-The implementation starts from a pure, deterministic editing core and exposes the same behavior through an in-process harness and a terminal frontend. Tests progress from unit/property contracts to replayable scenarios and TermVerify-driven end-to-end evidence. GNU Emacs differential tests are selective and explicit; intentional Drei behavior remains possible.
+Drei will expose deterministic command execution and immutable semantic evidence through an in-process harness and a terminal frontend. The architecture spike is deciding whether the authoritative live model should be persistent, controlled-mutable, or hybrid; determinism is required, whole-model immutability is not assumed. Tests progress from unit/property contracts to replayable scenarios and TermVerify-driven end-to-end evidence. GNU Emacs differential tests are selective and explicit; intentional Drei behavior remains possible.
 
 ## License
 

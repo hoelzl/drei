@@ -27,7 +27,7 @@ repos:
 
       - id: type-check
         name: type check
-        entry: uv --no-config run mypy src tests
+        entry: uv --no-config run mypy src tests spikes/001-editor-state-architecture/experiment.py
         language: system
         pass_filenames: false
         stages: [pre-push]

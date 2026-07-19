@@ -26,7 +26,7 @@ Drei ("Drei Resembles Emacs Intentionally") is an Emacs-like terminal editor and
 - Use strict TDD for every behavior change: focused failing test, observed expected failure, minimum implementation, focused pass, then wider gates.
 - Build vertical behavior slices; do not create speculative framework layers.
 - Keep editor semantics deterministic and independent of terminal, clock, randomness, filesystem, environment, and network. Inject effects through explicit ports.
-- Prefer immutable state plus explicit commands/events where practical. Public construction paths must enforce invariants.
+- Prefer immutable commands, event records, observation records, and configuration values. Do not assume the live editor model is immutable; follow the architecture decision and spike in `docs/agent/design/0002-live-editor-state-architecture-spike.md`.
 - Treat terminal output as evidence, not the only oracle. Test semantic state directly and prove the shipped TUI separately.
 - TermVerify is the preferred interactive verification boundary. If Drei needs evidence TermVerify cannot capture, first reduce it to a concrete test; then file or fix a TermVerify issue under that project's conventions.
 - GNU Emacs is a behavioral reference, not an unquestioned specification. Each differential scenario must state whether parity is required or a Drei deviation is intentional.
@@ -40,7 +40,7 @@ uv --no-config sync --all-groups --locked
 uv --no-config run pytest --cov --cov-report=term-missing
 uv --no-config run ruff check .
 uv --no-config run ruff format --check .
-uv --no-config run mypy src tests
+uv --no-config run mypy src tests spikes/001-editor-state-architecture/experiment.py
 uv --no-config run pre-commit run --all-files
 uv --no-config run pre-commit run --hook-stage pre-push --all-files
 uv --no-config build
