@@ -50,3 +50,28 @@ jobs:
       - name: Smoke-test source distribution
         run: uv --no-config run --no-project --with ./dist/*.tar.gz drei --version
         shell: bash
+
+  parity:
+    name: Editor parity (pinned GNU Emacs)
+    # Pinned runner image (not -latest) so distro emacs-nox stays at a known
+    # version: GNU Emacs 29.3 on Ubuntu 24.04. Bump deliberately and
+    # re-validate the differential scenario when moving the pin.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install pinned Emacs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y emacs-nox
+          emacs --version | head -1
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: "0.11.29"
+          python-version: "3.13"
+      - run: uv --no-config sync --all-groups --locked
+      - name: Run differential scenarios
+        env:
+          DREI_PARITY: "1"
+        run: uv --no-config run pytest tests/differential -q

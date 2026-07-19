@@ -1,6 +1,6 @@
 # First editor vertical slice
 
-**Status:** ready — architecture gate accepted by `../design/0002-live-editor-state-architecture-spike.md`
+**Status:** implemented — semantic path, harness, terminal frontend with TermVerify ConPTY evidence (Windows), and pinned Emacs differential complete
 
 **Goal:** Edit and render one in-memory buffer through the same semantic path used by a terminal entry point and an in-process verification harness.
 
@@ -19,7 +19,7 @@ Do not name a one-buffer observation `EditorState`; use the vocabulary and owner
 5. Resolve printable keys plus `C-f`, `C-b`, and `C-g` into semantic commands.
 6. Add an in-process session harness that sends keys and exposes observations plus frames from the production command path.
 7. Add the minimal raw terminal frontend with explicit startup/input readiness markers and clean exit.
-8. Drive the shipped frontend through TermVerify on Windows and Linux. Preserve transcript/replay evidence and reduce any unsupported observation to a minimal TermVerify issue or fix.
+8. Drive the shipped frontend through TermVerify on Windows (ConPTY; Linux evidence arrives with a TermVerify POSIX adapter). Preserve transcript/replay evidence and reduce any unsupported observation to a minimal TermVerify issue or fix.
 9. Add one pinned GNU Emacs differential scenario for startup, insertion, and horizontal movement; explicitly classify every difference.
 
 ## Acceptance
