@@ -52,6 +52,13 @@ def decode_key(char: str) -> str:
     return control.get(char, char)
 
 
+# TermVerify subject-cooperation readiness marker (OSC 7791;ready ST). The
+# subject emits it after startup and after processing each input so the
+# verifier can detect quiescence without sleeps. A compliant screen model
+# does not render the unknown OSC sequence, so it is invisible in frames.
+READINESS_MARKER = "\x1b]7791;ready\x1b\\"
+
+
 def run_editor(port: TerminalPort) -> None:
     """Run the editor loop over an explicit terminal port."""
     port.write("DREI:READY\n")
@@ -64,21 +71,28 @@ def run_editor(port: TerminalPort) -> None:
         while True:
             key = decode_key(port.read_key())
             harness.send(key)
-            _write_frame(port, harness)
-            if harness.outcomes and any(
+            quit_requested = harness.outcomes and any(
                 isinstance(e, KeyboardQuitEvent) for e in harness.outcomes[-1].events
-            ):
+            )
+            # On quit the run ends: quiescence is the process exit itself, so
+            # the final frame carries no readiness marker.
+            _write_frame(port, harness, mark_ready=not quit_requested)
+            if quit_requested:
                 return
     finally:
         port.restore()
 
 
-def _write_frame(port: TerminalPort, harness: EditorHarness) -> None:
+def _write_frame(
+    port: TerminalPort, harness: EditorHarness, *, mark_ready: bool = True
+) -> None:
     frame = harness.frame
     port.write(_CLEAR_SCREEN)
     port.write("\r\n".join(frame.rows))
     row, col = frame.cursor
     port.write(f"\x1b[{row + 1};{col + 1}H")
+    if mark_ready:
+        port.write(READINESS_MARKER)
     port.flush()
 
 

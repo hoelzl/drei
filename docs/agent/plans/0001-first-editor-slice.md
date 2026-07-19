@@ -1,6 +1,6 @@
 # First editor vertical slice
 
-**Status:** implemented — semantic path, harness, terminal frontend, and pinned Emacs differential complete; TermVerify terminal evidence deferred until TermVerify's publishing workflow lands (see `../../developer-guide/development.md` → External evidence tools)
+**Status:** implemented — semantic path, harness, terminal frontend with TermVerify ConPTY evidence (Windows), and pinned Emacs differential complete
 
 **Goal:** Edit and render one in-memory buffer through the same semantic path used by a terminal entry point and an in-process verification harness.
 

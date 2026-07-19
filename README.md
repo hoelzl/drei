@@ -6,7 +6,7 @@ Drei follows Eine ("Eine Is Not Emacs") and Zwei ("Zwei Was Eine Initially"), ed
 
 ## Status
 
-First vertical slice: edit and render one in-memory buffer through a single production command path shared by the `drei` terminal executable and an in-process harness (`drei.harness.EditorHarness`). Supported commands: insert printable text, `C-f`/`C-b` horizontal movement with bounds clamping, and `C-g` clean exit. Immutable command, event, observation, and frame records cross the session boundary; a pinned GNU Emacs differential scenario guards semantic parity for insertion and horizontal movement. Files, undo, kill ring, minibuffer, multiple buffers/windows, modes, and extensions remain deferred.
+First vertical slice: edit and render one in-memory buffer through a single production command path shared by the `drei` terminal executable and an in-process harness (`drei.harness.EditorHarness`). Supported commands: insert printable text, `C-f`/`C-b` horizontal movement with bounds clamping, and `C-g` clean exit. Immutable command, event, observation, and frame records cross the session boundary. The shipped executable is proven end to end by TermVerify ConPTY scenarios on Windows, and a pinned GNU Emacs differential scenario guards semantic parity for insertion and horizontal movement. Files, undo, kill ring, minibuffer, multiple buffers/windows, modes, and extensions remain deferred.
 
 ## Setup
 
