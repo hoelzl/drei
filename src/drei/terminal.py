@@ -74,6 +74,12 @@ def run_editor(port: TerminalPort) -> None:
             quit_requested = outcome is not None and any(
                 isinstance(e, KeyboardQuitEvent) for e in outcome.events
             )
+            if outcome is None:
+                # Unresolved key: state did not change, so skip the frame
+                # rewrite but still mark quiescence for this input.
+                port.write(READINESS_MARKER)
+                port.flush()
+                continue
             # On quit the run ends: quiescence is the process exit itself, so
             # the final frame carries no readiness marker.
             _write_frame(port, harness, mark_ready=not quit_requested)

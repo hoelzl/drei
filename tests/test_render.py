@@ -86,6 +86,14 @@ def test_delete_and_c1_controls_are_sanitized() -> None:
     assert frame.rows[0].startswith("x^?")
 
 
+def test_cursor_column_accounts_for_sanitized_expansion() -> None:
+    # 'A\x01B' renders as 'A^AB' (control char expands to two cells), so a
+    # point after the control char must map to the *rendered* column.
+    frame = render(obs("A\x01B", 3), width=20, height=4)
+    assert frame.rows[0].startswith("A^AB")
+    assert frame.cursor == (0, 4)  # past 'A^AB', not raw index 3
+
+
 def test_height_two_has_no_body() -> None:
     frame = render(obs("hello", 5), width=10, height=2)
     assert frame.rows == ("Drei: scra", "          ")

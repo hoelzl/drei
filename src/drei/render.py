@@ -88,7 +88,11 @@ def _cursor_position(
     for row, line in enumerate(lines):
         line_len = len(line)
         if remaining <= line_len:
-            col = min(remaining, width - 1) if width > 0 else 0
+            # Map the point through sanitization: control characters expand
+            # to caret notation, so the cursor column is the *rendered*
+            # column of the text before point.
+            rendered_col = len(_sanitize(line[:remaining]))
+            col = min(rendered_col, width - 1)
             return (min(row, body_height - 1), col)
         remaining -= line_len + 1
 

@@ -57,6 +57,19 @@ def test_editor_restores_on_exception() -> None:
     assert port.restored
 
 
+def test_unresolved_key_marks_quiescence_without_frame_rewrite() -> None:
+    # DEL is not bound to any command; the loop must still emit the
+    # readiness marker (quiescence) but must not rewrite the frame.
+    port = FakePort(["\x7f", "\x07"])
+    run_editor(port)
+    written = "".join(port.outputs)
+    # Two markers: one after the initial frame, one after the unresolved key.
+    assert written.count("\x1b]7791;ready\x1b\\") == 2
+    # Two frame rewrites: the initial frame and the final C-g quit frame.
+    # The unresolved key in between triggers no rewrite of its own.
+    assert written.count("\x1b[2J\x1b[H") == 2
+
+
 def test_cli_rejects_non_tty(capsys: pytest.CaptureFixture[str]) -> None:
     from drei.cli import main
 
