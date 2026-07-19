@@ -13,7 +13,9 @@ htmlcov/
 
 # Environments and harness-local state
 .venv/
-.hermes/
+.hermes/*
+!.hermes/plans/
+!.hermes/plans/**
 .claude/settings.local.json
 
 # Editors and operating systems
