@@ -70,9 +70,9 @@ def run_editor(port: TerminalPort) -> None:
         _write_frame(port, harness)
         while True:
             key = decode_key(port.read_key())
-            harness.send(key)
-            quit_requested = harness.outcomes and any(
-                isinstance(e, KeyboardQuitEvent) for e in harness.outcomes[-1].events
+            outcome = harness.send(key)
+            quit_requested = outcome is not None and any(
+                isinstance(e, KeyboardQuitEvent) for e in outcome.events
             )
             # On quit the run ends: quiescence is the process exit itself, so
             # the final frame carries no readiness marker.

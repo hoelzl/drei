@@ -68,6 +68,24 @@ def test_width_zero() -> None:
     assert frame.cursor == (0, 0)
 
 
+def test_control_characters_are_sanitized() -> None:
+    # Escape sequences must never reach the terminal through buffer text:
+    # C0 controls render as caret notation, per Emacs convention.
+    frame = render(obs("A\x1b[2JB", 6), width=20, height=4)
+    for row in frame.rows:
+        assert "\x1b" not in row
+    assert frame.rows[0].startswith("A^[")
+    assert "B" in frame.rows[0]
+
+
+def test_delete_and_c1_controls_are_sanitized() -> None:
+    frame = render(obs("x\x7f\x9by", 4), width=20, height=4)
+    for row in frame.rows:
+        assert "\x7f" not in row
+        assert "\x9b" not in row
+    assert frame.rows[0].startswith("x^?")
+
+
 def test_height_two_has_no_body() -> None:
     frame = render(obs("hello", 5), width=10, height=2)
     assert frame.rows == ("Drei: scra", "          ")

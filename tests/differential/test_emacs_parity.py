@@ -56,7 +56,7 @@ def _drei_observation() -> NormalizedObservation:
 
 
 def _parse_emacs_output(output: str) -> NormalizedObservation:
-    match = _OBSERVATION_RE.search(output)
+    match = _OBSERVATION_RE.fullmatch(output.strip())
     assert match is not None, f"unparseable Emacs output: {output!r}"
     # Emacs point is 1-based; normalize to Drei's 0-based point.
     return NormalizedObservation(text=match.group(2), point=int(match.group(1)) - 1)
@@ -98,7 +98,14 @@ def _run_emacs_in_pinned_container() -> str:
     assert version_line.startswith(PINNED_VERSION_PREFIX), (
         f"pinned Emacs version drifted: {version_line!r}"
     )
-    return "\n".join(lines[1:])
+    # Select the observation line by content, not position: apt/dpkg notices
+    # or shell warnings must never be parsed as the baseline.
+    observation_lines = [line for line in lines[1:] if _OBSERVATION_RE.search(line)]
+    assert len(observation_lines) == 1, (
+        f"expected exactly one observation line, got {observation_lines!r} "
+        f"in output {lines!r}"
+    )
+    return observation_lines[0]
 
 
 def _run_emacs_on_host(emacs: str) -> str:

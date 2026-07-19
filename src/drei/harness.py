@@ -22,16 +22,18 @@ class EditorHarness:
         self._echo = ""
         self._frame = self._render_frame()
 
-    def send(self, key: str) -> None:
+    def send(self, key: str) -> CommandOutcome | None:
+        """Dispatch one symbolic key; return its outcome, or None if unresolved."""
         resolved = resolve(key)
         if isinstance(resolved, UnresolvedKey):
             self._unresolved.append(resolved)
-            return
+            return None
         outcome = self._session.dispatch(resolved)
         self._outcomes.append(outcome)
         if any(isinstance(e, KeyboardQuitEvent) for e in outcome.events):
             self._echo = "Quit"
         self._frame = self._render_frame()
+        return outcome
 
     @property
     def observation(self) -> BufferObservation:

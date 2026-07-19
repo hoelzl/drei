@@ -20,8 +20,12 @@ class BufferValue:
 
 class Buffer:
     def __init__(self, buffer_id: BufferId, initial: BufferValue) -> None:
-        self.buffer_id = buffer_id
+        self._buffer_id = buffer_id
         self._current = initial
+
+    @property
+    def buffer_id(self) -> BufferId:
+        return self._buffer_id
 
     @property
     def current(self) -> BufferValue:

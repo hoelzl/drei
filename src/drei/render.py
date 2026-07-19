@@ -38,8 +38,30 @@ def render(
 def _clip(text: str, width: int) -> str:
     if width == 0:
         return ""
-    clipped = text[:width]
+    clipped = _sanitize(text)[:width]
     return clipped.ljust(width)
+
+
+def _sanitize(text: str) -> str:
+    """Replace control characters with caret notation (Emacs convention).
+
+    The frame is written verbatim to the terminal; raw C0/C1 bytes would
+    allow escape-sequence injection (screen clear, OSC hyperlinks, clipboard
+    exfiltration) from buffer text into the controlling terminal. Newlines
+    never reach this function: body rendering splits on them first.
+    """
+    out = []
+    for char in text:
+        code = ord(char)
+        if code < 0x20:
+            out.append("^" + chr(code + 0x40))
+        elif code == 0x7F:
+            out.append("^?")
+        elif 0x80 <= code <= 0x9F:
+            out.append("^" + chr(code - 0x40))
+        else:
+            out.append(char)
+    return "".join(out)
 
 
 def _render_body(text: str, width: int, body_height: int) -> tuple[str, ...]:

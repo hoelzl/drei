@@ -14,8 +14,25 @@ from drei.commands import (
 
 
 def test_records_are_frozen() -> None:
-    with pytest.raises(AttributeError):
-        InsertText("x").text = "y"  # type: ignore[misc]
+    records = [
+        (InsertText("x"), "text"),
+        (ForwardChar(), None),
+        (BackwardChar(), None),
+        (KeyboardQuit(), None),
+        (TextInserted("x", 0, 1), "text"),
+        (PointMoved(1, 1), "requested"),
+        (KeyboardQuitEvent(), None),
+        (BufferObservation("scratch", "x", 1), "text"),
+        (CommandOutcome((), BufferObservation("scratch", "", 0)), "events"),
+    ]
+    for record, field in records:
+        if field is not None:
+            with pytest.raises(AttributeError):
+                setattr(record, field, None)
+        # Frozen dataclasses with slots reject new attributes too (the exact
+        # exception type varies by CPython version).
+        with pytest.raises((AttributeError, TypeError)):
+            record.other = None  # type: ignore[attr-defined]
 
 
 def test_structural_equality() -> None:
