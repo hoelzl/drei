@@ -6,7 +6,7 @@ Drei follows Eine ("Eine Is Not Emacs") and Zwei ("Zwei Was Eine Initially"), ed
 
 ## Status
 
-Bootstrap only. The completed architecture spike in `spikes/001-editor-state-architecture/` selected hybrid live-model ownership, and the first production vertical slice in `docs/agent/plans/0001-first-editor-slice.md` is ready to begin.
+First vertical slice: edit and render one in-memory buffer through a single production command path shared by the `drei` terminal executable and an in-process harness (`drei.harness.EditorHarness`). Supported commands: insert printable text, `C-f`/`C-b` horizontal movement with bounds clamping, and `C-g` clean exit. Immutable command, event, observation, and frame records cross the session boundary; a pinned GNU Emacs differential scenario guards semantic parity for insertion and horizontal movement. Files, undo, kill ring, minibuffer, multiple buffers/windows, modes, and extensions remain deferred.
 
 ## Setup
 

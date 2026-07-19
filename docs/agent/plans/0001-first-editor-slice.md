@@ -1,6 +1,6 @@
 # First editor vertical slice
 
-**Status:** ready — architecture gate accepted by `../design/0002-live-editor-state-architecture-spike.md`
+**Status:** implemented — semantic path, harness, terminal frontend, and pinned Emacs differential complete; TermVerify terminal evidence deferred until TermVerify's publishing workflow lands (see `../../developer-guide/development.md` → External evidence tools)
 
 **Goal:** Edit and render one in-memory buffer through the same semantic path used by a terminal entry point and an in-process verification harness.
 

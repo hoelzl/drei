@@ -15,7 +15,17 @@ Run the commands in `AGENTS.md`. The pre-commit stage stays fast (Ruff); pre-pus
 ## External evidence tools
 
 - **TermVerify** is not yet a dev dependency; its publishing workflow is still being set up. Terminal evidence is currently limited to the fake-port tests in `tests/test_terminal.py` plus the `DREI:READY` readiness marker in `drei.terminal.run_editor`, which is the seam TermVerify scenarios will drive. Once TermVerify is published, add it to the dev group, author scenarios under `tests/termverify/`, and record the verified invocation here.
-- **GNU Emacs** differential scenarios are pinned to a known version via a pinned CI runner image (`ubuntu-24.04` + `emacs-nox`, GNU Emacs 29.x) or an equivalent container locally; they never rely on an arbitrary host installation. Locally without Emacs, differential tests skip rather than fail.
+- **GNU Emacs** differential scenarios are pinned to a known version via a pinned CI runner image (`ubuntu-24.04` + `emacs-nox`, GNU Emacs 29.x) or an equivalent container locally; they never rely on an arbitrary host installation. Locally without Emacs, differential tests skip rather than fail. Run the differential tier explicitly with:
+
+```bash
+DREI_PARITY=1 uv --no-config run pytest tests/differential -q
+```
+
+## Verified commands
+
+- Direct semantic evidence: `uv --no-config run pytest --cov --cov-report=term-missing`
+- Shipped-terminal evidence: `uv --no-config run drei` in a real TTY (writes `DREI:READY`, exits cleanly on `C-g`); automated TermVerify scenarios pending the TermVerify dependency.
+- Differential evidence: `DREI_PARITY=1 uv --no-config run pytest tests/differential -q` (requires Docker or a pinned 29.x host `emacs`).
 
 ## Coverage ratchet
 
