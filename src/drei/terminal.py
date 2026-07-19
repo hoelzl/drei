@@ -179,7 +179,9 @@ class SystemTerminalPort(TerminalPort):
         def _restore_posix(self) -> None:  # pragma: no cover
             import termios
 
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._saved)
+            saved = self._saved
+            assert isinstance(saved, list)
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
 
     if sys.platform == "win32":
 
