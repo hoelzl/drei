@@ -1,6 +1,8 @@
 # 0001: Agent-first deterministic editor foundation
 
-**Status:** accepted
+**Status:** amended by `0002-live-editor-state-architecture-spike.md`
+
+Design 0002 withdraws one implication of this foundation: a deterministic core does not, by itself, require a fully immutable live editor model. The command boundary, explicit effects, immutable evidence, TDD, and shared production semantics remain accepted.
 
 ## Decision
 

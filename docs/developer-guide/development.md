@@ -6,7 +6,7 @@ Run the commands in `AGENTS.md`. The pre-commit stage stays fast (Ruff); pre-pus
 
 ## Test tiers
 
-- unit: pure state transitions, key resolution, rendering, and normalization;
+- unit: command-boundary model transitions, immutable event/observation values, key resolution, rendering, and normalization; live-model mutation is permitted only as selected by the active architecture decision;
 - property/state-machine: generated command histories and invariants;
 - integration: session or process boundaries;
 - `termverify`: shipped TUI, explicit constraints, readiness, replay evidence;
