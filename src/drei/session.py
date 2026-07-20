@@ -119,7 +119,8 @@ class EditorSession:
         elif events:
             # Only event-emitting commands break the chain. A silent no-op
             # (empty insert) leaves no trace in the transcript, so it must
-            # not intervene — the transcript is the ring's oracle.
+            # not intervene — keeping the chain derivable from the evidence
+            # (modulo capacity eviction, which emits nothing).
             self._last_was_kill = False
 
         # Validation happens in BufferValue.__post_init__ before any

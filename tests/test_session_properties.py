@@ -123,25 +123,38 @@ def test_save_writes_current_text(history: list[object]) -> None:
 
 @given(command_history())
 def test_successful_kill_then_yank_restores_text(history: list[object]) -> None:
-    """Narrowed round trip: a non-empty kill followed by yank restores text."""
+    """Narrowed round trip: a chain-opening kill followed by yank restores text.
+
+    Only a kill that follows a non-kill command arms the check: chained
+    kills append to the same ring entry, so yanking after a chain inserts
+    the whole chain, not just the last kill's text.
+    """
     session = _session()
-    previous_was_nonempty_kill = False
+    armed = False
     pre_kill_text = ""
+    chain_open = False
     for command in history:
-        if previous_was_nonempty_kill and isinstance(command, Yank):
+        if armed and isinstance(command, Yank):
             session.dispatch(command)
             assert session.buffer.current.text == pre_kill_text
-            previous_was_nonempty_kill = False
+            armed = False
+            chain_open = False
             continue
-        previous_was_nonempty_kill = False
+        armed = False
         if isinstance(command, KillLine):
             before = session.buffer.current
             outcome = session.dispatch(command)
             if any(isinstance(e, TextKilled) and e.text for e in outcome.events):
-                previous_was_nonempty_kill = True
-                pre_kill_text = before.text
+                if not chain_open:
+                    armed = True
+                    pre_kill_text = before.text
+                chain_open = True
+            # no-op kill: chain state unchanged
         else:
-            session.dispatch(command)  # type: ignore[arg-type]
+            outcome = session.dispatch(command)  # type: ignore[arg-type]
+            if outcome.events:
+                # Only event-emitting commands break the session's chain.
+                chain_open = False
 
 
 def test_yank_with_empty_ring_changes_nothing() -> None:

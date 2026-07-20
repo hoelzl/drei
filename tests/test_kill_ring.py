@@ -118,8 +118,9 @@ def test_yank_inserts_newest_and_moves_point_past() -> None:
 def test_noop_insert_does_not_break_chain() -> None:
     """Silent no-ops (empty insert) emit no event and do not break the chain.
 
-    The transcript is the ring's oracle: only event-emitting commands
-    intervene in the append chain.
+    Only event-emitting commands intervene in the append chain, so the
+    chain is derivable from the transcript (modulo capacity eviction,
+    which leaves no event and is unobservable this slice).
     """
     session = _session("ab\nc", 0)
     session.dispatch(KillLine())  # kills "ab", chain on
