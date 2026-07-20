@@ -17,6 +17,8 @@
 
 **Design decision (Drei-specified, Emacs-informed):** the mark is **a single optional position on `BufferValue`** (`mark: int | None`, default `None`); a set mark is always active (no separate transient flag). Design 0002's invariant holds: `BufferValue` stays frozen, mutation only via `dispatch`. This is the first non-`None`-default field addition to `BufferValue` since slice 1 — the spike's value-object approach accommodates it (like `modified`/`file_path`).
 
+**Marker adjustment (probed against pinned 29.3, this session):** the mark is an Emacs-style marker — text edits adjust it. Insert `n` chars at `p`: `p < mark` → `mark += n`; `p == mark` → mark stays (Emacs default insertion type keeps it before the inserted text — verified: mark 4, insert "XY" at 4 → mark 4, text "abcXYdef"). Delete `[s, e)`: `mark < s` → unchanged; `mark >= e` → `mark -= e - s`; `s <= mark < e` → `mark = s` (verified: kill-region [1,4) with mark 6 → mark 3). This applies to EVERY text-changing command (InsertText, KillLine, Yank, YankPop, KillRegion) — implemented as one pure helper `_adjust_mark(mark, edit)` in the session, so `__post_init__` validation can never reject an out-of-range mark. `BufferValue.__post_init__` validates `mark is None or 0 <= mark <= len(text)`.
+
 Drei simplification vs Emacs (recorded as intentional deviation where observable): Emacs distinguishes "mark set" from "region active" (transient-mark-mode subtleties, `C-u C-@` mark ring, deactivation on many commands). Drei: `mark is None` = no mark; a set mark is always active; the mark is cleared (set to `None`) by `C-g` and by any successful `kill-region`/`copy-region-as-kill` (Emacs deactivates after both), and by `exchange-point-and-mark`? No — XPM keeps the mark (swaps only). The mark is NOT cleared by motion/insert in this slice (batch can't verify interactive deactivation; simplest deterministic rule; deviation recorded).
 
 ## Scope
@@ -37,12 +39,12 @@ Out of scope: mark ring (`C-u C-@`), transient-mark-mode highlighting (no region
 
 ## Implementation order
 
-1. `BufferValue.mark: int | None = None` + validation (`mark is None or 0 <= mark <= len(text)`); model tests.
-2. Commands + events (TDD): `SetMark`/`MarkSet`; `KillRegion` (region empty → no-op; pushes ring entry; point to kill start; mark cleared); `CopyRegionAsKill`/`RegionCopied`; `ExchangePointAndMark`/`MarkExchanged`.
+1. `BufferValue.mark: int | None = None` + validation (`mark is None or 0 <= mark <= len(text)`); `_adjust_mark` helper covering insert/delete per the probed rule; every text-changing dispatch path applies it; model tests incl. boundary cases (insert at mark, delete spanning mark, delete after mark).
+2. Commands + events (TDD): `SetMark`/`MarkSet`; `KillRegion` (region empty → no-op; pushes NEW ring entry; point to kill start; mark cleared; clears the kill-append chain — a following `C-k` opens a new entry, matching Emacs `last-command` semantics); `CopyRegionAsKill`/`RegionCopied`; `ExchangePointAndMark`/`MarkExchanged`.
 3. Keys: `\x00` → `C-@`, `\x17` → `C-w` in `decode_key`/`_CONTROL_KEYS`; `C-x C-x` in `_PREFIX_COMMANDS`; `M-w` in `_META_KEYS`.
 4. Property tests: strategy, replay, modified arms (KillRegion-with-events → modified; CopyRegionAsKill/SetMark/MarkExchanged do NOT), mark-fold coherence (mark derivable from transcript per the documented fold rule).
 5. TermVerify scenario: `C-@` (via `TextInput("\x00")` — no canonical chord exists; probe recorded above) `C-f C-f C-w` kills a region end-to-end through ConPTY. `M-w` copy — ESC-swallow caveat applies (in-process proof via the byte loop).
-6. Emacs differential: batch eval — insert "hello world", set-mark at 1, forward 5, kill-region → text " world", ring ("hello"), point 1; then copy-region-as-kill round: text unchanged, ring gains entry. Parity required on region text/point/ring-head. Deviations: mark deactivation-on-edit (batch-unverifiable), no-mark errors vs Drei no-ops, mark-ring absence, yank-not-pushing-mark.
+6. Emacs differential: batch eval — insert "hello world", set-mark at 1, forward 5, kill-region → text " world", ring ("hello"), point 1; backward kill pinned by a second eval (mark at 6, point at 1, kill-region → same ring text, point 1); marker adjustment pinned (kill before mark → mark shifts; insert before mark → mark shifts; insert AT mark → mark stays); copy-region-as-kill round: text unchanged, ring gains entry. Parity required on region text/point/ring-head/mark-position. Deviations: mark deactivation-on-edit (batch-unverifiable), no-mark/empty-region errors vs Drei no-ops, mark-ring absence, yank-not-pushing-mark, copy-region-as-kill modified-flag (assumed unchanged — the probe was ambiguous; pinned as Drei rule, recorded).
 7. Docs: README status, registry rows, plan status.
 
 ## Acceptance
