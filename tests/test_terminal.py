@@ -100,6 +100,48 @@ def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
     assert buffer_line.startswith("one")
 
 
+def test_editor_region_commands_through_byte_loop() -> None:
+    """C-@ C-f C-f C-w kills the region in-process; M-w copies; C-x C-x swaps.
+
+    ConPTY cannot deliver C-@ on Windows (msvcrt extended-key prefix —
+    see the skipped TermVerify scenario), so the byte-loop proof lives
+    here, exercising the same decode path the POSIX terminal uses.
+    """
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (40, 10)
+
+    # C-@ C-f C-f C-w kills "he"; C-y restores it; C-@ C-b C-b M-w copies
+    # "he" backward (copy clears the mark — the kill must come first);
+    # C-x C-x without a mark is then a no-op; C-g quits.
+    port = TallPort(
+        [
+            "\x00",
+            "\x06",
+            "\x06",
+            "\x17",  # mark 0 → point 2; kill "he"
+            "\x19",  # yank "he" back at 0 → "hello world", point 2
+            "\x00",
+            "\x02",
+            "\x02",
+            "\x1b",
+            "w",  # mark 2 → point 0; copy "he"
+            "\x18",
+            "\x18",  # C-x C-x: no mark (copy cleared it) → no-op
+            "\x07",
+        ]
+    )
+    run_editor(port, initial_text="hello world")
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    rows = [f.split("\r\n")[0] for f in frames[1:]]  # row 0 = buffer line
+    # After C-w: "llo world"; after C-y: "hello world" again; M-w and
+    # C-x C-x leave the frame unchanged.
+    assert any(r.startswith("llo world") for r in rows)
+    assert rows[-2].startswith("hello world")  # last frame before quit
+    assert rows[-1].startswith("hello world")  # quit frame
+
+
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.
