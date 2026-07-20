@@ -78,11 +78,14 @@ def _frame_lines(observation: Observation) -> tuple[str, ...]:
     return tuple(observation.frame.lines)
 
 
-def _adapter(tmp_path: Path) -> ConptyAdapter:
+def _adapter(tmp_path: Path, argv_file: Path | None = None) -> ConptyAdapter:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir(exist_ok=True)
+    argv = [sys.executable, "-c", "from drei.cli import main; main()"]
+    if argv_file is not None:
+        argv.append(str(argv_file))
     return ConptyAdapter(
-        [sys.executable, "-c", "from drei.cli import main; main()"],
+        argv,
         binding=ConptyBinding(),
         abort_deadline_ms=10_000,
         constraint_ports=CooperationConstraintPorts({"drei-root": str(sandbox)}),
@@ -124,6 +127,47 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
         process = final.observation.process
         assert process is not None
         assert process.state == "exited", process
+
+
+def test_shipped_editor_save_scenario(tmp_path: Path) -> None:
+    """Open a file via CLI arg, edit, C-x C-s, assert content on disk.
+
+    The file lives under the delivered sandbox root and is passed as an
+    absolute CLI path; no TERMVERIFY_FS_ROOT resolution in the subject.
+    """
+    sandbox = tmp_path / "sandbox"
+    target = sandbox / "notes.txt"
+    adapter = _adapter(tmp_path, argv_file=target)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-save-scenario", _configuration())
+        assert type(started) is Started, started
+
+        # Visiting a missing file: empty buffer, modeline shows the basename.
+        initial_lines = _frame_lines(started.observation)
+        assert any("Drei: notes.txt --" in line for line in initial_lines), (
+            initial_lines
+        )
+
+        for char in "hi":
+            inserted = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(inserted) is EpochCompleted, inserted
+
+        # C-x C-s saves through the production key path.
+        pending = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(pending) is EpochCompleted, pending
+        saved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "s")))
+        assert type(saved) is EpochCompleted, saved
+        saved_lines = _frame_lines(saved.observation)
+        assert any("Wrote" in line for line in saved_lines), saved_lines
+        assert any("Drei: notes.txt --" in line for line in saved_lines), saved_lines
+
+        # The file exists on disk with the buffer content.
+        assert target.read_text(encoding="utf-8") == "hi"
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
 def test_shipped_editor_stop_is_clean(tmp_path: Path) -> None:

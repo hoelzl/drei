@@ -49,7 +49,13 @@ class TerminalPort(abc.ABC):
 
 def decode_key(char: str) -> str:
     """Convert a raw input character to a symbolic key name."""
-    control = {"\x06": "C-f", "\x02": "C-b", "\x07": "C-g"}
+    control = {
+        "\x06": "C-f",
+        "\x02": "C-b",
+        "\x07": "C-g",
+        "\x18": "C-x",
+        "\x13": "C-s",
+    }
     return control.get(char, char)
 
 
