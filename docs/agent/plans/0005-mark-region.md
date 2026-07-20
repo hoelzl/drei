@@ -1,6 +1,6 @@
 # Fifth editor slice: mark and region commands
 
-**Status:** ready — architecture gate inherited from design 0002 (the mark is buffer-scoped value state on `BufferValue`; no new ports)
+**Status:** implemented — architecture gate inherited from design 0002 (mark on frozen `BufferValue`; no new ports). Two scope adjustments during implementation: (1) the plan review's B2 — `KillRegion` got its own `RegionKilled` event because reused `TextKilled` made mark state underivable from the transcript; (2) `C-@` turned out undeliverable on the Windows console (msvcrt treats NUL as an extended-key prefix, verified live) — the TermVerify scenario became a documented skip, region evidence is in-process through the same byte loop, and the deviation is registry-recorded. Marker adjustment (plan-review B1) was probed against pinned 29.3 before implementation and is parity-pinned.
 
 **Goal:** Region kill/copy on top of the kill ring: `C-@` (`set-mark-command`) records the mark, `C-w` (`kill-region`) kills point↔mark into the ring, `M-w` (`copy-region-as-kill`) copies without deleting, `C-x C-x` (`exchange-point-and-mark`) swaps point and mark.
 
