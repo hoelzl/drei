@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -316,6 +318,53 @@ def test_decode_key_maps_region_bytes() -> None:
 
     assert decode_key("\x00") == "C-@"
     assert decode_key("\x17") == "C-w"
+
+
+def test_windows_extended_key_pair_is_consumed() -> None:
+    """getwch NUL/E0 prefix + scan code: the pair is consumed, unresolved.
+
+    Pins the msvcrt extended-key handling (the reason C-@ is
+    undeliverable on the Windows console). Only runs where the class has
+    the Windows method (win32); elsewhere the method doesn't exist.
+    """
+    if sys.platform != "win32":
+        pytest.skip("Windows console input path")
+
+    from drei.terminal import SystemTerminalPort
+
+    class _FakeMsvcrt:
+        def __init__(self, chars: list[str]) -> None:
+            self._chars = chars
+
+        def getwch(self) -> str:
+            return self._chars.pop(0)
+
+    read = SystemTerminalPort._read_key_windows  # unbound; needs no state
+    fake = _FakeMsvcrt(["\x00", "H", "a"])  # prefix, scan, then plain 'a'
+    with patch.dict(sys.modules, {"msvcrt": fake}):
+        assert read(None) == "\x00"  # type: ignore[arg-type]  # pair consumed
+        assert fake._chars == ["a"]  # scan code was eaten
+        assert read(None) == "a"  # type: ignore[arg-type]  # plain char passes
+
+
+def test_windows_plain_key_passes_through() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows console input path")
+
+    from drei.terminal import SystemTerminalPort
+
+    class _FakeMsvcrt:
+        def __init__(self, chars: list[str]) -> None:
+            self._chars = chars
+
+        def getwch(self) -> str:
+            return self._chars.pop(0)
+
+    read = SystemTerminalPort._read_key_windows  # unbound; needs no state
+    fake = _FakeMsvcrt(["\xe0", "S", "\x06"])
+    with patch.dict(sys.modules, {"msvcrt": fake}):
+        assert read(None) == "\x00"  # type: ignore[arg-type]  # E0 pair consumed
+        assert read(None) == "\x06"  # type: ignore[arg-type]  # control byte ok
 
 
 def test_decode_key_maps_kill_and_yank() -> None:
