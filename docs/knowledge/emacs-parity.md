@@ -30,11 +30,22 @@ intentional, and every normalization is explicit.
 | --- | --- | --- | --- |
 | startup, insert, backward-char, forward-char (`tests/differential/test_emacs_parity.py`) | empty scratch-like buffer; `insert`, `backward-char`, `forward-char` | Emacs point is 1-based; Drei point is 0-based (`point_emacs - 1 == point_drei`) | parity required |
 | find-file (new), insert, save-buffer (`tests/differential/test_emacs_parity.py`) | `buffer-modified-p` is `t` after `insert`, `nil` after `save-buffer`; file content on disk matches buffer text | same point normalization; Drei drives `SaveBuffer` through the production dispatch path with a fake `FilePort` and asserts content in the fake | parity required |
+| kill-line ×2, yank (`tests/differential/test_emacs_parity.py`) | first `kill-line` kills text to EOL, second kills the newline, `yank` inserts the newest entry leaving point after it | same point normalization; the append chain is an intentional deviation (see below) so Drei's yank restores the full original text while batch Emacs yanks only the newest (unappended) entry | parity required on the non-append pieces (kill-to-EOL text, newline kill, yank-inserts-newest-with-point-after) |
 
 Drei's modified-flag rule is deliberately narrower than Emacs's: any
-`TextInserted` event sets modified; a successful save clears it. Emacs also
-sets the flag on some non-text operations; if a future scenario observes
-drift there, record it as an intentional deviation with rationale.
+text-changing event (`TextInserted`, `TextKilled`, `TextYanked`) sets
+modified; a successful save clears it. Emacs also sets the flag on some
+non-text operations; if a future scenario observes drift there, record it as
+an intentional deviation with rationale.
+
+## Intentional deviations
+
+| Behavior | Drei | Emacs | Rationale |
+| --- | --- | --- | --- |
+| Append-on-consecutive-kill | consecutive `C-k` appends into one ring entry | batch `--eval` does not append (verified against 29.3: `("\n" "ab")`, two entries; even an explicit `(setq last-command 'kill-line)` does not append in batch) | matches *interactive* Emacs `kill-line`; batch-unverifiable, so pinned by unit/property tests instead of the differential |
+| Empty kill at buffer end | silent no-op, no event | signals "End of buffer" (an error) | Drei has no echo-error mechanism yet; recorded here until one exists |
+| `M-y` yank-pop, ring rotation, region kill/copy | not implemented | present | deferred to a later slice (needs mark/region and ring cycling) |
+| Kill-ring capacity | fixed 60 | `kill-ring-max` (default 60, configurable) | configuration is deferred; eviction is unobservable this slice without `M-y` |
 
 ## Rules
 

@@ -55,6 +55,8 @@ def decode_key(char: str) -> str:
         "\x07": "C-g",
         "\x18": "C-x",
         "\x13": "C-s",
+        "\x0b": "C-k",
+        "\x19": "C-y",
     }
     return control.get(char, char)
 

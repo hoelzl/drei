@@ -3,7 +3,9 @@ from drei.commands import (
     ForwardChar,
     InsertText,
     KeyboardQuit,
+    KillLine,
     SaveBuffer,
+    Yank,
 )
 from drei.keys import PendingKey, UnresolvedKey, resolve
 
@@ -18,6 +20,8 @@ def test_control_keys_resolve_to_commands() -> None:
     assert resolve(None, "C-f") == ForwardChar()
     assert resolve(None, "C-b") == BackwardChar()
     assert resolve(None, "C-g") == KeyboardQuit()
+    assert resolve(None, "C-k") == KillLine()
+    assert resolve(None, "C-y") == Yank()
 
 
 def test_cx_enters_pending_state() -> None:

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from drei.commands import BackwardChar, ForwardChar, InsertText
+from drei.commands import BackwardChar, ForwardChar, InsertText, TextKilled
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
 
@@ -37,9 +37,25 @@ EMACS_SAVE_EVAL = (
     ' (message "AFTER MODIFIED=%s" (buffer-modified-p)))'
 )
 
+EMACS_KILL_EVAL = (
+    '(progn (switch-to-buffer (get-buffer-create "drei-kill")) (insert "ab\\ncd")'
+    " (goto-char (point-min))"
+    " (kill-line)"
+    ' (message "R1=%S TEXT=%S" (car kill-ring) (buffer-string))'
+    " (kill-line)"
+    ' (message "R2=%S TEXT=%S" (car kill-ring) (buffer-string))'
+    " (yank)"
+    ' (message "YANKED POINT=%d TEXT=%S" (point) (buffer-string)))'
+)
+
 _OBSERVATION_RE = re.compile(r"POINT=(\d+) TEXT=(.*)")
 _SAVE_BEFORE_RE = re.compile(r"POINT=(\d+) MODIFIED=(t|nil)")
 _SAVE_AFTER_RE = re.compile(r"AFTER MODIFIED=(t|nil)")
+_KILL_R1_RE = re.compile(r'R1="(.+?)" TEXT="(.*?)"\r?\nR2=', re.DOTALL)
+_KILL_R2_RE = re.compile(
+    r'R2="(.*?)" TEXT="(.*?)"\r?\n(?:Mark set\r?\n)?YANKED', re.DOTALL
+)
+_KILL_YANK_RE = re.compile(r'YANKED POINT=(\d+) TEXT="(.*?)"\s*$', re.DOTALL)
 
 PINNED_IMAGE = "ubuntu:24.04"
 PINNED_VERSION_PREFIX = "GNU Emacs 29."
@@ -225,3 +241,60 @@ def test_emacs_differential_save_clears_modified() -> None:
     end = session.buffer.current
     assert end.modified is False
     assert port.files["drei-parity-save.txt"] == "hi"
+
+
+@pytest.mark.integration
+def test_emacs_differential_kill_line_and_yank() -> None:
+    """Kill-line/yank parity: EOL text, newline kill, yank text and point.
+
+    Verdict: parity required on the non-append pieces — kill-to-EOL text,
+    kill-at-EOL kills the newline, yank inserts the newest entry leaving
+    point after it. The append chain is an intentional deviation: batch
+    Emacs does not kill-append consecutive kill-line calls (RING=("\\n" "ab")
+    after two kills), while Drei specifies append-on-consecutive-kill
+    (motivated by interactive Emacs, batch-unverifiable); the chain is
+    pinned by unit/property tests instead.
+    """
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
+
+    lines = _run_pinned_emacs(EMACS_KILL_EVAL)
+    # Kill/yank output contains literal newlines inside quoted strings, so
+    # match against the joined blob instead of per-line. Normalize CRLF.
+    blob = "\n".join(lines).replace("\r\n", "\n")
+    r1 = _KILL_R1_RE.search(blob)
+    r2 = _KILL_R2_RE.search(blob)
+    yank = _KILL_YANK_RE.search(blob)
+    assert r1 is not None and r2 is not None and yank is not None, blob
+
+    # Emacs evidence: first kill takes "ab" leaving "\ncd"; second takes the
+    # newline (batch Emacs pushes it as a SEPARATE entry) leaving "cd"; yank
+    # inserts the newest entry ("\n") leaving point after it.
+    assert r1.group(1) == "ab" and r1.group(2) == "\ncd"
+    assert r2.group(1) == "\n" and r2.group(2) == "cd"
+    assert yank.group(2) == "\ncd"
+    emacs_point_after_yank = int(yank.group(1)) - 1  # 1-based → 0-based
+
+    # Drei drives the same sequence; the append chain means the ring head is
+    # "ab\n" (deviation), so yank restores the full original text.
+    from drei.commands import KillLine, Yank
+
+    session = EditorSession(
+        Buffer(BufferId("drei-kill"), BufferValue(text="ab\ncd", point=0))
+    )
+    o1 = session.dispatch(KillLine())
+    assert TextKilled("ab", 0, 2, "forward") in o1.events
+    assert o1.observation.text == "\ncd"
+
+    o2 = session.dispatch(KillLine())
+    assert TextKilled("\n", 0, 1, "forward") in o2.events
+    assert o2.observation.text == "cd"
+
+    o3 = session.dispatch(Yank())
+    # Parity on yank semantics: newest entry inserted at point, point after.
+    assert o3.observation.text == "ab\ncd"  # Drei yanks the appended "ab\n"
+    assert o3.observation.point == 3
+    # Emacs yanked the 1-char "\n" at point 0 → point 1; same rule, different
+    # ring content (deviation). Verify the rule shape matches.
+    assert emacs_point_after_yank == 1
+    assert o3.observation.point == 0 + len("ab\n")

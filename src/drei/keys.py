@@ -7,7 +7,9 @@ from drei.commands import (
     ForwardChar,
     InsertText,
     KeyboardQuit,
+    KillLine,
     SaveBuffer,
+    Yank,
 )
 from drei.session import Command
 
@@ -15,6 +17,8 @@ _CONTROL_KEYS: dict[str, Command] = {
     "C-f": ForwardChar(),
     "C-b": BackwardChar(),
     "C-g": KeyboardQuit(),
+    "C-k": KillLine(),
+    "C-y": Yank(),
 }
 
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {

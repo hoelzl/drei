@@ -170,6 +170,51 @@ def test_shipped_editor_save_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_kill_yank_scenario(tmp_path: Path) -> None:
+    """C-k C-k joins lines via the append chain; C-y restores through ConPTY.
+
+    Multi-line content arrives via a file (keys can't insert a newline yet);
+    the file is created host-side under the sandbox before the child starts.
+    """
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    target = sandbox / "lines.txt"
+    target.write_text("ab\ncd", encoding="utf-8")
+    adapter = _adapter(tmp_path, argv_file=target)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-kill-yank", _configuration())
+        assert type(started) is Started, started
+        initial_observation = started.observation
+        assert initial_observation is not None
+        initial_lines = _frame_lines(initial_observation)
+        assert any(line.startswith("ab") for line in initial_lines), initial_lines
+
+        # Point starts at 0: first C-k kills "ab", second kills the newline
+        # (append chain) — the frame shows the joined remainder.
+        killed_lines = initial_lines
+        for _ in range(2):
+            killed = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "k")))
+            assert type(killed) is EpochCompleted, killed
+            killed_observation = killed.observation
+            assert killed_observation is not None
+            killed_lines = _frame_lines(killed_observation)
+        assert any(line.startswith("cd") for line in killed_lines), killed_lines
+
+        # C-y yanks "ab\n" back at point 0.
+        yanked = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "y")))
+        assert type(yanked) is EpochCompleted, yanked
+        yanked_observation = yanked.observation
+        assert yanked_observation is not None
+        yanked_lines = _frame_lines(yanked_observation)
+        assert any(line.startswith("ab") for line in yanked_lines), yanked_lines
+        assert any(line.startswith("cd") for line in yanked_lines), yanked_lines
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_stop_is_clean(tmp_path: Path) -> None:
     """A TermVerify stop after readiness also terminates the run cleanly."""
     adapter = _adapter(tmp_path)
