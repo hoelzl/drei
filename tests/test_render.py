@@ -3,7 +3,7 @@ from drei.render import render
 
 
 def obs(text: str, point: int, buffer_id: str = "scratch") -> BufferObservation:
-    return BufferObservation(buffer_id, text, point)
+    return BufferObservation(buffer_id=buffer_id, text=text, point=point)
 
 
 def test_empty_buffer_frame() -> None:

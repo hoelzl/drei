@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from drei.commands import BackwardChar, ForwardChar, InsertText, KeyboardQuit
+from drei.commands import (
+    BackwardChar,
+    ForwardChar,
+    InsertText,
+    KeyboardQuit,
+    SaveBuffer,
+)
 from drei.session import Command
 
 _CONTROL_KEYS: dict[str, Command] = {
@@ -11,13 +17,37 @@ _CONTROL_KEYS: dict[str, Command] = {
     "C-g": KeyboardQuit(),
 }
 
+_PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
+    ("C-x", "C-s"): SaveBuffer(),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class UnresolvedKey:
     key: str
 
 
-def resolve(key: str) -> Command | UnresolvedKey:
+@dataclass(frozen=True, slots=True)
+class PendingKey:
+    """A key that opened a prefix without completing a command."""
+
+    prefix: str
+
+
+def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingKey:
+    """Resolve one symbolic key, given any pending prefix.
+
+    Pure: the caller (harness) owns the pending value and passes it back in.
+    A pending prefix plus a non-completing key records one ``UnresolvedKey``
+    for the whole ``"<pending> <key>"`` sequence.
+    """
+    if pending is not None:
+        completed = _PREFIX_COMMANDS.get((pending, key))
+        if completed is not None:
+            return completed
+        return UnresolvedKey(f"{pending} {key}")
+    if key == "C-x":
+        return PendingKey("C-x")
     if key in _CONTROL_KEYS:
         return _CONTROL_KEYS[key]
     if len(key) == 1 and key.isprintable():

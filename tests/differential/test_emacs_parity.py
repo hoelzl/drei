@@ -45,7 +45,7 @@ class NormalizedObservation:
 
 
 def _drei_observation() -> NormalizedObservation:
-    session = EditorSession(Buffer(BufferId("scratch"), BufferValue("", 0)))
+    session = EditorSession(Buffer(BufferId("scratch"), BufferValue(text="", point=0)))
     session.dispatch(InsertText("hello"))
     session.dispatch(BackwardChar())
     outcome = session.dispatch(ForwardChar())

@@ -19,6 +19,11 @@ class BackwardChar:
 
 
 @dataclass(frozen=True, slots=True)
+class SaveBuffer:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class KeyboardQuit:
     pass
 
@@ -37,18 +42,40 @@ class PointMoved:
 
 
 @dataclass(frozen=True, slots=True)
+class BufferSaved:
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class SaveFailed:
+    """A save that failed at the file port.
+
+    ``error`` is a normalized, Drei-owned token (``not-found``,
+    ``permission-denied``, ``io-error``), never raw exception text, so
+    replay outcomes and echo text are platform-independent.
+    """
+
+    path: str
+    error: str
+
+
+@dataclass(frozen=True, slots=True)
 class KeyboardQuitEvent:
     pass
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class BufferObservation:
     buffer_id: str
     text: str
     point: int
+    file_path: str | None = None
+    modified: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class CommandOutcome:
-    events: tuple[TextInserted | PointMoved | KeyboardQuitEvent, ...]
+    events: tuple[
+        TextInserted | PointMoved | BufferSaved | SaveFailed | KeyboardQuitEvent, ...
+    ]
     observation: BufferObservation

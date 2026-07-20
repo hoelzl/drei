@@ -26,7 +26,7 @@ def command_history(draw: st.DrawFn) -> list[object]:
 
 @given(command_history())
 def test_point_always_in_bounds(history: list[object]) -> None:
-    session = EditorSession(Buffer(BufferId("scratch"), BufferValue("", 0)))
+    session = EditorSession(Buffer(BufferId("scratch"), BufferValue(text="", point=0)))
     for command in history:
         session.dispatch(command)  # type: ignore[arg-type]
         current = session.buffer.current
@@ -36,7 +36,9 @@ def test_point_always_in_bounds(history: list[object]) -> None:
 @given(command_history())
 def test_replay_produces_identical_evidence(history: list[object]) -> None:
     def run() -> tuple[tuple[object, ...], str, int]:
-        session = EditorSession(Buffer(BufferId("scratch"), BufferValue("", 0)))
+        session = EditorSession(
+            Buffer(BufferId("scratch"), BufferValue(text="", point=0))
+        )
         outcomes = tuple(session.dispatch(c) for c in history)  # type: ignore[arg-type]
         current = session.buffer.current
         return outcomes, current.text, current.point
@@ -50,7 +52,7 @@ def test_replay_produces_identical_evidence(history: list[object]) -> None:
 
 @given(command_history())
 def test_insertion_preserves_existing_text(history: list[object]) -> None:
-    session = EditorSession(Buffer(BufferId("scratch"), BufferValue("", 0)))
+    session = EditorSession(Buffer(BufferId("scratch"), BufferValue(text="", point=0)))
     for command in history:
         if isinstance(command, InsertText) and command.text:
             before = session.buffer.current

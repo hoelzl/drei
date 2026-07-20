@@ -22,8 +22,13 @@ def test_records_are_frozen() -> None:
         (TextInserted("x", 0, 1), "text"),
         (PointMoved(1, 1), "requested"),
         (KeyboardQuitEvent(), None),
-        (BufferObservation("scratch", "x", 1), "text"),
-        (CommandOutcome((), BufferObservation("scratch", "", 0)), "events"),
+        (BufferObservation(buffer_id="scratch", text="x", point=1), "text"),
+        (
+            CommandOutcome(
+                (), BufferObservation(buffer_id="scratch", text="", point=0)
+            ),
+            "events",
+        ),
     ]
     for record, field in records:
         if field is not None:
