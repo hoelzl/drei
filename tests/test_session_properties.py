@@ -9,7 +9,10 @@ from drei.commands import (
     KillLine,
     SaveBuffer,
     TextKilled,
+    TextYanked,
+    TextYankPopped,
     Yank,
+    YankPop,
 )
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
@@ -40,6 +43,7 @@ def command_history(draw: st.DrawFn) -> list[object]:
                 st.just(SaveBuffer()),
                 st.just(KillLine()),
                 st.just(Yank()),
+                st.just(YankPop()),
             )
         )
         for _ in range(size)
@@ -102,7 +106,7 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
             and command.text
             or isinstance(command, KillLine)
             and any(isinstance(e, TextKilled) for e in outcome.events)
-            or isinstance(command, Yank)
+            or isinstance(command, (Yank, YankPop))
             and outcome.events
         ):
             expect_modified = True
@@ -163,3 +167,45 @@ def test_yank_with_empty_ring_changes_nothing() -> None:
     assert outcome.events == ()
     assert session.buffer.current.text == ""
     assert not session.buffer.current.modified
+
+
+@given(command_history())
+def test_yank_pop_transcript_coherence(history: list[object]) -> None:
+    """Every TextYankPopped follows a TextYanked/TextYankPopped with no gap."""
+    session = _session()
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+    transcript = session.transcript
+    for i, event in enumerate(transcript):
+        if isinstance(event, TextYankPopped):
+            assert i > 0
+            assert isinstance(transcript[i - 1], (TextYanked, TextYankPopped))
+
+
+@given(command_history())
+def test_yank_pop_replaces_with_ring_entry(history: list[object]) -> None:
+    """A pop after a yank replaces the yanked span with ring[cursor+1 % len]."""
+    session = _session()
+    last_yank: tuple[int, int] | None = None  # (start, end) of last yank/pop
+    cursor = 0
+    for command in history:
+        before = session.buffer.current
+        outcome = session.dispatch(command)  # type: ignore[arg-type]
+        if isinstance(command, Yank) and outcome.events:
+            last_yank = (before.point, before.point + len(session.kill_ring[0]))
+            cursor = 0
+        elif isinstance(command, YankPop):
+            popped = [e for e in outcome.events if isinstance(e, TextYankPopped)]
+            if popped:
+                assert last_yank is not None
+                ring = session.kill_ring
+                assert len(ring) >= 2
+                cursor = (cursor + 1) % len(ring)
+                event = popped[0]
+                assert event.new_text == ring[cursor]
+                assert event.before == last_yank[0]
+                assert event.after == event.before + len(event.new_text)
+                last_yank = (event.before, event.after)
+            # no-op pop: active state unchanged (still whatever it was)
+        elif outcome.events:
+            last_yank = None

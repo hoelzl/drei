@@ -1,6 +1,6 @@
 # Fourth editor slice: yank-pop
 
-**Status:** ready — architecture gate inherited from design 0002 (the yank-pop rotation cursor is session-owned transient state, no new ports)
+**Status:** implemented — architecture gate inherited from design 0002 (the yank-pop rotation cursor is session-owned transient state, no new ports). One scope adjustment during implementation: ConPTY cannot deliver a bare ESC (termverify issue #169), so the TermVerify scenario proves the kill/yank prefix end-to-end while the `M-y` byte assembly and pop frame evidence are covered in-process through the same `run_editor` byte loop.
 
 **Goal:** Make the kill ring's depth observable: `M-y` immediately after a yank (or another yank-pop) replaces the just-yanked text with the next-older ring entry, cycling through the ring.
 

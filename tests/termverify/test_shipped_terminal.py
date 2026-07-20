@@ -215,6 +215,47 @@ def test_shipped_editor_kill_yank_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
+    """C-k C-k (chain broken) C-y through ConPTY; M-y pop proven in-process.
+
+    ConPTY swallows a bare ESC written to the input stream, so the Alt+y
+    chord cannot be delivered to the child (termverify issue #169). This
+    scenario proves the kill/yank prefix end-to-end; the M-y byte assembly
+    and the pop's frame evidence are covered by the in-process run_editor
+    tests (same byte loop, scripted FakePort) in tests/test_terminal.py.
+    """
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    target = sandbox / "pop.txt"
+    target.write_text("one\ntwo\nthree", encoding="utf-8")
+    adapter = _adapter(tmp_path, argv_file=target)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-yank-pop", _configuration())
+        assert type(started) is Started, started
+
+        # Kill "one", move, kill "two" -> ring ("two", "one"), text "\n\nthree".
+        for chord in (("Control", "k"), ("Control", "f"), ("Control", "k")):
+            stepped = adapter.dispatch(KeyInput(ManualTime(0), chord))
+            assert type(stepped) is EpochCompleted, stepped
+        killed_observation = stepped.observation
+        assert killed_observation is not None
+        killed_lines = _frame_lines(killed_observation)
+        assert not any(line.startswith("one") for line in killed_lines)
+
+        # C-y yanks the newest entry ("two") at point.
+        yanked = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "y")))
+        assert type(yanked) is EpochCompleted, yanked
+        yanked_observation = yanked.observation
+        assert yanked_observation is not None
+        yanked_lines = _frame_lines(yanked_observation)
+        assert any(line.startswith("two") for line in yanked_lines), yanked_lines
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_stop_is_clean(tmp_path: Path) -> None:
     """A TermVerify stop after readiness also terminates the run cleanly."""
     adapter = _adapter(tmp_path)

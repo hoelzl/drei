@@ -34,6 +34,11 @@ class Yank:
 
 
 @dataclass(frozen=True, slots=True)
+class YankPop:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class KeyboardQuit:
     pass
 
@@ -62,6 +67,14 @@ class TextKilled:
 @dataclass(frozen=True, slots=True)
 class TextYanked:
     text: str
+    before: int
+    after: int
+
+
+@dataclass(frozen=True, slots=True)
+class TextYankPopped:
+    old_text: str
+    new_text: str
     before: int
     after: int
 
@@ -105,6 +118,7 @@ class CommandOutcome:
         | PointMoved
         | TextKilled
         | TextYanked
+        | TextYankPopped
         | BufferSaved
         | SaveFailed
         | KeyboardQuitEvent,
