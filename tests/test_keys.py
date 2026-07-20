@@ -6,6 +6,7 @@ from drei.commands import (
     KillLine,
     SaveBuffer,
     Yank,
+    YankPop,
 )
 from drei.keys import PendingKey, UnresolvedKey, resolve
 
@@ -22,6 +23,14 @@ def test_control_keys_resolve_to_commands() -> None:
     assert resolve(None, "C-g") == KeyboardQuit()
     assert resolve(None, "C-k") == KillLine()
     assert resolve(None, "C-y") == Yank()
+
+
+def test_meta_y_resolves_to_yank_pop() -> None:
+    assert resolve(None, "M-y") == YankPop()
+
+
+def test_unknown_meta_chord_is_unresolved() -> None:
+    assert resolve(None, "M-x") == UnresolvedKey("M-x")
 
 
 def test_cx_enters_pending_state() -> None:

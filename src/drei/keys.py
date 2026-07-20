@@ -10,6 +10,7 @@ from drei.commands import (
     KillLine,
     SaveBuffer,
     Yank,
+    YankPop,
 )
 from drei.session import Command
 
@@ -19,6 +20,10 @@ _CONTROL_KEYS: dict[str, Command] = {
     "C-g": KeyboardQuit(),
     "C-k": KillLine(),
     "C-y": Yank(),
+}
+
+_META_KEYS: dict[str, Command] = {
+    "M-y": YankPop(),
 }
 
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
@@ -54,6 +59,8 @@ def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingK
         return PendingKey("C-x")
     if key in _CONTROL_KEYS:
         return _CONTROL_KEYS[key]
+    if key in _META_KEYS:
+        return _META_KEYS[key]
     if len(key) == 1 and key.isprintable():
         return InsertText(key)
     return UnresolvedKey(key)

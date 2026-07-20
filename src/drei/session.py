@@ -18,7 +18,9 @@ from drei.commands import (
     TextInserted,
     TextKilled,
     TextYanked,
+    TextYankPopped,
     Yank,
+    YankPop,
 )
 from drei.files import FilePort, normalize_os_error
 from drei.model import Buffer, BufferValue
@@ -30,6 +32,7 @@ Command = (
     | SaveBuffer
     | KillLine
     | Yank
+    | YankPop
     | KeyboardQuit
 )
 Event = (
@@ -37,6 +40,7 @@ Event = (
     | PointMoved
     | TextKilled
     | TextYanked
+    | TextYankPopped
     | BufferSaved
     | SaveFailed
     | KeyboardQuitEvent
@@ -62,6 +66,9 @@ class EditorSession:
         self._transcript: list[Event] = []
         self._kill_ring: list[str] = []
         self._last_was_kill = False
+        self._yank_active = False
+        self._yank_cursor = 0
+        self._yank_bounds = (0, 0)
 
     @property
     def transcript(self) -> tuple[Event, ...]:
@@ -105,6 +112,8 @@ class EditorSession:
                 new_value = self._kill_line(current, events)
             case Yank():
                 new_value = self._yank(current, events)
+            case YankPop():
+                new_value = self._yank_pop(current, events)
             case KeyboardQuit():
                 new_value = current
                 events.append(KeyboardQuitEvent())
@@ -122,6 +131,16 @@ class EditorSession:
             # not intervene — keeping the chain derivable from the evidence
             # (modulo capacity eviction, which emits nothing).
             self._last_was_kill = False
+
+        if isinstance(command, Yank):
+            # Active only on an event-emitting yank; a no-op yank clears it.
+            self._yank_active = any(isinstance(e, TextYanked) for e in events)
+        elif isinstance(command, YankPop):
+            # Active stays on for a successful pop (chains), off for a no-op.
+            self._yank_active = any(isinstance(e, TextYankPopped) for e in events)
+        elif events:
+            # Same rule as the chain: only event-emitting commands intervene.
+            self._yank_active = False
 
         # Validation happens in BufferValue.__post_init__ before any
         # mutation, so command failure is atomic by construction.
@@ -179,4 +198,20 @@ class EditorSession:
         after = before + len(text)
         new_text = current.text[:before] + text + current.text[before:]
         events.append(TextYanked(text, before, after))
+        self._yank_cursor = 0
+        self._yank_bounds = (before, after)
+        return replace(current, text=new_text, point=after, modified=True)
+
+    def _yank_pop(self, current: BufferValue, events: list[Event]) -> BufferValue:
+        if not self._yank_active or len(self._kill_ring) < 2:
+            return current  # no active yank / empty or 1-entry ring: silent no-op
+        start, end = self._yank_bounds
+        old = current.text[start:end]
+        cursor = (self._yank_cursor + 1) % len(self._kill_ring)
+        new = self._kill_ring[cursor]
+        after = start + len(new)
+        new_text = current.text[:start] + new + current.text[end:]
+        events.append(TextYankPopped(old, new, start, after))
+        self._yank_cursor = cursor
+        self._yank_bounds = (start, after)
         return replace(current, text=new_text, point=after, modified=True)

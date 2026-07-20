@@ -72,6 +72,31 @@ def test_unresolved_key_marks_quiescence_without_frame_rewrite() -> None:
     assert written.count("\x1b[2J\x1b[H") == 2
 
 
+def test_editor_meta_chord_yank_pop_through_byte_loop() -> None:
+    # ESC y assembles to M-y: with an empty ring it is a silent no-op, so the
+    # loop treats it like any other no-state-change input and then quits.
+    port = FakePort(["\x1b", "y", "\x07"])
+    run_editor(port)
+    assert port.restored
+
+
+def test_editor_esc_non_letter_reprocesses_byte() -> None:
+    # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
+    # inserted as printable text.
+    port = FakePort(["\x1b", "1", "\x07"])
+    run_editor(port)
+    written = "".join(port.outputs)
+    assert "1" in written
+
+
+def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
+    # ESC followed by C-g: bare ESC reported (unresolved), C-g reprocessed
+    # and quits the loop.
+    port = FakePort(["\x1b", "\x07"])
+    run_editor(port)
+    assert port.restored
+
+
 def test_cli_rejects_non_tty(capsys: pytest.CaptureFixture[str]) -> None:
     from drei.cli import main
 
@@ -212,6 +237,40 @@ def test_decode_key_maps_kill_and_yank() -> None:
 
     assert decode_key("\x0b") == "C-k"
     assert decode_key("\x19") == "C-y"
+
+
+def test_assemble_meta_esc_letter_yields_meta_chord() -> None:
+    from drei.terminal import assemble_meta
+
+    pending, key = assemble_meta(False, "\x1b")
+    assert pending and key is None
+    pending, key = assemble_meta(pending, "y")
+    assert not pending
+    assert key == "M-y"
+
+
+def test_assemble_meta_esc_non_letter_reports_bare_esc() -> None:
+    from drei.terminal import assemble_meta
+
+    pending, key = assemble_meta(True, "1")
+    assert not pending
+    assert key == "\x1b"  # caller reprocesses the "1" with no pending state
+
+
+def test_assemble_meta_esc_control_byte_reports_bare_esc() -> None:
+    from drei.terminal import assemble_meta
+
+    pending, key = assemble_meta(True, "\x07")  # ESC C-g: bare ESC, C-g reprocessed
+    assert not pending
+    assert key == "\x1b"
+
+
+def test_assemble_meta_plain_byte_decodes_normally() -> None:
+    from drei.terminal import assemble_meta
+
+    pending, key = assemble_meta(False, "\x0b")
+    assert not pending
+    assert key == "C-k"
 
 
 def test_system_port_write_and_flush(capsys: pytest.CaptureFixture[str]) -> None:

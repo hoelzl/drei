@@ -61,6 +61,24 @@ def decode_key(char: str) -> str:
     return control.get(char, char)
 
 
+def assemble_meta(pending_esc: bool, char: str) -> tuple[bool, str | None]:
+    """Byte-level ESC lookbehind for meta chords (ESC + letter → "M-<letter>").
+
+    Returns ``(new_pending_esc, key_or_none)``: ``None`` means the byte was
+    consumed as the start of a potential chord (bare ESC so far); a key
+    string means dispatch it. ESC + non-letter yields the unresolved ESC
+    marker and reprocesses the byte on the next call with no pending state.
+    """
+    if pending_esc:
+        if char.isalpha():
+            return False, f"M-{char}"
+        # ESC + non-letter: report the bare ESC; the caller reprocesses char.
+        return False, "\x1b"
+    if char == "\x1b":
+        return True, None
+    return False, decode_key(char)
+
+
 # TermVerify subject-cooperation readiness marker (OSC 7791;ready ST). The
 # subject emits it after startup and after processing each input so the
 # verifier can detect quiescence without sleeps. A compliant screen model
@@ -89,8 +107,24 @@ def run_editor(
             initial_text=initial_text,
         )
         _write_frame(port, harness)
+        pending_esc = False
+        pending_byte: str | None = None
         while True:
-            key = decode_key(port.read_key())
+            char = pending_byte if pending_byte is not None else port.read_key()
+            pending_byte = None
+            pending_esc, key = assemble_meta(pending_esc, char)
+            if key == "\x1b":
+                # ESC + non-letter: the bare ESC is unresolved (no state
+                # change); reprocess the byte that followed it with no
+                # pending state. Quiescence is marked by the reprocessed
+                # byte's own iteration.
+                harness.send(key)
+                pending_byte = char
+                continue
+            if key is None:
+                # Bare ESC consumed as potential chord start; no input was
+                # fully processed, so no quiescence marker yet.
+                continue
             outcome = harness.send(key)
             quit_requested = outcome is not None and any(
                 isinstance(e, KeyboardQuitEvent) for e in outcome.events
