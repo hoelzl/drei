@@ -1,6 +1,6 @@
 # Second editor slice: file-backed buffers
 
-**Status:** ready — architecture gate inherited from design 0002 (no new state/identity demands beyond one buffer + one injected effect port)
+**Status:** implemented — file-backed buffers, FilePort effect boundary, C-x C-s save, modeline modified indicator, TermVerify save scenario (Windows), and pinned Emacs save differential complete
 
 **Goal:** Open a file into the scratch path's buffer, edit it through the existing production command path, and save it back — with filesystem effects behind an explicit port, never ambient I/O in the command path.
 
