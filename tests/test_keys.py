@@ -9,6 +9,7 @@ from drei.commands import (
     KillRegion,
     SaveBuffer,
     SetMark,
+    Undo,
     Yank,
     YankPop,
 )
@@ -61,6 +62,11 @@ def test_mark_region_keys_resolve_to_commands() -> None:
     assert resolve(None, "C-@") == SetMark()
     assert resolve(None, "C-w") == KillRegion()
     assert resolve(None, "M-w") == CopyRegionAsKill()
+
+
+def test_undo_keys_resolve_to_commands() -> None:
+    assert resolve(None, "C-/") == Undo()
+    assert resolve("C-x", "u") == Undo()
 
 
 def test_unsupported_key_is_explicitly_unresolved() -> None:

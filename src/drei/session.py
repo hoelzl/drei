@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from drei.commands import (
     BackwardChar,
@@ -25,8 +25,11 @@ from drei.commands import (
     SetMark,
     TextInserted,
     TextKilled,
+    TextRedone,
+    TextUndone,
     TextYanked,
     TextYankPopped,
+    Undo,
     Yank,
     YankPop,
 )
@@ -45,6 +48,7 @@ Command = (
     | KillRegion
     | CopyRegionAsKill
     | ExchangePointAndMark
+    | Undo
     | KeyboardQuit
 )
 Event = (
@@ -57,10 +61,91 @@ Event = (
     | RegionKilled
     | RegionCopied
     | MarkExchanged
+    | TextUndone
+    | TextRedone
     | BufferSaved
     | SaveFailed
     | KeyboardQuitEvent
 )
+
+
+def _make_group(
+    command: Command, current: BufferValue, events: list[Event]
+) -> _UndoGroup | None:
+    """Build the inverse patch for a text-changing command; None otherwise.
+
+    The event stream carries every span position, so the group is derived
+    from the same evidence the transcript records.
+    """
+    for event in events:
+        match event:
+            case TextInserted(text=text, before=before):
+                return _UndoGroup(
+                    before,
+                    "",
+                    text,
+                    current.point,
+                    before + len(text),
+                    current.mark,
+                    _adjust_mark_insert(current.mark, before, len(text)),
+                    current.modified,
+                    True,
+                )
+            case TextKilled(text=killed, before=before, after=after):
+                return _UndoGroup(
+                    before,
+                    killed,
+                    "",
+                    current.point,
+                    current.point,
+                    current.mark,
+                    _adjust_mark_delete(current.mark, before, after),
+                    current.modified,
+                    True,
+                )
+            case RegionKilled(text=killed, before=lo):
+                return _UndoGroup(
+                    lo,
+                    killed,
+                    "",
+                    current.point,
+                    lo,
+                    current.mark,
+                    None,
+                    current.modified,
+                    True,
+                )
+            case TextYanked(text=text, before=before):
+                return _UndoGroup(
+                    before,
+                    "",
+                    text,
+                    current.point,
+                    before + len(text),
+                    current.mark,
+                    _adjust_mark_insert(current.mark, before, len(text)),
+                    current.modified,
+                    True,
+                )
+            case TextYankPopped(old_text=old, new_text=new, before=start, after=after):
+                return _UndoGroup(
+                    start,
+                    old,
+                    new,
+                    current.point,
+                    after,
+                    current.mark,
+                    _adjust_mark_insert(
+                        _adjust_mark_delete(current.mark, start, start + len(old)),
+                        start,
+                        len(new),
+                    ),
+                    current.modified,
+                    True,
+                )
+            case _:
+                continue
+    return None
 
 
 def _adjust_mark_insert(mark: int | None, at: int, count: int) -> int | None:
@@ -92,6 +177,23 @@ def _adjust_mark_delete(mark: int | None, start: int, end: int) -> int | None:
 
 
 KILL_RING_CAPACITY = 60
+UNDO_CAPACITY = 100
+
+
+@dataclass(frozen=True, slots=True)
+class _UndoGroup:
+    """Inverse patch for one text-changing command (the redo patch is the
+    same record read forward)."""
+
+    start: int
+    removed_text: str  # what the command deleted (re-inserted by undo)
+    inserted_text: str  # what the command inserted (removed by undo)
+    point_before: int
+    point_after: int
+    mark_before: int | None
+    mark_after: int | None
+    modified_before: bool
+    modified_after: bool
 
 
 class _NullFilePort:
@@ -114,6 +216,9 @@ class EditorSession:
         self._yank_active = False
         self._yank_cursor = 0
         self._yank_bounds = (0, 0)
+        self._undo_history: list[_UndoGroup] = []  # applied groups, newest last
+        self._undo_redo: list[_UndoGroup] = []  # undone groups, newest last
+        self._undo_descending = False  # last command was an undo
 
     @property
     def transcript(self) -> tuple[Event, ...]:
@@ -176,6 +281,8 @@ class EditorSession:
                 else:
                     new_value = replace(current, point=current.mark, mark=current.point)
                     events.append(MarkExchanged(current.point, current.mark))
+            case Undo():
+                new_value = self._undo(current, events)
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
@@ -204,6 +311,24 @@ class EditorSession:
             # Same rule as the chain: only event-emitting commands intervene.
             self._yank_active = False
 
+        # Undo bookkeeping: text-changing commands push a group and
+        # truncate the redo tail (owned deviation — stock Emacs keeps redo
+        # reachable via undo-more). Any event-emitting non-undo command
+        # breaks the descent (matches Emacs's last-command gating); a
+        # silent no-op intervenes in nothing.
+        if isinstance(command, Undo):
+            self._undo_descending = bool(events)
+        else:
+            group = _make_group(command, current, events)
+            if group is not None:
+                self._undo_history.append(group)
+                del self._undo_history[
+                    : max(0, len(self._undo_history) - UNDO_CAPACITY)
+                ]
+                self._undo_redo.clear()
+            if events:
+                self._undo_descending = False
+
         # Validation happens in BufferValue.__post_init__ before any
         # mutation, so command failure is atomic by construction.
         self.buffer.replace(new_value)
@@ -218,6 +343,62 @@ class EditorSession:
             mark=new_value.mark,
         )
         return CommandOutcome(tuple(events), observation)
+
+    def _undo(self, current: BufferValue, events: list[Event]) -> BufferValue:
+        """Apply the newest group's inverse (descending) or, after any
+        intervening event-emitting command, redo the newest undone group
+        (Emacs's direction flip on last-command != undo)."""
+        if self._undo_descending or not self._undo_redo:
+            if not self._undo_history:
+                return current  # nothing to undo: silent no-op
+            group = self._undo_history.pop()
+            self._undo_redo.append(group)
+            events.append(
+                TextUndone(
+                    group.start,
+                    group.inserted_text,
+                    group.removed_text,
+                    group.point_after,
+                    group.point_before,
+                    group.mark_after,
+                    group.mark_before,
+                )
+            )
+            return replace(
+                current,
+                text=(
+                    current.text[: group.start]
+                    + group.removed_text
+                    + current.text[group.start + len(group.inserted_text) :]
+                ),
+                point=group.point_before,
+                mark=group.mark_before,
+                modified=group.modified_before,
+            )
+        group = self._undo_redo.pop()
+        self._undo_history.append(group)
+        events.append(
+            TextRedone(
+                group.start,
+                group.removed_text,
+                group.inserted_text,
+                group.point_before,
+                group.point_after,
+                group.mark_before,
+                group.mark_after,
+            )
+        )
+        return replace(
+            current,
+            text=(
+                current.text[: group.start]
+                + group.inserted_text
+                + current.text[group.start + len(group.removed_text) :]
+            ),
+            point=group.point_after,
+            mark=group.mark_after,
+            modified=group.modified_after,
+        )
 
     def _save(self, current: BufferValue, events: list[Event]) -> BufferValue:
         path = current.file_path

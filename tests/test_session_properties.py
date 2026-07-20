@@ -18,8 +18,11 @@ from drei.commands import (
     SaveBuffer,
     SetMark,
     TextKilled,
+    TextRedone,
+    TextUndone,
     TextYanked,
     TextYankPopped,
+    Undo,
     Yank,
     YankPop,
 )
@@ -58,6 +61,7 @@ def command_history(draw: st.DrawFn) -> list[object]:
                 st.just(CopyRegionAsKill()),
                 st.just(ExchangePointAndMark()),
                 st.just(KeyboardQuit()),
+                st.just(Undo()),
             )
         )
         for _ in range(size)
@@ -88,11 +92,10 @@ def test_mark_fold_matches_transcript(history: list[object]) -> None:
     """Mark state is derivable from the transcript (the evidence oracle).
 
     Fold: MarkSet sets; RegionKilled/RegionCopied/KeyboardQuitEvent clear;
-    RegionKilled adjusts prior to clearing — but the fold sees the same
-    edit events as the session, so it can replay adjustment. Here we check
-    the simpler structural rule: mark is set iff a MarkSet event is the
-    most recent of (MarkSet, RegionKilled, RegionCopied, KeyboardQuitEvent)
-    in the transcript.
+    TextUndone/TextRedone set mark-setness from their mark_after field
+    (undo can resurrect a mark with no MarkSet event — the fields are why
+    the events carry both marks). We check the simpler structural rule:
+    mark is set iff the latest of these six event types says so.
     """
     session = _session()
     for command in history:
@@ -103,6 +106,8 @@ def test_mark_fold_matches_transcript(history: list[object]) -> None:
             mark_set = True
         elif isinstance(event, (RegionKilled, RegionCopied, KeyboardQuitEvent)):
             mark_set = False
+        elif isinstance(event, (TextUndone, TextRedone)):
+            mark_set = event.mark_after is not None
     assert (session.buffer.current.mark is not None) == mark_set
 
 
@@ -145,7 +150,7 @@ def test_insertion_preserves_existing_text(history: list[object]) -> None:
 
 @given(command_history())
 def test_modified_flag_consistent_with_history(history: list[object]) -> None:
-    """Modified is true iff a text-changing event postdates the last save."""
+    """Text changes set modified; save clears it; undo/redo restore it."""
     session = _session()
     expect_modified = False
     for command in history:
@@ -163,6 +168,9 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
             expect_modified = True
         elif isinstance(command, SaveBuffer):
             expect_modified = False
+        elif isinstance(command, Undo):
+            # Undo/redo restore the flag from the group, they don't set it.
+            expect_modified = session.buffer.current.modified
         # SetMark / CopyRegionAsKill / ExchangePointAndMark / KeyboardQuit
         # never change text (verified vs Emacs: copy and set-mark leave
         # buffer-modified-p nil), so they get no arm here.
@@ -263,3 +271,58 @@ def test_yank_pop_replaces_with_ring_entry(history: list[object]) -> None:
             # no-op pop: active state unchanged (still whatever it was)
         elif outcome.events:
             last_yank = None
+
+
+def _text_change_history(draw: st.DrawFn, max_size: int = 30) -> list[object]:
+    """Only text-changing commands — the clean round-trip history."""
+    size = draw(st.integers(min_value=0, max_value=max_size))
+    return [
+        draw(
+            st.one_of(
+                st.builds(InsertText, st.text(min_size=1, max_size=5)),
+                st.just(KillLine()),
+                st.just(Yank()),
+                st.just(SetMark()),
+                st.just(KillRegion()),
+            )
+        )
+        for _ in range(size)
+    ]
+
+
+@st.composite
+def text_change_history(draw: st.DrawFn) -> list[object]:
+    return _text_change_history(draw)
+
+
+@given(text_change_history())
+def test_undo_all_restores_initial_state(history: list[object]) -> None:
+    """Undoing every text-changing group restores the initial buffer."""
+    session = _session()
+    groups = 0
+    for command in history:
+        before = session.buffer.current
+        session.dispatch(command)  # type: ignore[arg-type]
+        after = session.buffer.current
+        if after.text != before.text:
+            groups += 1
+    for _ in range(groups):
+        session.dispatch(Undo())
+    current = session.buffer.current
+    assert current.text == ""
+    assert current.point == 0
+    assert not current.modified
+
+
+@given(command_history())
+def test_undo_stack_bounded(history: list[object]) -> None:
+    """At most 100 groups; exhaustion degrades to silent no-ops."""
+    from drei.session import UNDO_CAPACITY
+
+    session = _session()
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+    undone = 0
+    while session.dispatch(Undo()).events:
+        undone += 1
+    assert undone <= UNDO_CAPACITY
