@@ -2,6 +2,7 @@ from drei.commands import (
     BackwardChar,
     CopyRegionAsKill,
     ExchangePointAndMark,
+    FindFile,
     ForwardChar,
     InsertText,
     KeyboardQuit,
@@ -67,6 +68,16 @@ def test_mark_region_keys_resolve_to_commands() -> None:
 def test_undo_keys_resolve_to_commands() -> None:
     assert resolve(None, "C-/") == Undo()
     assert resolve("C-x", "u") == Undo()
+
+
+def test_cx_cf_resolves_to_find_file() -> None:
+    assert resolve("C-x", "C-f") == FindFile()
+
+
+def test_ret_and_del_are_unresolved_in_main_map() -> None:
+    # Both decode from \x0d / \x7f (minibuffer-only); inactive = unresolved.
+    assert isinstance(resolve(None, "RET"), UnresolvedKey)
+    assert isinstance(resolve(None, "DEL"), UnresolvedKey)
 
 
 def test_unsupported_key_is_explicitly_unresolved() -> None:

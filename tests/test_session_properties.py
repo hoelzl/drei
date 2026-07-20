@@ -4,9 +4,12 @@ from hypothesis import strategies as st
 
 from drei.commands import (
     BackwardChar,
+    BufferOpened,
+    BufferSaved,
     CopyRegionAsKill,
     DeliverProcessOutput,
     ExchangePointAndMark,
+    FindFile,
     ForwardChar,
     InsertText,
     KeyboardQuit,
@@ -14,6 +17,11 @@ from drei.commands import (
     KillLine,
     KillRegion,
     MarkSet,
+    MinibufferAbort,
+    MinibufferAccept,
+    MinibufferBackspace,
+    MinibufferInput,
+    OpenFailed,
     ProcessOutputRecorded,
     RegionCopied,
     RegionKilled,
@@ -97,6 +105,18 @@ def command_history(draw: st.DrawFn) -> list[object]:
                 st.just(KeyboardQuit()),
                 st.just(Undo()),
                 _deliveries(),
+                st.just(FindFile()),
+                st.builds(
+                    MinibufferInput,
+                    st.characters(
+                        codec="utf-8",
+                        min_codepoint=0x20,
+                        max_codepoint=0x7E,
+                    ),
+                ),
+                st.just(MinibufferBackspace()),
+                st.just(MinibufferAccept()),
+                st.just(MinibufferAbort()),
             )
         )
         for _ in range(size)
@@ -143,6 +163,9 @@ def test_mark_fold_matches_transcript(history: list[object]) -> None:
             mark_set = False
         elif isinstance(event, (TextUndone, TextRedone)):
             mark_set = event.mark_after is not None
+        elif isinstance(event, BufferOpened):
+            mark_set = False  # wholesale replacement clears the mark
+        # MinibufferOpened/MinibufferAborted/OpenFailed leave the mark alone.
     assert (session.buffer.current.mark is not None) == mark_set
 
 
@@ -206,6 +229,11 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
         elif isinstance(command, Undo):
             # Undo/redo restore the flag from the group, they don't set it.
             expect_modified = session.buffer.current.modified
+        elif isinstance(command, MinibufferAccept) and any(
+            isinstance(e, BufferOpened) for e in outcome.events
+        ):
+            # BufferOpened clears the flag (fresh file); OpenFailed leaves it.
+            expect_modified = False
         # SetMark / CopyRegionAsKill / ExchangePointAndMark / KeyboardQuit
         # never change text (verified vs Emacs: copy and set-mark leave
         # buffer-modified-p nil), so they get no arm here.
@@ -217,9 +245,15 @@ def test_save_writes_current_text(history: list[object]) -> None:
     port = FakeFilePort()
     session = _session(port)
     for command in history:
-        session.dispatch(command)  # type: ignore[arg-type]
-        if isinstance(command, SaveBuffer):
-            assert port.files["/tmp/prop.txt"] == session.buffer.current.text
+        outcome = session.dispatch(command)  # type: ignore[arg-type]
+        if isinstance(command, SaveBuffer) and any(
+            isinstance(e, BufferSaved) for e in outcome.events
+        ):
+            # A save while the minibuffer is open is a silent no-op; only an
+            # event-emitting save must have written the current text.
+            path = session.buffer.current.file_path
+            assert path is not None
+            assert port.files[path] == session.buffer.current.text
 
 
 @given(command_history())
@@ -398,3 +432,28 @@ def test_undo_stack_bounded(history: list[object]) -> None:
     while session.dispatch(Undo()).events:
         undone += 1
     assert undone <= UNDO_CAPACITY
+
+
+@given(
+    st.lists(
+        st.characters(codec="utf-8", min_codepoint=0x20, max_codepoint=0x7E),
+        max_size=20,
+    )
+)
+def test_minibuffer_accept_always_closes_with_boundary_event(chars: list[str]) -> None:
+    """open → inputs → accept: always yields a BufferOpened or OpenFailed
+    event and closes the prompt (never leaves the minibuffer half-open)."""
+    session = _session()
+    session.dispatch(FindFile())
+    assert session.minibuffer is not None
+    for char in chars:
+        session.dispatch(MinibufferInput(char))
+    outcome = session.dispatch(MinibufferAccept())
+    closed_input = session.minibuffer
+    closed_prompt = session.minibuffer_prompt
+    assert closed_input is None
+    assert closed_prompt is None  # type: ignore[unreachable]
+    if chars:
+        assert any(isinstance(e, (BufferOpened, OpenFailed)) for e in outcome.events)
+    else:
+        assert outcome.events == ()  # empty input: silent no-op close
