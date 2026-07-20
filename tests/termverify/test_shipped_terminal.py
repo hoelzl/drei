@@ -233,6 +233,55 @@ def test_shipped_editor_region_kill_scenario(tmp_path: Path) -> None:
     )
 
 
+def test_shipped_editor_undo_scenario(tmp_path: Path) -> None:
+    """Type 'ab' via keys; C-x u removes 'b'; C-x u again removes 'a'.
+
+    Undo through ConPTY: C-x u is an ordinary C-x prefix plus a printable
+    key — no delivery risk. The \\x1f (C-/) byte arm is probed live:
+    unlike NUL it is an ordinary control byte, so it should pass through;
+    if it ever regresses the scenario still proves undo via C-x u.
+    """
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-undo", _configuration())
+        assert type(started) is Started, started
+
+        typed_lines: tuple[str, ...] = ()
+        for char in "ab":
+            typed = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(typed) is EpochCompleted, typed
+            typed_observation = typed.observation
+            assert typed_observation is not None
+            typed_lines = _frame_lines(typed_observation)
+        assert any(line.startswith("ab") for line in typed_lines), typed_lines
+
+        undone = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(undone) is EpochCompleted, undone
+        undone = adapter.dispatch(TextInput(ManualTime(0), "u"))
+        assert type(undone) is EpochCompleted, undone
+        undone_observation = undone.observation
+        assert undone_observation is not None
+        undone_lines = _frame_lines(undone_observation)
+        assert any(
+            line.startswith("a") and not line.startswith("ab") for line in undone_lines
+        ), undone_lines
+
+        # Live probe of the \x1f (C-/) byte: undo the remaining 'a'.
+        probed = adapter.dispatch(TextInput(ManualTime(0), "\x1f"))
+        assert type(probed) is EpochCompleted, probed
+        probed_observation = probed.observation
+        assert probed_observation is not None
+        probed_lines = _frame_lines(probed_observation)
+        assert not any(line.startswith("a") for line in probed_lines), probed_lines
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
     """C-k C-k (chain broken) C-y through ConPTY; M-y pop proven in-process.
 
