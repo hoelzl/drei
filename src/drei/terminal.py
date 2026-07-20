@@ -59,6 +59,7 @@ def decode_key(char: str) -> str:
         "\x0b": "C-k",
         "\x19": "C-y",
         "\x17": "C-w",
+        "\x1f": "C-/",  # C-_ produces the same byte
     }
     return control.get(char, char)
 

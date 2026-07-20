@@ -59,6 +59,11 @@ class ExchangePointAndMark:
 
 
 @dataclass(frozen=True, slots=True)
+class Undo:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class KeyboardQuit:
     pass
 
@@ -124,6 +129,28 @@ class MarkExchanged:
 
 
 @dataclass(frozen=True, slots=True)
+class TextUndone:
+    start: int
+    removed_text: str
+    inserted_text: str
+    point_before: int
+    point_after: int
+    mark_before: int | None
+    mark_after: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TextRedone:
+    start: int
+    removed_text: str
+    inserted_text: str
+    point_before: int
+    point_after: int
+    mark_before: int | None
+    mark_after: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class BufferSaved:
     path: str
 
@@ -168,6 +195,8 @@ class CommandOutcome:
         | RegionKilled
         | RegionCopied
         | MarkExchanged
+        | TextUndone
+        | TextRedone
         | BufferSaved
         | SaveFailed
         | KeyboardQuitEvent,

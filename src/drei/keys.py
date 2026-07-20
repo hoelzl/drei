@@ -13,6 +13,7 @@ from drei.commands import (
     KillRegion,
     SaveBuffer,
     SetMark,
+    Undo,
     Yank,
     YankPop,
 )
@@ -20,6 +21,7 @@ from drei.session import Command
 
 _CONTROL_KEYS: dict[str, Command] = {
     "C-@": SetMark(),
+    "C-/": Undo(),  # \x1f — same byte as C-_
     "C-f": ForwardChar(),
     "C-b": BackwardChar(),
     "C-g": KeyboardQuit(),
@@ -36,6 +38,7 @@ _META_KEYS: dict[str, Command] = {
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-x", "C-s"): SaveBuffer(),
     ("C-x", "C-x"): ExchangePointAndMark(),
+    ("C-x", "u"): Undo(),
 }
 
 

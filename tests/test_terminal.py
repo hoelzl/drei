@@ -144,6 +144,31 @@ def test_editor_region_commands_through_byte_loop() -> None:
     assert rows[-1].startswith("hello world")  # quit frame
 
 
+def test_editor_undo_through_byte_loop() -> None:
+    """Type 'ab', undo twice via C-/ and C-x u: the frame reverts."""
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (40, 10)
+
+    port = TallPort(
+        [
+            "a",
+            "b",  # text "ab"
+            "\x1f",  # C-/: undo "b" → "a"
+            "\x18",
+            "u",  # C-x u: undo "a" → ""
+            "\x07",
+        ]
+    )
+    run_editor(port)
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    rows = [f.split("\r\n")[0] for f in frames[1:]]
+    assert any(r.startswith("ab") for r in rows)
+    assert any(r.startswith("a") and not r.startswith("ab") for r in rows)
+    assert rows[-1].strip() == ""  # quit frame: both inserts undone
+
+
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.
@@ -318,6 +343,7 @@ def test_decode_key_maps_region_bytes() -> None:
 
     assert decode_key("\x00") == "C-@"
     assert decode_key("\x17") == "C-w"
+    assert decode_key("\x1f") == "C-/"  # C-_ is the same byte
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")

@@ -128,6 +128,28 @@ _MARKER_RE = re.compile(
     re.DOTALL,
 )
 
+_UNDO_MSG = (
+    ' (message "{tag} TEXT=%S POINT=%d MOD=%S"'
+    " (buffer-string) (point) (buffer-modified-p))"
+)
+
+EMACS_UNDO_EVAL = (
+    '(progn (switch-to-buffer (get-buffer-create "drei-un"))'
+    ' (insert "hello") (undo-boundary)'  # close the group (batch has no loop)
+    + _UNDO_MSG.replace("{tag}", "INS")
+    + " (undo)"
+    + _UNDO_MSG.replace("{tag}", "U1")
+    + ' (insert "X") (undo-boundary)'
+    " (undo)"  # undo the fresh insert — previously undone groups NOT resurrected
+     + _UNDO_MSG.replace("{tag}", "U2") + ")"
+)
+_UNDO_RE = re.compile(
+    r'INS TEXT="(.*?)" POINT=(\d+) MOD=(\S+)\r?\n.*?'
+    r'U1 TEXT="(.*?)" POINT=(\d+) MOD=(\S+)\r?\n.*?'
+    r'U2 TEXT="(.*?)" POINT=(\d+) MOD=(\S+)\s*$',
+    re.DOTALL,
+)
+
 PINNED_IMAGE = "ubuntu:24.04"
 PINNED_VERSION_PREFIX = "GNU Emacs 29."
 
@@ -547,3 +569,49 @@ def test_marker_adjustment_parity() -> None:
     session.dispatch(InsertText("Z"))  # insert AT the mark: stays before
     assert session.buffer.current.mark == int(marker.group(5)) - 1 == 2
     assert session.buffer.current.text == "XYZ\ndef"
+
+
+def test_undo_parity() -> None:
+    """Single undo restores text/point/modified; fresh insert after undo
+    truncates (no resurrection). Batch grouping amalgamates (deviation —
+    one group per command is Drei's interactive-equivalent rule), but a
+    single insert + undo is exact on both sides."""
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
+    lines = _run_pinned_emacs(EMACS_UNDO_EVAL)
+    blob = "\n".join(lines)
+    undo = _UNDO_RE.search(blob)
+    assert undo is not None, blob
+
+    # Emacs evidence (1-based point): insert "hello" → point 6, MOD t;
+    # undo → "" point 1 MOD nil. Fresh "X" + undo → "hello" MOD t: stock
+    # Emacs does NOT truncate — the fresh edit flips direction and the
+    # next undo REDOES the buried undo (the review's B2, made visible).
+    assert undo.group(1) == "hello"
+    assert (int(undo.group(2)), undo.group(3)) == (6, "t")
+    assert (undo.group(4), int(undo.group(5)), undo.group(6)) == ("", 1, "nil")
+    assert (undo.group(7), int(undo.group(8)), undo.group(9)) == ("hello", 1, "t")
+
+    from drei.commands import InsertText, TextUndone, Undo
+
+    session = EditorSession(Buffer(BufferId("drei-un"), BufferValue(text="", point=0)))
+    inserted = session.dispatch(InsertText("hello"))
+    assert inserted.observation.text == undo.group(1)
+    assert inserted.observation.point == int(undo.group(2)) - 1
+    assert inserted.observation.modified
+
+    undone = session.dispatch(Undo())
+    assert TextUndone(0, "hello", "", 5, 0, None, None) in undone.events
+    assert undone.observation.text == undo.group(4) == ""
+    assert undone.observation.point == int(undo.group(5)) - 1 == 0
+    assert not undone.observation.modified  # MOD nil — restored from the group
+
+    # DEVIATION (registry): Drei truncates the redo tail on a fresh edit —
+    # undo of the fresh insert returns to "" (Emacs redoes to "hello").
+    session.dispatch(InsertText("X"))
+    undone2 = session.dispatch(Undo())
+    assert undone2.observation.text == "" != undo.group(7)
+    assert undone2.observation.point == 0
+    assert not undone2.observation.modified
+    # The truncated redo tail: undo now has nothing left.
+    assert session.dispatch(Undo()).events == ()
