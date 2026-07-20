@@ -1,6 +1,6 @@
 # Seventh editor slice: minibuffer + C-x C-f (find-file)
 
-**Status:** ready — architecture gate: the minibuffer is a **second `Buffer` on the session** (design 0002's buffer-list spike direction) with a session flag routing keys to it while active. No new ports (reuses `FilePort.read`); `BufferValue` unchanged.
+**Status:** merged. (Implementation note: the merged implementation keeps the minibuffer as lightweight session state — `_minibuffer: str | None` input + prompt label with boundary-only events — per contract line 16's decision, not a second `Buffer`; the routing/abort/invariant gates below are unchanged.)
 
 **Goal:** `C-x C-f` prompts for a path in the minibuffer; RET opens the file (contents loaded, `file_path` set, modified cleared) or creates a new empty buffer for a missing path; `C-g` aborts the prompt. This is the first interactive prompt — the pattern for all later minibuffer commands (`C-x C-s`-as, `M-x`, search).
 
