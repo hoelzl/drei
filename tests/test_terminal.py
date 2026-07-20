@@ -207,6 +207,13 @@ def test_decode_key_maps_prefix_and_save() -> None:
     assert decode_key("\x13") == "C-s"
 
 
+def test_decode_key_maps_kill_and_yank() -> None:
+    from drei.terminal import decode_key
+
+    assert decode_key("\x0b") == "C-k"
+    assert decode_key("\x19") == "C-y"
+
+
 def test_system_port_write_and_flush(capsys: pytest.CaptureFixture[str]) -> None:
     from drei.terminal import SystemTerminalPort
 

@@ -11,16 +11,38 @@ from drei.commands import (
     InsertText,
     KeyboardQuit,
     KeyboardQuitEvent,
+    KillLine,
     PointMoved,
     SaveBuffer,
     SaveFailed,
     TextInserted,
+    TextKilled,
+    TextYanked,
+    Yank,
 )
 from drei.files import FilePort, normalize_os_error
 from drei.model import Buffer, BufferValue
 
-Command = InsertText | ForwardChar | BackwardChar | SaveBuffer | KeyboardQuit
-Event = TextInserted | PointMoved | BufferSaved | SaveFailed | KeyboardQuitEvent
+Command = (
+    InsertText
+    | ForwardChar
+    | BackwardChar
+    | SaveBuffer
+    | KillLine
+    | Yank
+    | KeyboardQuit
+)
+Event = (
+    TextInserted
+    | PointMoved
+    | TextKilled
+    | TextYanked
+    | BufferSaved
+    | SaveFailed
+    | KeyboardQuitEvent
+)
+
+KILL_RING_CAPACITY = 60
 
 
 class _NullFilePort:
@@ -38,10 +60,17 @@ class EditorSession:
         self.buffer = buffer
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
         self._transcript: list[Event] = []
+        self._kill_ring: list[str] = []
+        self._last_was_kill = False
 
     @property
     def transcript(self) -> tuple[Event, ...]:
         return tuple(self._transcript)
+
+    @property
+    def kill_ring(self) -> tuple[str, ...]:
+        """Newest-first view of the kill ring (derived cache, not the oracle)."""
+        return tuple(self._kill_ring)
 
     def dispatch(self, command: Command) -> CommandOutcome:
         current = self.buffer.current
@@ -72,11 +101,23 @@ class EditorSession:
                 events.append(PointMoved(-1, actual))
             case SaveBuffer():
                 new_value = self._save(current, events)
+            case KillLine():
+                new_value = self._kill_line(current, events)
+            case Yank():
+                new_value = self._yank(current, events)
             case KeyboardQuit():
                 new_value = current
                 events.append(KeyboardQuitEvent())
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
+
+        if isinstance(command, KillLine):
+            # A kill that emits an event starts/continues the append chain;
+            # a no-op kill leaves the chain intact.
+            if any(isinstance(e, TextKilled) for e in events):
+                self._last_was_kill = True
+        else:
+            self._last_was_kill = False
 
         # Validation happens in BufferValue.__post_init__ before any
         # mutation, so command failure is atomic by construction.
@@ -104,3 +145,34 @@ class EditorSession:
             return current
         events.append(BufferSaved(path))
         return replace(current, modified=False)
+
+    def _kill_line(self, current: BufferValue, events: list[Event]) -> BufferValue:
+        point = current.point
+        text = current.text
+        if point == len(text):
+            return current  # no-op at buffer end: no event, ring untouched
+        if text[point] == "\n":
+            killed, end = "\n", point + 1
+        else:
+            end = text.find("\n", point)
+            if end == -1:
+                end = len(text)
+            killed = text[point:end]
+        new_text = text[:point] + text[end:]
+        if self._last_was_kill and self._kill_ring:
+            self._kill_ring[0] += killed
+        else:
+            self._kill_ring.insert(0, killed)
+            del self._kill_ring[KILL_RING_CAPACITY:]
+        events.append(TextKilled(killed, point, end, "forward"))
+        return replace(current, text=new_text, modified=True)
+
+    def _yank(self, current: BufferValue, events: list[Event]) -> BufferValue:
+        if not self._kill_ring:
+            return current
+        text = self._kill_ring[0]
+        before = current.point
+        after = before + len(text)
+        new_text = current.text[:before] + text + current.text[before:]
+        events.append(TextYanked(text, before, after))
+        return replace(current, text=new_text, point=after, modified=True)

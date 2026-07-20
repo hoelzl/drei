@@ -24,6 +24,16 @@ class SaveBuffer:
 
 
 @dataclass(frozen=True, slots=True)
+class KillLine:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class Yank:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class KeyboardQuit:
     pass
 
@@ -39,6 +49,21 @@ class TextInserted:
 class PointMoved:
     requested: int
     actual: int
+
+
+@dataclass(frozen=True, slots=True)
+class TextKilled:
+    text: str
+    before: int
+    after: int
+    direction: str
+
+
+@dataclass(frozen=True, slots=True)
+class TextYanked:
+    text: str
+    before: int
+    after: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +101,13 @@ class BufferObservation:
 @dataclass(frozen=True, slots=True)
 class CommandOutcome:
     events: tuple[
-        TextInserted | PointMoved | BufferSaved | SaveFailed | KeyboardQuitEvent, ...
+        TextInserted
+        | PointMoved
+        | TextKilled
+        | TextYanked
+        | BufferSaved
+        | SaveFailed
+        | KeyboardQuitEvent,
+        ...,
     ]
     observation: BufferObservation
