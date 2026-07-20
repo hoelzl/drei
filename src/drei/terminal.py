@@ -12,6 +12,7 @@ import os
 import sys
 
 from drei.commands import KeyboardQuitEvent
+from drei.files import FilePort
 from drei.harness import EditorHarness
 
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
@@ -59,14 +60,26 @@ def decode_key(char: str) -> str:
 READINESS_MARKER = "\x1b]7791;ready\x1b\\"
 
 
-def run_editor(port: TerminalPort) -> None:
+def run_editor(
+    port: TerminalPort,
+    *,
+    file_port: FilePort | None = None,
+    file_path: str | None = None,
+    initial_text: str = "",
+) -> None:
     """Run the editor loop over an explicit terminal port."""
     port.write("DREI:READY\n")
     port.flush()
     port.enter_raw()
     try:
         width, height = port.get_size()
-        harness = EditorHarness(width=width, height=height)
+        harness = EditorHarness(
+            width=width,
+            height=height,
+            file_port=file_port,
+            file_path=file_path,
+            initial_text=initial_text,
+        )
         _write_frame(port, harness)
         while True:
             key = decode_key(port.read_key())

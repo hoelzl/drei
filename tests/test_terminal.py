@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from drei.terminal import TerminalPort, run_editor
@@ -99,11 +101,77 @@ def test_cli_launches_editor_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     called: list[object] = []
-    monkeypatch.setattr(drei.terminal, "run_editor", lambda port: called.append(port))
+    monkeypatch.setattr(
+        drei.terminal, "run_editor", lambda port, **kw: called.append(port)
+    )
 
     main([])  # must not raise
     assert len(called) == 1
     assert isinstance(called[0], drei.terminal.SystemTerminalPort)
+
+
+def test_cli_opens_existing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    import drei.terminal
+    from drei.cli import main
+
+    target = tmp_path / "notes.txt"
+    target.write_text("hello", encoding="utf-8")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        drei.terminal,
+        "run_editor",
+        lambda port, **kw: captured.update(kw),
+    )
+
+    main([str(target)])
+    assert captured["file_path"] == str(target)
+    assert captured["initial_text"] == "hello"
+
+
+def test_cli_missing_file_opens_empty_visiting_buffer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    import drei.terminal
+    from drei.cli import main
+
+    target = tmp_path / "new.txt"
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        drei.terminal,
+        "run_editor",
+        lambda port, **kw: captured.update(kw),
+    )
+
+    main([str(target)])  # must not raise or exit
+    assert captured["file_path"] == str(target)
+    assert captured["initial_text"] == ""
+
+
+def test_cli_unreadable_file_exits_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    from drei.cli import main
+
+    target = tmp_path / "dir.txt"
+    target.mkdir()  # reading a directory raises IsADirectoryError
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main([str(target)])
+    assert excinfo.value.code == 2
 
 
 def test_decode_key_maps_control_bytes() -> None:

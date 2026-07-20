@@ -23,16 +23,21 @@ def render(
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
 
     if height == 1:
-        modeline = _clip(f"Drei: {observation.buffer_id}", width)
+        modeline = _clip(_modeline(observation), width)
         return Frame(rows=(modeline,), cursor=(0, 0), width=width, height=height)
 
     body_rows = _render_body(observation.text, width, height - 2)
-    modeline = _clip(f"Drei: {observation.buffer_id}", width)
+    modeline = _clip(_modeline(observation), width)
     echo_row = _clip(echo, width)
 
     cursor_row, cursor_col = _cursor_position(observation, width, height - 2)
     rows = body_rows + (modeline, echo_row)
     return Frame(rows=rows, cursor=(cursor_row, cursor_col), width=width, height=height)
+
+
+def _modeline(observation: BufferObservation) -> str:
+    indicator = "**" if observation.modified else "--"
+    return f"Drei: {observation.buffer_id} {indicator}"
 
 
 def _clip(text: str, width: int) -> str:

@@ -94,6 +94,21 @@ def test_cursor_column_accounts_for_sanitized_expansion() -> None:
     assert frame.cursor == (0, 4)  # past 'A^AB', not raw index 3
 
 
+def test_modeline_shows_modified_indicator() -> None:
+    frame = render(
+        BufferObservation(buffer_id="notes.txt", text="x", point=1, modified=True),
+        width=20,
+        height=4,
+        echo="",
+    )
+    assert frame.rows[-2].startswith("Drei: notes.txt **")
+
+
+def test_modeline_unmodified_indicator() -> None:
+    frame = render(obs("x", 1), width=20, height=4)
+    assert frame.rows[-2].startswith("Drei: scratch --")
+
+
 def test_height_two_has_no_body() -> None:
     frame = render(obs("hello", 5), width=10, height=2)
     assert frame.rows == ("Drei: scra", "          ")
