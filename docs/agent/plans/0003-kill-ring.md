@@ -1,6 +1,6 @@
 # Third editor slice: kill ring
 
-**Status:** ready — architecture gate inherited from design 0002 (the kill ring is session-owned state, not a new effect; no new ports)
+**Status:** implemented — kill ring (KillLine/Yank, append chain, widened modified flag), TermVerify kill/yank scenario, and pinned Emacs kill/yank differential complete; append-chain and empty-kill deviations recorded in the parity registry
 
 **Goal:** Kill and yank text through the production command path with an Emacs-style kill ring, exercising multi-command composition (kill appends/prepend semantics across consecutive kills) entirely inside the deterministic core.
 
