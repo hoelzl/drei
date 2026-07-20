@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -98,6 +100,48 @@ def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
     pop_frame = frames[-2]  # last frame before the quit frame
     buffer_line = pop_frame.split("\r\n")[1]  # first buffer row (row 0 is blank)
     assert buffer_line.startswith("one")
+
+
+def test_editor_region_commands_through_byte_loop() -> None:
+    """C-@ C-f C-f C-w kills the region in-process; M-w copies; C-x C-x swaps.
+
+    ConPTY cannot deliver C-@ on Windows (msvcrt extended-key prefix —
+    see the skipped TermVerify scenario), so the byte-loop proof lives
+    here, exercising the same decode path the POSIX terminal uses.
+    """
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (40, 10)
+
+    # C-@ C-f C-f C-w kills "he"; C-y restores it; C-@ C-b C-b M-w copies
+    # "he" backward (copy clears the mark — the kill must come first);
+    # C-x C-x without a mark is then a no-op; C-g quits.
+    port = TallPort(
+        [
+            "\x00",
+            "\x06",
+            "\x06",
+            "\x17",  # mark 0 → point 2; kill "he"
+            "\x19",  # yank "he" back at 0 → "hello world", point 2
+            "\x00",
+            "\x02",
+            "\x02",
+            "\x1b",
+            "w",  # mark 2 → point 0; copy "he"
+            "\x18",
+            "\x18",  # C-x C-x: no mark (copy cleared it) → no-op
+            "\x07",
+        ]
+    )
+    run_editor(port, initial_text="hello world")
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    rows = [f.split("\r\n")[0] for f in frames[1:]]  # row 0 = buffer line
+    # After C-w: "llo world"; after C-y: "hello world" again; M-w and
+    # C-x C-x leave the frame unchanged.
+    assert any(r.startswith("llo world") for r in rows)
+    assert rows[-2].startswith("hello world")  # last frame before quit
+    assert rows[-1].startswith("hello world")  # quit frame
 
 
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
@@ -267,6 +311,60 @@ def test_decode_key_maps_prefix_and_save() -> None:
 
     assert decode_key("\x18") == "C-x"
     assert decode_key("\x13") == "C-s"
+
+
+def test_decode_key_maps_region_bytes() -> None:
+    from drei.terminal import decode_key
+
+    assert decode_key("\x00") == "C-@"
+    assert decode_key("\x17") == "C-w"
+
+
+def test_windows_extended_key_pair_is_consumed() -> None:
+    """getwch NUL/E0 prefix + scan code: the pair is consumed, unresolved.
+
+    Pins the msvcrt extended-key handling (the reason C-@ is
+    undeliverable on the Windows console). Only runs where the class has
+    the Windows method (win32); elsewhere the method doesn't exist.
+    """
+    if sys.platform != "win32":
+        pytest.skip("Windows console input path")
+
+    from drei.terminal import SystemTerminalPort
+
+    class _FakeMsvcrt:
+        def __init__(self, chars: list[str]) -> None:
+            self._chars = chars
+
+        def getwch(self) -> str:
+            return self._chars.pop(0)
+
+    read = SystemTerminalPort._read_key_windows  # unbound; needs no state
+    fake = _FakeMsvcrt(["\x00", "H", "a"])  # prefix, scan, then plain 'a'
+    with patch.dict(sys.modules, {"msvcrt": fake}):
+        assert read(None) == "\x00"  # type: ignore[arg-type]  # pair consumed
+        assert fake._chars == ["a"]  # scan code was eaten
+        assert read(None) == "a"  # type: ignore[arg-type]  # plain char passes
+
+
+def test_windows_plain_key_passes_through() -> None:
+    if sys.platform != "win32":
+        pytest.skip("Windows console input path")
+
+    from drei.terminal import SystemTerminalPort
+
+    class _FakeMsvcrt:
+        def __init__(self, chars: list[str]) -> None:
+            self._chars = chars
+
+        def getwch(self) -> str:
+            return self._chars.pop(0)
+
+    read = SystemTerminalPort._read_key_windows  # unbound; needs no state
+    fake = _FakeMsvcrt(["\xe0", "S", "\x06"])
+    with patch.dict(sys.modules, {"msvcrt": fake}):
+        assert read(None) == "\x00"  # type: ignore[arg-type]  # E0 pair consumed
+        assert read(None) == "\x06"  # type: ignore[arg-type]  # control byte ok
 
 
 def test_decode_key_maps_kill_and_yank() -> None:

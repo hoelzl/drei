@@ -215,6 +215,24 @@ def test_shipped_editor_kill_yank_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_region_kill_scenario(tmp_path: Path) -> None:
+    """Region kill is NOT drivable through ConPTY on Windows.
+
+    `getwch` treats NUL (C-@) as an extended-key prefix and swallows the
+    following byte as a scan code (verified live: NUL + 'Z' consumes 'Z'
+    with no frame change) — the same console-API constraint a real
+    Windows Emacs works around with different input plumbing. The
+    scenario is kept as a skip marker; region commands are proven
+    in-process through the same run_editor byte loop and via the
+    symbolic harness (tests/test_terminal.py), and the constraint is
+    recorded in docs/knowledge/emacs-parity.md.
+    """
+    pytest.skip(
+        "C-@ (NUL) is an msvcrt extended-key prefix on Windows; "
+        "undeliverable through ConPTY"
+    )
+
+
 def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
     """C-k C-k (chain broken) C-y through ConPTY; M-y pop proven in-process.
 

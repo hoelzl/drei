@@ -7,14 +7,22 @@ from drei.commands import (
     BufferObservation,
     BufferSaved,
     CommandOutcome,
+    CopyRegionAsKill,
+    ExchangePointAndMark,
     ForwardChar,
     InsertText,
     KeyboardQuit,
     KeyboardQuitEvent,
     KillLine,
+    KillRegion,
+    MarkExchanged,
+    MarkSet,
     PointMoved,
+    RegionCopied,
+    RegionKilled,
     SaveBuffer,
     SaveFailed,
+    SetMark,
     TextInserted,
     TextKilled,
     TextYanked,
@@ -33,6 +41,10 @@ Command = (
     | KillLine
     | Yank
     | YankPop
+    | SetMark
+    | KillRegion
+    | CopyRegionAsKill
+    | ExchangePointAndMark
     | KeyboardQuit
 )
 Event = (
@@ -41,10 +53,43 @@ Event = (
     | TextKilled
     | TextYanked
     | TextYankPopped
+    | MarkSet
+    | RegionKilled
+    | RegionCopied
+    | MarkExchanged
     | BufferSaved
     | SaveFailed
     | KeyboardQuitEvent
 )
+
+
+def _adjust_mark_insert(mark: int | None, at: int, count: int) -> int | None:
+    """Emacs marker semantics for inserting `count` chars at `at`.
+
+    Insertion before the mark shifts it right; insertion exactly at the
+    mark keeps it before the inserted text (default insertion type).
+    """
+    if mark is None:
+        return None
+    if at < mark:
+        return mark + count
+    return mark
+
+
+def _adjust_mark_delete(mark: int | None, start: int, end: int) -> int | None:
+    """Emacs marker semantics for deleting [start, end).
+
+    A mark after the deleted span shifts left; a mark inside clamps to the
+    deletion start; a mark before it is untouched.
+    """
+    if mark is None:
+        return None
+    if mark >= end:
+        return mark - (end - start)
+    if mark > start:
+        return start
+    return mark
+
 
 KILL_RING_CAPACITY = 60
 
@@ -91,7 +136,11 @@ class EditorSession:
                     after = before + len(text)
                     new_text = current.text[:before] + text + current.text[before:]
                     new_value = replace(
-                        current, text=new_text, point=after, modified=True
+                        current,
+                        text=new_text,
+                        point=after,
+                        modified=True,
+                        mark=_adjust_mark_insert(current.mark, before, len(text)),
                     )
                     events.append(TextInserted(text, before, after))
                 else:
@@ -114,8 +163,21 @@ class EditorSession:
                 new_value = self._yank(current, events)
             case YankPop():
                 new_value = self._yank_pop(current, events)
+            case SetMark():
+                new_value = replace(current, mark=current.point)
+                events.append(MarkSet(current.point))
+            case KillRegion():
+                new_value = self._kill_region(current, events)
+            case CopyRegionAsKill():
+                new_value = self._copy_region(current, events)
+            case ExchangePointAndMark():
+                if current.mark is None:
+                    new_value = current  # no mark: silent no-op
+                else:
+                    new_value = replace(current, point=current.mark, mark=current.point)
+                    events.append(MarkExchanged(current.point, current.mark))
             case KeyboardQuit():
-                new_value = current
+                new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
@@ -153,6 +215,7 @@ class EditorSession:
             point=new_value.point,
             file_path=new_value.file_path,
             modified=new_value.modified,
+            mark=new_value.mark,
         )
         return CommandOutcome(tuple(events), observation)
 
@@ -188,7 +251,40 @@ class EditorSession:
             self._kill_ring.insert(0, killed)
             del self._kill_ring[KILL_RING_CAPACITY:]
         events.append(TextKilled(killed, point, end, "forward"))
-        return replace(current, text=new_text, modified=True)
+        return replace(
+            current,
+            text=new_text,
+            modified=True,
+            mark=_adjust_mark_delete(current.mark, point, end),
+        )
+
+    def _kill_region(self, current: BufferValue, events: list[Event]) -> BufferValue:
+        if current.mark is None or current.mark == current.point:
+            return current  # no mark / empty region: silent no-op
+        lo = min(current.point, current.mark)
+        hi = max(current.point, current.mark)
+        killed = current.text[lo:hi]
+        direction = "forward" if current.point > current.mark else "backward"
+        self._kill_ring.insert(0, killed)
+        del self._kill_ring[KILL_RING_CAPACITY:]
+        events.append(RegionKilled(killed, lo, hi, direction))
+        return replace(
+            current,
+            text=current.text[:lo] + current.text[hi:],
+            point=lo,
+            modified=True,
+            mark=None,
+        )
+
+    def _copy_region(self, current: BufferValue, events: list[Event]) -> BufferValue:
+        if current.mark is None or current.mark == current.point:
+            return current  # no mark / empty region: silent no-op
+        lo = min(current.point, current.mark)
+        hi = max(current.point, current.mark)
+        self._kill_ring.insert(0, current.text[lo:hi])
+        del self._kill_ring[KILL_RING_CAPACITY:]
+        events.append(RegionCopied(current.text[lo:hi]))
+        return replace(current, mark=None)
 
     def _yank(self, current: BufferValue, events: list[Event]) -> BufferValue:
         if not self._kill_ring:
@@ -200,7 +296,13 @@ class EditorSession:
         events.append(TextYanked(text, before, after))
         self._yank_cursor = 0
         self._yank_bounds = (before, after)
-        return replace(current, text=new_text, point=after, modified=True)
+        return replace(
+            current,
+            text=new_text,
+            point=after,
+            modified=True,
+            mark=_adjust_mark_insert(current.mark, before, len(text)),
+        )
 
     def _yank_pop(self, current: BufferValue, events: list[Event]) -> BufferValue:
         if not self._yank_active or len(self._kill_ring) < 2:
@@ -214,4 +316,12 @@ class EditorSession:
         events.append(TextYankPopped(old, new, start, after))
         self._yank_cursor = cursor
         self._yank_bounds = (start, after)
-        return replace(current, text=new_text, point=after, modified=True)
+        return replace(
+            current,
+            text=new_text,
+            point=after,
+            modified=True,
+            mark=_adjust_mark_insert(
+                _adjust_mark_delete(current.mark, start, end), start, len(new)
+            ),
+        )

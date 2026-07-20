@@ -72,6 +72,62 @@ EMACS_YANK_POP_EVAL = (
 
 _YP_POP_RE = re.compile(r'POP POINT=(\d+) TEXT="(.*?)"\s*$', re.DOTALL)
 
+EMACS_REGION_EVAL = (
+    '(progn (switch-to-buffer (get-buffer-create "drei-rg")) (insert "hello world")'
+    " (goto-char (point-min))"
+    " (set-mark (point))"
+    " (forward-char 5)"
+    " (kill-region (mark) (point))"  # forward kill "hello"
+    ' (message "FWD POINT=%d TEXT=%S RING=%S" (point) (buffer-string) (car kill-ring))'
+    " (yank)"  # restore
+    " (goto-char 7)"  # 1-based: before 'w'
+    " (set-mark (point))"
+    " (backward-char 5)"
+    " (kill-region (point) (mark))"  # backward kill of "lo wo" (0-based 1..6)
+    ' (message "BWD POINT=%d TEXT=%S RING=%S" (point) (buffer-string) (car kill-ring))'
+    " (yank)"
+    " (goto-char 7)"
+    " (set-mark (point))"
+    " (backward-char 5)"
+    " (copy-region-as-kill (point) (mark))"  # copy, text unchanged
+    ' (message "CPY POINT=%d MARK=%d TEXT=%S RING=%S MOD=%S"'
+    " (point) (mark) (buffer-string) (car kill-ring) (buffer-modified-p))"
+    # clean copy: fresh unmodified buffer — does copy alone set the flag?
+    ' (switch-to-buffer (get-buffer-create "drei-rg2")) (insert "clean")'
+    " (set-buffer-modified-p nil)"
+    " (goto-char 1) (set-mark (point)) (forward-char 3)"
+    " (copy-region-as-kill (mark) (point))"
+    ' (message "CLEAN MOD=%S" (buffer-modified-p))))'
+)
+
+_REGION_RE = re.compile(
+    r'FWD POINT=(\d+) TEXT="(.*?)" RING="(.*?)"\r?\n.*?'
+    r'BWD POINT=(\d+) TEXT="(.*?)" RING="(.*?)"\r?\n.*?'
+    r'CPY POINT=(\d+) MARK=(\d+) TEXT="(.*?)" RING="(.*?)" MOD=(\S+)\r?\n.*?'
+    r"CLEAN MOD=(\S+)\s*$",
+    re.DOTALL,
+)
+
+EMACS_MARKER_EVAL = (
+    '(progn (switch-to-buffer (get-buffer-create "drei-mk"))'
+    ' (insert "abc\\ndef")'
+    " (goto-char 6) (set-mark (point))"  # mark before 'e' (1-based 6)
+    " (goto-char (point-min))"
+    " (kill-line)"  # kill "abc" [1,4); mark 6 survives + shifts to 3
+    ' (message "M1 MARK=%d TEXT=%S" (mark) (buffer-string))'
+    ' (goto-char (point-min)) (insert "XY")'  # insert before mark
+    ' (message "M2 MARK=%d TEXT=%S" (mark) (buffer-string))'
+    ' (goto-char 3) (set-mark (point)) (insert "Z")'  # insert AT mark 3
+    ' (message "M3 MARK=%d TEXT=%S" (mark) (buffer-string)))'
+)
+
+_MARKER_RE = re.compile(
+    r'M1 MARK=(\d+) TEXT="(.*?)"\r?\n.*?'
+    r'M2 MARK=(\d+) TEXT="(.*?)"\r?\n.*?'
+    r'M3 MARK=(\d+) TEXT="(.*?)"\s*$',
+    re.DOTALL,
+)
+
 PINNED_IMAGE = "ubuntu:24.04"
 PINNED_VERSION_PREFIX = "GNU Emacs 29."
 
@@ -364,3 +420,130 @@ def test_yank_pop_first_pop_parity() -> None:
     assert TextYankPopped("three!", "one", 1, 4) in popped.events
     assert popped.observation.text == "\none"
     assert popped.observation.point == emacs_point_after_pop == 4
+
+
+def test_region_kill_copy_parity() -> None:
+    """Forward kill, backward kill, copy — parity on text/point/ring/mark.
+
+    Parity required on the region semantics; deactivation-on-edit is
+    batch-unverifiable (deviation, registry). Emacs point/mark are
+    1-based; Drei 0-based.
+    """
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
+
+    lines = _run_pinned_emacs(EMACS_REGION_EVAL)
+    blob = "\n".join(lines).replace("\r\n", "\n")
+    region = _REGION_RE.search(blob)
+    assert region is not None, blob
+
+    # Emacs evidence — forward kill of "hello": text " world", point 0
+    # (0-based), ring head "hello".
+    assert region.group(2) == " world"
+    assert int(region.group(1)) - 1 == 0
+    assert region.group(3) == "hello"
+    # Backward kill of "ello " (0-based [1,6)): text "hworld", point 1.
+    assert region.group(5) == "hworld"
+    assert int(region.group(4)) - 1 == 1
+    assert region.group(6) == "ello "
+    # Copy: text unchanged, point unchanged; the flag is sticky (earlier
+    # kills), but the clean fresh-buffer arm proves copy alone sets nothing.
+    assert region.group(9) == "hello world"
+    assert region.group(10) == "ello "
+    assert region.group(12) == "nil"  # CLEAN: copy leaves modified nil
+
+    # Drei drives the same sequence.
+    from drei.commands import (
+        BackwardChar,
+        CopyRegionAsKill,
+        ForwardChar,
+        KillRegion,
+        RegionCopied,
+        RegionKilled,
+        SetMark,
+        Yank,
+    )
+
+    session = EditorSession(
+        Buffer(BufferId("drei-rg"), BufferValue(text="hello world", point=0))
+    )
+    session.dispatch(SetMark())
+    for _ in range(5):
+        session.dispatch(ForwardChar())
+    killed = session.dispatch(KillRegion())
+    assert RegionKilled("hello", 0, 5, "forward") in killed.events
+    assert killed.observation.text == region.group(2) == " world"
+    assert killed.observation.point == 0
+    assert session.kill_ring[0] == region.group(3) == "hello"
+    assert killed.observation.mark is None
+
+    session.dispatch(Yank())  # restore "hello world", point 5
+    session.dispatch(ForwardChar())  # point 6 (0-based) = before 'w'
+    session.dispatch(SetMark())
+    for _ in range(5):
+        session.dispatch(BackwardChar())
+    killed_bwd = session.dispatch(KillRegion())
+    assert RegionKilled("ello ", 1, 6, "backward") in killed_bwd.events
+    assert killed_bwd.observation.text == region.group(5) == "hworld"
+    assert killed_bwd.observation.point == 1
+    assert session.kill_ring[0] == region.group(6) == "ello "
+
+    session.dispatch(Yank())  # restore, point 6
+    session.dispatch(SetMark())
+    for _ in range(5):
+        session.dispatch(BackwardChar())
+    copied = session.dispatch(CopyRegionAsKill())
+    assert RegionCopied("ello ") in copied.events
+    assert copied.observation.text == region.group(9) == "hello world"
+    assert copied.observation.point == 1
+    # Copy does not SET the flag: the buffer was already modified by the
+    # kills above; a clean-session copy keeps it clear (CLEAN arm, and
+    # tests/test_mark_region.py::test_copy_region_pushes_ring...).
+    assert copied.observation.modified  # sticky from the kills, not the copy
+    assert session.kill_ring[0] == region.group(10) == "ello "
+
+
+def test_marker_adjustment_parity() -> None:
+    """Markers shift on edits (probed rule): delete before, insert before,
+    insert AT. Parity required on the resulting mark position.
+    """
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
+
+    lines = _run_pinned_emacs(EMACS_MARKER_EVAL)
+    blob = "\n".join(lines).replace("\r\n", "\n")
+    marker = _MARKER_RE.search(blob)
+    assert marker is not None, blob
+
+    # Emacs evidence (1-based marks): kill-line [1,4) with mark 6 → 3;
+    # insert "XY" before → 5; insert "Z" AT mark 3 → stays 3.
+    assert (int(marker.group(1)), int(marker.group(3)), int(marker.group(5))) == (
+        3,
+        5,
+        3,
+    )
+
+    # Drei drives the identical command sequence (0-based marks).
+    from drei.commands import (
+        BackwardChar,
+        InsertText,
+        KillLine,
+        SetMark,
+    )
+
+    session = EditorSession(
+        Buffer(BufferId("drei-mk"), BufferValue(text="abc\ndef", point=5))
+    )
+    session.dispatch(SetMark())  # mark 5 (before 'e')
+    for _ in range(5):
+        session.dispatch(BackwardChar())  # point 0
+    session.dispatch(KillLine())  # kills "abc" [0,3); mark survives
+    assert session.buffer.current.mark == int(marker.group(1)) - 1 == 2
+    assert session.buffer.current.text == "\ndef"
+    session.dispatch(InsertText("XY"))  # insert before the mark
+    assert session.buffer.current.mark == int(marker.group(3)) - 1 == 4
+    assert session.buffer.current.text == "XY\ndef"
+    session.dispatch(SetMark())  # mark 2 (point is 2 after the insert)
+    session.dispatch(InsertText("Z"))  # insert AT the mark: stays before
+    assert session.buffer.current.mark == int(marker.group(5)) - 1 == 2
+    assert session.buffer.current.text == "XYZ\ndef"

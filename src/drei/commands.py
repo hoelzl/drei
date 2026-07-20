@@ -39,6 +39,26 @@ class YankPop:
 
 
 @dataclass(frozen=True, slots=True)
+class SetMark:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class KillRegion:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class CopyRegionAsKill:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ExchangePointAndMark:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class KeyboardQuit:
     pass
 
@@ -80,6 +100,30 @@ class TextYankPopped:
 
 
 @dataclass(frozen=True, slots=True)
+class MarkSet:
+    position: int
+
+
+@dataclass(frozen=True, slots=True)
+class RegionKilled:
+    text: str
+    before: int
+    after: int
+    direction: str
+
+
+@dataclass(frozen=True, slots=True)
+class RegionCopied:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class MarkExchanged:
+    point_before: int
+    mark_before: int
+
+
+@dataclass(frozen=True, slots=True)
 class BufferSaved:
     path: str
 
@@ -109,6 +153,7 @@ class BufferObservation:
     point: int
     file_path: str | None = None
     modified: bool = False
+    mark: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +164,10 @@ class CommandOutcome:
         | TextKilled
         | TextYanked
         | TextYankPopped
+        | MarkSet
+        | RegionKilled
+        | RegionCopied
+        | MarkExchanged
         | BufferSaved
         | SaveFailed
         | KeyboardQuitEvent,

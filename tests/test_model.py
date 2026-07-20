@@ -13,6 +13,11 @@ def test_buffer_value_rejects_point_past_end() -> None:
         BufferValue(text="abc", point=4)
 
 
+def test_buffer_value_rejects_mark_past_end() -> None:
+    with pytest.raises(ValueError, match="mark"):
+        BufferValue(text="abc", point=0, mark=4)
+
+
 def test_buffer_shell_identity_is_stable() -> None:
     shell = Buffer(BufferId("scratch"), BufferValue(text="", point=0))
     first_value = shell.current

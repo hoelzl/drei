@@ -50,6 +50,7 @@ class TerminalPort(abc.ABC):
 def decode_key(char: str) -> str:
     """Convert a raw input character to a symbolic key name."""
     control = {
+        "\x00": "C-@",
         "\x06": "C-f",
         "\x02": "C-b",
         "\x07": "C-g",
@@ -57,6 +58,7 @@ def decode_key(char: str) -> str:
         "\x13": "C-s",
         "\x0b": "C-k",
         "\x19": "C-y",
+        "\x17": "C-w",
     }
     return control.get(char, char)
 
@@ -208,10 +210,19 @@ class SystemTerminalPort(TerminalPort):
 
     if sys.platform == "win32":
 
-        def _read_key_windows(self) -> str:  # pragma: no cover
+        def _read_key_windows(self) -> str:  # pragma: no cover - platform shim
             import msvcrt
 
-            return msvcrt.getwch()
+            char = msvcrt.getwch()
+            if char in ("\x00", "\xe0"):
+                # Extended key prefix (arrows, function keys, ...): the scan
+                # code follows in the next read. Consume the pair and yield
+                # an unresolved marker — no extended keys are bound yet.
+                # This also means C-@ (NUL) is undeliverable through msvcrt
+                # on the Windows console (recorded in the parity registry).
+                msvcrt.getwch()
+                return "\x00"
+            return char
 
     def write(self, text: str) -> None:
         sys.stdout.write(text)

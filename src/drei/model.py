@@ -14,10 +14,13 @@ class BufferValue:
     point: int
     file_path: str | None = None
     modified: bool = False
+    mark: int | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.point <= len(self.text):
             raise ValueError(f"point {self.point} outside 0..{len(self.text)}")
+        if self.mark is not None and not 0 <= self.mark <= len(self.text):
+            raise ValueError(f"mark {self.mark} outside 0..{len(self.text)}")
 
 
 class Buffer:
