@@ -181,9 +181,11 @@ def test_emacs_differential_insert_and_horizontal_movement() -> None:
 def test_emacs_differential_save_clears_modified() -> None:
     """Save semantics parity: insert sets modified, save clears it.
 
-    Verdict: parity required on insert-sets-modified, save-clears-modified,
-    and the file content on disk. Point after inserting "hi" is 2 (Drei,
-    0-based) / 3 (Emacs, 1-based) — same normalization as slice 1.
+    Verdict: parity required on insert-sets-modified, save-clears-modified.
+    The Emacs side compares observable `buffer-modified-p` semantics; file
+    content is asserted Drei-side in the fake port. Point after inserting
+    "hi" is 2 (Drei, 0-based) / 3 (Emacs, 1-based) — same normalization as
+    slice 1.
     """
     if os.environ.get("DREI_PARITY") != "1":
         pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
