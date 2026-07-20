@@ -80,6 +80,26 @@ def test_editor_meta_chord_yank_pop_through_byte_loop() -> None:
     assert port.restored
 
 
+def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
+    """End-to-end at the byte-loop level: kill, kill, yank, ESC y pops.
+
+    This is the pop's frame evidence (ConPTY cannot deliver ESC; see
+    termverify issue #169 and the termverify scenario docstring).
+    """
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (40, 10)
+
+    # C-k C-f C-k C-y ESC y C-g over "one\ntwo\nthree"
+    port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x07"])
+    run_editor(port, initial_text="one\ntwo\nthree")
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    pop_frame = frames[-2]  # last frame before the quit frame
+    buffer_line = pop_frame.split("\r\n")[1]  # first buffer row (row 0 is blank)
+    assert buffer_line.startswith("one")
+
+
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.

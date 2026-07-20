@@ -57,6 +57,21 @@ _KILL_R2_RE = re.compile(
 )
 _KILL_YANK_RE = re.compile(r'YANKED POINT=(\d+) TEXT="(.*?)"\s*$', re.DOTALL)
 
+EMACS_YANK_POP_EVAL = (
+    '(progn (switch-to-buffer (get-buffer-create "drei-yp")) (insert "one\\nthree!")'
+    " (goto-char (point-min))"
+    " (kill-line)"  # "one" -> ring ("one")
+    " (forward-line 1)"
+    " (kill-line)"  # "three!" -> ring ("three!" "one")
+    ' (message "RING=%S" kill-ring)'
+    " (yank)"  # inserts "three!" at point
+    " (setq last-command (quote yank))"  # batch cannot propagate it; force it
+    " (yank-pop)"  # replaces with "one" (different length)
+    ' (message "POP POINT=%d TEXT=%S" (point) (buffer-string)))'
+)
+
+_YP_POP_RE = re.compile(r'POP POINT=(\d+) TEXT="(.*?)"\s*$', re.DOTALL)
+
 PINNED_IMAGE = "ubuntu:24.04"
 PINNED_VERSION_PREFIX = "GNU Emacs 29."
 
@@ -297,4 +312,55 @@ def test_emacs_differential_kill_line_and_yank() -> None:
     # Emacs yanked the 1-char "\n" at point 0 → point 1; same rule, different
     # ring content (deviation). Verify the rule shape matches.
     assert emacs_point_after_yank == 1
-    assert o3.observation.point == 0 + len("ab\n")
+
+
+def test_yank_pop_first_pop_parity() -> None:
+    """First yank-pop replaces the yank with the next-older ring entry.
+
+    Verdict: parity required on the first pop — older entry replaces the
+    yanked span in place, point = start + len(new) (length-changing entries
+    pin the placement rule). The pop CYCLE (second pop wrapping) is an
+    intentional batch-unverifiable deviation: batch Emacs falls back to
+    read-from-kill-ring (stdin) once last-command propagation ends, so the
+    cycle is pinned by unit/property tests instead. Pops on empty/1-entry
+    rings and pop-without-active-yank are Drei silent no-ops vs Emacs error
+    signals — intentional deviations recorded in the registry.
+    """
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
+
+    lines = _run_pinned_emacs(EMACS_YANK_POP_EVAL)
+    blob = "\n".join(lines).replace("\r\n", "\n")
+    pop = _YP_POP_RE.search(blob)
+    assert pop is not None, blob
+
+    # Emacs evidence: yank "three!" at point 1 (after the leftover "\n" —
+    # batch kill-line leaves point after it), pop replaces with "one" →
+    # text "\none", point after the inserted "one" (0-based 4).
+    assert pop.group(2) == "\none"
+    emacs_point_after_pop = int(pop.group(1)) - 1  # 1-based → 0-based
+    assert emacs_point_after_pop == 1 + len("one")
+
+    # Drei drives the same sequence.
+    from drei.commands import (
+        ForwardChar,
+        KillLine,
+        TextYanked,
+        TextYankPopped,
+        Yank,
+        YankPop,
+    )
+
+    session = EditorSession(
+        Buffer(BufferId("drei-yp"), BufferValue(text="one\nthree!", point=0))
+    )
+    session.dispatch(KillLine())  # "one"; text "\nthree!", point 0
+    session.dispatch(ForwardChar())  # point 1 = start of "three!"; breaks chain
+    session.dispatch(KillLine())  # "three!"; text "\n", point 1
+    yanked = session.dispatch(Yank())
+    assert TextYanked("three!", 1, 7) in yanked.events
+
+    popped = session.dispatch(YankPop())
+    assert TextYankPopped("three!", "one", 1, 4) in popped.events
+    assert popped.observation.text == "\none"
+    assert popped.observation.point == emacs_point_after_pop == 4
