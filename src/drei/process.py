@@ -84,11 +84,18 @@ class SystemProcessPort:
         timeout: float | None = None,
     ) -> ProcessResult:
         try:
+            # input="" closes the child's stdin when no input_text is given,
+            # so a stdin-reading child gets EOF instead of the editor's TTY.
+            # encoding/errors pin utf-8 with replacement, so non-UTF-8 child
+            # output never raises UnicodeDecodeError (which is not an OSError
+            # and would escape run_process's normalization).
             completed = subprocess.run(
                 list(argv),
-                input=input_text,
+                input=input_text if input_text is not None else "",
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as error:

@@ -352,9 +352,8 @@ def test_undo_all_restores_initial_state(history: list[object]) -> None:
 @given(command_history())
 def test_process_deliveries_never_perturb_editor_folds(history: list[object]) -> None:
     """Process deliveries are external inputs: they never change buffer, undo,
-    or kill-ring folds, and the process log derives from the transcript."""
+    or kill-ring folds, and the process log stays consistent with the transcript."""
     session = _process_session()
-    expected_log_len = 0
     for command in history:
         before = session.buffer.current
         undo_before = (len(session._undo_history), len(session._undo_redo))
@@ -365,20 +364,26 @@ def test_process_deliveries_never_perturb_editor_folds(history: list[object]) ->
             assert session.buffer.current == before
             assert (len(session._undo_history), len(session._undo_redo)) == undo_before
             assert session.kill_ring == ring_before
-            # Exactly one delivery event per command; only successes log.
+            # Exactly one delivery event per command.
             recorded = [
                 e for e in outcome.events if isinstance(e, ProcessOutputRecorded)
             ]
             assert len(recorded) == 1
-            if command.result is not None:
-                expected_log_len += 1
-        assert len(session.process_log) == expected_log_len
     # The transcript carries exactly one ProcessOutputRecorded per delivery.
     deliveries = sum(1 for c in history if isinstance(c, DeliverProcessOutput))
-    recorded_total = sum(
-        1 for e in session.transcript if isinstance(e, ProcessOutputRecorded)
-    )
-    assert recorded_total == deliveries
+    events = [e for e in session.transcript if isinstance(e, ProcessOutputRecorded)]
+    assert len(events) == deliveries
+    # The process log holds one entry per *successful* delivery, and each is
+    # consistent with its event (the event omits full text, so the log is an
+    # independent cache — but argv/exit_code must never diverge).
+    successes = [e for e in events if e.status in ("ok", "nonzero-exit")]
+    log = session.process_log
+    assert len(log) == len(successes)
+    for entry, event in zip(log, successes, strict=True):
+        assert entry.argv == event.argv
+        assert entry.exit_code == event.exit_code
+        assert len(entry.stdout) == event.stdout_len
+        assert len(entry.stderr) == event.stderr_len
 
 
 @given(command_history())

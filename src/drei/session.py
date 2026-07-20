@@ -263,7 +263,15 @@ class EditorSession:
 
     @property
     def process_log(self) -> tuple[ProcessResult, ...]:
-        """Captured process results, oldest-first (derived cache, not the oracle)."""
+        """Captured process results, oldest-first.
+
+        An independent cache, not a transcript fold: the ``ProcessOutputRecorded``
+        events carry lengths/status only, so the full ``stdout``/``stderr`` here
+        is richer than the transcript and not reconstructible from it. Only
+        successful launches are logged (a launch failure records an event but
+        appends nothing), and construction-time validation on
+        ``DeliverProcessOutput`` keeps ``log[i]`` consistent with its event.
+        """
         return tuple(self._process_log)
 
     def dispatch(self, command: Command) -> CommandOutcome:
@@ -335,9 +343,9 @@ class EditorSession:
                         )
                     )
                 else:
-                    events.append(
-                        ProcessOutputRecorded(argv, -1, 0, 0, error or "io-error")
-                    )
+                    # Construction validation guarantees error is a token here.
+                    assert error is not None
+                    events.append(ProcessOutputRecorded(argv, -1, 0, 0, error))
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
@@ -416,14 +424,9 @@ class EditorSession:
         """
         try:
             result = self._processes.run(argv, input_text=input_text, timeout=timeout)
-        except ProcessTimedOut as error:
-            return self.dispatch(
-                DeliverProcessOutput(argv, None, normalize_process_error(error))
-            )
-        except OSError as error:
-            return self.dispatch(
-                DeliverProcessOutput(argv, None, normalize_process_error(error))
-            )
+        except (ProcessTimedOut, OSError) as error:
+            token = normalize_process_error(error)
+            return self.dispatch(DeliverProcessOutput(argv, None, token))
         return self.dispatch(DeliverProcessOutput(argv, result, None))
 
     def _undo(self, current: BufferValue, events: list[Event]) -> BufferValue:

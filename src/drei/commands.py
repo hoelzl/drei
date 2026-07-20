@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from drei.process import ProcessResult
 
@@ -180,14 +181,35 @@ class DeliverProcessOutput:
     """External delivery: an already-captured process result enters the session.
 
     Not a user edit. The session records it as one immutable event; buffer,
-    undo, and kill-ring state are untouched. ``result`` is the captured run;
-    ``error`` is a normalized token (``not-found``, ``permission-denied``,
-    ``io-error``, ``timeout``) when the launch itself failed.
+    undo, and kill-ring state are untouched. Exactly one of ``result`` /
+    ``error`` is set: ``result`` is the captured run, ``error`` is a
+    normalized token (``not-found``, ``permission-denied``, ``io-error``,
+    ``timeout``) when the launch itself failed. Validated at construction so
+    machine-generated deliveries (the ACP pump) cannot record corrupt
+    provenance into the transcript.
     """
 
     argv: tuple[str, ...]
     result: ProcessResult | None = None  # None on launch failure
     error: str | None = None
+
+    _ERROR_TOKENS: ClassVar[frozenset[str]] = frozenset(
+        {"not-found", "permission-denied", "io-error", "timeout"}
+    )
+
+    def __post_init__(self) -> None:
+        if (self.result is None) == (self.error is None):
+            raise ValueError(
+                "exactly one of result / error must be set on a process delivery"
+            )
+        if self.result is not None and self.result.argv != self.argv:
+            raise ValueError(
+                f"result argv {self.result.argv!r} != delivery argv {self.argv!r}"
+            )
+        if self.error is not None and self.error not in self._ERROR_TOKENS:
+            raise ValueError(
+                f"error must be one of {sorted(self._ERROR_TOKENS)}, got {self.error!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)

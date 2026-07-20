@@ -38,6 +38,12 @@ def test_error_token_mapping() -> None:
     assert normalize_process_error(ProcessTimedOut(("cmd",), 1.0)) == "timeout"
 
 
+def test_process_timed_out_is_not_an_oserror() -> None:
+    """normalize_process_error relies on this ordering: if ProcessTimedOut were
+    an OSError, the timeout arm could be shadowed. Pin the invariant."""
+    assert not issubclass(ProcessTimedOut, OSError)
+
+
 def test_system_port_captures_stdout_and_exit_code() -> None:
     port = SystemProcessPort()
     result = port.run((sys.executable, "-c", "import sys; sys.stdout.write('hi')"))
@@ -79,6 +85,26 @@ def test_system_port_missing_executable_raises_not_found() -> None:
     port = SystemProcessPort()
     with pytest.raises(FileNotFoundError):
         port.run(("drei-no-such-executable-xyz-123",))
+
+
+def test_system_port_closes_stdin_when_no_input() -> None:
+    """Without input_text the child's stdin is closed (not the editor's TTY)."""
+    port = SystemProcessPort()
+    result = port.run(
+        (sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())")
+    )
+    # Reads EOF immediately rather than inheriting/blocking on the parent stdin.
+    assert result.stdout == ""
+
+
+def test_system_port_decodes_non_utf8_output_without_crashing() -> None:
+    """Child output that is not valid utf-8 is replaced, never a UnicodeDecodeError."""
+    port = SystemProcessPort()
+    result = port.run(
+        (sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff\\xfe')")
+    )
+    assert result.exit_code == 0
+    assert result.stdout == "��"
 
 
 def test_system_port_timeout_raises() -> None:
