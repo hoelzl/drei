@@ -1,0 +1,53 @@
+# Fourth editor slice: yank-pop
+
+**Status:** ready — architecture gate inherited from design 0002 (the yank-pop rotation cursor is session-owned transient state, no new ports)
+
+**Goal:** Make the kill ring's depth observable: `M-y` immediately after a yank (or another yank-pop) replaces the just-yanked text with the next-older ring entry, cycling through the ring.
+
+## Feasibility evidence (probed against pinned GNU Emacs 29.3)
+
+- Batch `yank-pop` without a preceding yank reads from stdin (`read-from-kill-ring`) — an error path, not the replacement behavior.
+- With `last-command` forced to `'yank` around a single `yank-pop`, batch Emacs **does** perform the replacement (verified: yank "two", pop → "one", point after the replaced text). So the **first** pop's replacement semantics are batch-verifiable.
+- A **second** consecutive pop falls back to stdin-reading in batch (`read-from-kill-ring` again) because batch does not propagate `last-command = 'yank-pop'` between top-level calls. The **cycle** (pop-pop wrapping) is therefore batch-unverifiable — same class of deviation as the slice-3 append chain.
+
+## Scope
+
+In scope:
+
+- `M-y` (`YankPop`): valid only when the immediately preceding event-emitting command was a successful `Yank` or `YankPop`. It deletes the just-yanked text (between the recorded yank bounds) and inserts the next-older ring entry in its place, leaving point after the new text (same point rule as yank — scoped to point-after placements; point-before-yank placements are a future numeric-arg slice).
+- Ring rotation cursor: session-owned transient state — the index of the entry most recently yanked/popped (0 = newest). `Yank` sets active + cursor 0 + bounds **only when it emits `TextYanked`** (a no-op yank on an empty ring *clears* active); each `YankPop` advances the cursor by 1 modulo ring size (wrap-around). Active is cleared iff a dispatched command emits any event (mechanically: `events` non-empty — the same shape as the `_last_was_kill` rule); silent no-ops preserve it. `C-g` clears active (it emits `KeyboardQuitEvent`).
+- `M-y` with no active yank, on an empty ring, **or on a one-entry ring** is a **silent no-op** (no event). The no-op-vs-error choice deviates from Emacs ("Previous command was not a yank" / 1-entry self-replacement) — deliberate, consistent with the slice-3 empty-kill no-op deviation (Drei has no echo-error mechanism yet) and it avoids a self-replacement `TextYankPopped(old==new)` setting `modified` on unchanged text, which would contradict the modified-flag invariant. Recorded in the registry.
+- A no-op pop emits no event and therefore does **not** break the kill-append chain (mirrors the no-op-kill rule); a successful pop emits an event and breaks it (`C-k C-k C-y M-y C-k` → the final kill opens a new entry, matching Emacs where `last-command` = `yank-pop` ≠ `kill-line`).
+- Ring entries themselves are unchanged by pops (the rotation cursor moves; the ring is not rotated). Equivalence note: Emacs's `yank` resets `kill-ring-yank-pointer` to `kill-ring` on a fresh yank, so cursor-reset-to-0 matches Emacs source semantics. **However**, pinned 29.3 measurement shows the rotated pointer persisting across a batch-forced pop (fresh yank after pop inserted the older entry, `YP=ROTATED`) — batch-unverifiable either way, so reset-on-yank is kept as the Drei rule (matches source semantics and interactive intent) and the divergence risk is recorded in Risks, not the registry.
+- Events: `TextYankPopped(old_text, new_text, before, after)` — `before` = start of the replaced region (the recorded yank start), `after` = before + len(new_text). `CommandOutcome.events` union widens. `TextYankPopped` is a text-changing event: it sets `modified` (registry updated). The event is interpreted **positionally** against the transcript (coherence property below), not by value lookup — duplicate ring entries make value-based identification ambiguous; no ring-index field (redundant given coherence).
+- Keys: `M-y` (ESC then `y`). **Decode design (revised after review):** `decode_key` stays a pure 1→1 char→key map. Byte assembly lives in the terminal byte loop only: `run_editor` holds a one-byte `pending_esc` lookbehind — ESC + letter → `"M-<letter>"`; ESC + non-letter → `UnresolvedKey("\x1b")` and the byte is reprocessed normally; a bare ESC at stream end → `UnresolvedKey("\x1b")`. The resolver maps `"M-y"` in a new `_META_KEYS` dict. The harness bypasses byte assembly entirely: unit/harness tests inject the already-assembled symbolic `"M-y"` via `send("M-y")`. TermVerify dispatches the meta chord as one epoch containing both bytes (`\x1by`) so the quiescent-epoch boundary never lands mid-chord; the scenario pins this. No general meta/prefix architecture (deferred to the minibuffer slice).
+
+Explicitly out of scope (deferred): `C-u M-y` / numeric arguments, pop direction reversal (negative arg), the minibuffer, region commands, `yank-pop` on a yank that was itself appended to (chain head) — pops from the chain head behave like any other entry (the whole appended entry is one ring entry, replaced as a unit).
+
+## Sequence
+
+1. `YankPop` command + `TextYankPopped` event (TDD); union widens.
+2. Session transient state: `_yank_active: bool` and `_yank_cursor: int` plus recorded `_last_yank_bounds: tuple[int, int]`. All private, mutated only in dispatch. `Yank` sets active+cursor 0+bounds; `YankPop` requires active, replaces bounds content with `ring[(cursor+1) % len]`, advances cursor, updates bounds; any other event-emitting command clears active (silent no-ops preserve it, mirroring the chain rule — the transcript stays the oracle: a `TextYankPopped` always follows a `TextYanked`/`TextYankPopped` in the evidence).
+3. Semantics tests: pop replaces with next-older entry; pop-pop cycles and wraps (2-entry ring: yank A, pop → B, pop → A); pop after non-yank command is a no-op; pop after `C-g` is a no-op; pop on empty ring no-op; pop on 1-entry ring no-op; no-op yank (empty ring) clears active; point-after-pop; modified set by pop; bounds bookkeeping when a pop changes text length (the replaced region shrinks/grows and subsequent pops still target the right span); pop on a multi-line yank (bounds contain `\n`); pop breaks the append chain (`C-k C-k C-y M-y C-k` → final kill opens a new entry); no-op pop preserves the chain (`C-k M-y@-no-active C-k` → appends).
+4. Keys: byte-loop ESC lookbehind per the decode design in Scope (bare ESC, ESC+non-letter, ESC at stream end — unit tests for all three); resolver maps `"M-y"` → `YankPop` via `_META_KEYS`; harness `send("M-y")` bypasses byte assembly.
+5. Property tests: strategy gains `YankPop`; replay determinism (cursor is part of replayed evidence via outcomes); new invariant — a `YankPop` immediately after a `Yank` replaces the yanked span with `ring[1 % len]` (when ring ≥ 2) and text length changes by `len(new)-len(old)`; modified invariant widened to `TextYankPopped`.
+6. TermVerify scenario: file-backed buffer, `C-k` ×2 (two entries), `C-y`, `M-y` — frame shows the older entry replacing the newer, end to end through ConPTY (ESC-y chord through the byte layer).
+7. Emacs differential: single-pop batch eval with **different-length** ring entries (e.g. kill "one" then "three!" — yank newest, force `last-command='yank'`, `yank-pop`, message resulting text/point) so the differential actually pins length-change point placement (`point = start + len(new)`, not `len(old)`); parity required on first-pop replacement. The cycle (second pop) is an intentional batch-unverifiable deviation, pinned by unit/property tests, recorded in the registry.
+8. Docs: README status, `development.md` if commands change, plan status; registry deviations updated — the existing `M-y … not implemented … deferred` row is **replaced** (not appended to) by: pop-cycle batch-unverifiable; pop-no-op vs Emacs error signal; 1-entry-ring self-replacement (Emacs self-replaces, Drei no-ops); and the modified-flag rule's widening to `TextYankPopped`. One line in Risks: Emacs yank/yank-pop push the mark — Drei has no mark yet; the first slice to add one must revisit yank bounds (mark, point) vs Drei's (start, end).
+
+## Acceptance
+
+- Full quality gate green on 3.12–3.14 and both CI OSes; coverage ratchet at 100%.
+- First-pop replacement pinned by the pinned-Emacs differential with different-length entries (length-change point placement verified); cycle/wrap pinned by unit + property tests.
+- Pop is a no-op without an active yank, on an empty ring, and on a 1-entry ring; pop after `C-g` is a no-op; all three deviations recorded in the registry.
+- Pop bounds bookkeeping: after a length-changing pop, a second pop replaces exactly the new span (focused test + property); multi-line yank-pop pinned.
+- Chain interplay pinned: successful pop breaks the append chain; no-op pop preserves it; no-op yank clears active.
+- Byte-loop ESC lookbehind unit-tested (ESC+letter, ESC+non-letter reprocess, bare ESC at stream end); TermVerify meta chord dispatched as one epoch.
+- Transcript coherence: every `TextYankPopped` is preceded by a `TextYanked`/`TextYankPopped` with no intervening event (property test folds the transcript).
+- No ambient I/O in the command path (acceptance grep: `session.py commands.py model.py keys.py render.py` clean — `terminal.py` is intentionally excluded: it does I/O and hosts the byte loop).
+
+## Risks and decisions
+
+- **Cursor vs ring rotation:** Drei moves a cursor rather than Emacs's `kill-ring-yank-pointer` list rotation. Behaviorally identical for the supported surface (yank newest, pop cycles older); the ring as immutable evidence stays stable, which replay and the transcript-derivability rule depend on. If a later slice needs `kill-ring` order to reflect pops (it shouldn't — Emacs's `kill-ring` variable order is also stable; only the pointer rotates), revisit then.
+- **`M-y` decoding:** the smallest possible meta-chord support (ESC + one byte) rather than a general meta layer — general prefix/meta architecture is deferred to the minibuffer slice, which will need it properly.
+- **Pop replaces the recorded bounds, not a re-derivation:** the yank bounds are recorded at yank time and updated by each pop, so a length-changing pop still targets the right span on the next pop. This is the piece batch Emacs can't verify (cycle), so it's the property test's job.
