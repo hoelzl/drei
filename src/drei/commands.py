@@ -72,6 +72,31 @@ class KeyboardQuit:
 
 
 @dataclass(frozen=True, slots=True)
+class FindFile:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class MinibufferInput:
+    char: str
+
+
+@dataclass(frozen=True, slots=True)
+class MinibufferBackspace:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class MinibufferAccept:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class MinibufferAbort:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class TextInserted:
     text: str
     before: int
@@ -228,6 +253,34 @@ class ProcessOutputRecorded:
     status: str
 
 
+@dataclass(frozen=True, slots=True)
+class MinibufferOpened:
+    prompt: str
+
+
+@dataclass(frozen=True, slots=True)
+class MinibufferAborted:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class BufferOpened:
+    path: str
+    text_len: int
+
+
+@dataclass(frozen=True, slots=True)
+class OpenFailed:
+    """A find-file read that failed at the file port.
+
+    ``error`` is a normalized, Drei-owned token (same vocabulary as
+    ``SaveFailed``), never raw exception text.
+    """
+
+    path: str
+    error: str
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BufferObservation:
     buffer_id: str
@@ -236,6 +289,8 @@ class BufferObservation:
     file_path: str | None = None
     modified: bool = False
     mark: int | None = None
+    minibuffer: str | None = None
+    minibuffer_prompt: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,7 +310,11 @@ class CommandOutcome:
         | BufferSaved
         | SaveFailed
         | KeyboardQuitEvent
-        | ProcessOutputRecorded,
+        | ProcessOutputRecorded
+        | MinibufferOpened
+        | MinibufferAborted
+        | BufferOpened
+        | OpenFailed,
         ...,
     ]
     observation: BufferObservation
