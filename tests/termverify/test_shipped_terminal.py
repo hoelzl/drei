@@ -323,6 +323,96 @@ def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_find_file_scenario(tmp_path: Path) -> None:
+    """C-x C-f opens the minibuffer; typed path echoes; RET loads the file.
+
+    The fixture lives under the delivered sandbox root; the typed path is
+    relative and the adapter's cwd is the sandbox. RET (\\x0d) delivery is
+    probed live through ConPTY — unlike NUL it is an ordinary byte. The
+    abort arm (second scenario below) proves C-g closes the prompt without
+    quitting and never touches the buffer.
+    """
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    target = sandbox / "found.txt"
+    target.write_text("found me", encoding="utf-8")
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-find-file", _configuration())
+        assert type(started) is Started, started
+        initial_lines = _frame_lines(started.observation)
+        assert any("Drei: scratch" in line for line in initial_lines), initial_lines
+
+        # C-x C-f: the minibuffer prompt occupies the echo row.
+        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prompted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "f")))
+        assert type(prompted) is EpochCompleted, prompted
+        prompted_lines = _frame_lines(prompted.observation)
+        assert any("Find file: " in line for line in prompted_lines), prompted_lines
+
+        # Typed path echoes in the prompt, with one DEL correction.
+        typed_lines = prompted_lines
+        for char in "found.tx":
+            typed = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(typed) is EpochCompleted, typed
+            typed_lines = _frame_lines(typed.observation)
+        assert any("Find file: found.tx" in line for line in typed_lines), typed_lines
+        corrected = adapter.dispatch(TextInput(ManualTime(0), "\x7f"))
+        assert type(corrected) is EpochCompleted, corrected
+        final_char = adapter.dispatch(TextInput(ManualTime(0), "t"))
+        assert type(final_char) is EpochCompleted, final_char
+        final_lines = _frame_lines(final_char.observation)
+        assert any("Find file: found.txt" in line for line in final_lines), final_lines
+
+        # RET (probed live: \x0d through ConPTY) opens the file.
+        accepted = adapter.dispatch(TextInput(ManualTime(0), "\x0d"))
+        assert type(accepted) is EpochCompleted, accepted
+        accepted_lines = _frame_lines(accepted.observation)
+        assert any(line.startswith("found me") for line in accepted_lines), (
+            accepted_lines
+        )
+        # Modeline shows the buffer id (single fixed buffer; wholesale
+        # replace keeps it) — the minibuffer prompt is gone.
+        assert not any("Find file:" in line for line in accepted_lines), accepted_lines
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
+def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
+    """C-x C-f C-g aborts the minibuffer: prompt gone, buffer unchanged,
+    no quit — a second C-g exits cleanly (abort must not consume the quit
+    or emit one itself)."""
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-find-file-abort", _configuration())
+        assert type(started) is Started, started
+
+        for char in "keep":
+            typed = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(typed) is EpochCompleted, typed
+
+        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prompted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "f")))
+        assert type(prompted) is EpochCompleted, prompted
+        assert any("Find file: " in line for line in _frame_lines(prompted.observation))
+
+        aborted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert type(aborted) is EpochCompleted, aborted
+        aborted_lines = _frame_lines(aborted.observation)
+        assert not any("Find file:" in line for line in aborted_lines), aborted_lines
+        assert any(line.startswith("keep") for line in aborted_lines), aborted_lines
+
+        # The abort was NOT a quit: the editor is still alive; a second
+        # C-g (minibuffer closed) is the real keyboard quit.
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_stop_is_clean(tmp_path: Path) -> None:
     """A TermVerify stop after readiness also terminates the run cleanly."""
     adapter = _adapter(tmp_path)
