@@ -115,15 +115,18 @@ def run_editor(
             pending_esc, key = assemble_meta(pending_esc, char)
             if key == "\x1b":
                 # ESC + non-letter: the bare ESC is unresolved (no state
-                # change); reprocess the byte that followed it with no
-                # pending state. Quiescence is marked by the reprocessed
-                # byte's own iteration.
+                # change) — mark quiescence for it, then reprocess the byte
+                # that followed with no pending state (its own iteration
+                # marks quiescence again).
                 harness.send(key)
+                port.write(READINESS_MARKER)
+                port.flush()
                 pending_byte = char
                 continue
             if key is None:
-                # Bare ESC consumed as potential chord start; no input was
-                # fully processed, so no quiescence marker yet.
+                # Bare ESC consumed as a potential chord start: the subject
+                # is mid-chord, not quiescent — no marker until the next
+                # byte resolves the chord.
                 continue
             outcome = harness.send(key)
             quit_requested = outcome is not None and any(

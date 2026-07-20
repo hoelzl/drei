@@ -109,6 +109,23 @@ def test_editor_esc_non_letter_reprocesses_byte() -> None:
     assert "1" in written
 
 
+def test_editor_esc_non_letter_marks_quiescence_for_both_inputs() -> None:
+    """ESC+non-letter yields one readiness marker per consumed physical input.
+
+    The bare ESC is unresolved (no state change, no frame rewrite) but the
+    subject IS quiescent after it — the verifier needs one marker for the
+    ESC and one for the reprocessed byte, symmetric with the C-x prefix
+    path. A bare ESC as chord START is different: the subject is mid-chord
+    and correctly emits no marker until the chord resolves.
+    """
+    port = FakePort(["\x1b", "1", "\x07"])
+    run_editor(port)
+    written = "".join(port.outputs)
+    # Markers: initial frame, ESC (unresolved, no frame), "1" (frame), and
+    # the final C-g quit frame carries none.
+    assert written.count("\x1b]7791;ready\x1b\\") == 3
+
+
 def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
     # ESC followed by C-g: bare ESC reported (unresolved), C-g reprocessed
     # and quits the loop.
