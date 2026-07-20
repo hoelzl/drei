@@ -116,7 +116,10 @@ class EditorSession:
             # a no-op kill leaves the chain intact.
             if any(isinstance(e, TextKilled) for e in events):
                 self._last_was_kill = True
-        else:
+        elif events:
+            # Only event-emitting commands break the chain. A silent no-op
+            # (empty insert) leaves no trace in the transcript, so it must
+            # not intervene — the transcript is the ring's oracle.
             self._last_was_kill = False
 
         # Validation happens in BufferValue.__post_init__ before any

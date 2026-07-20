@@ -115,6 +115,29 @@ def test_yank_inserts_newest_and_moves_point_past() -> None:
     assert outcome.observation.point == 2
 
 
+def test_noop_insert_does_not_break_chain() -> None:
+    """Silent no-ops (empty insert) emit no event and do not break the chain.
+
+    The transcript is the ring's oracle: only event-emitting commands
+    intervene in the append chain.
+    """
+    session = _session("ab\nc", 0)
+    session.dispatch(KillLine())  # kills "ab", chain on
+    session.dispatch(InsertText(""))  # silent no-op
+    session.dispatch(KillLine())  # kills "\n" — appends
+    assert session.kill_ring == ("ab\n",)
+    killed = [e for e in session.transcript if isinstance(e, TextKilled)]
+    assert len(killed) == 2
+
+
+def test_yank_breaks_chain() -> None:
+    session = _session("ab\ncd", 0)
+    session.dispatch(KillLine())
+    session.dispatch(Yank())
+    session.dispatch(KillLine())
+    assert len(session.kill_ring) == 2
+
+
 def test_yank_empty_ring_is_noop() -> None:
     session = _session("xy", 1)
     outcome = session.dispatch(Yank())
