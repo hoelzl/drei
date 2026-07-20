@@ -174,6 +174,23 @@ def test_cli_unreadable_file_exits_2(
     assert excinfo.value.code == 2
 
 
+def test_cli_undecodable_file_exits_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sys
+
+    from drei.cli import main
+
+    target = tmp_path / "binary.txt"
+    target.write_bytes(b"\xff\xfe\x00invalid utf-8 \x80\x81")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    with pytest.raises(SystemExit) as excinfo:
+        main([str(target)])
+    assert excinfo.value.code == 2
+
+
 def test_decode_key_maps_control_bytes() -> None:
     from drei.terminal import decode_key
 

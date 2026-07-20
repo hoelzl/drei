@@ -39,6 +39,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             # Emacs find-file semantics: a missing file opens an empty
             # buffer that still visits the path.
             initial_text = ""
+        except UnicodeDecodeError:
+            print(f"drei: {file_path}: not a utf-8 text file", file=sys.stderr)
+            raise SystemExit(2) from None
         except OSError as error:
             print(f"drei: {file_path}: {error.strerror or error}", file=sys.stderr)
             raise SystemExit(2) from error
