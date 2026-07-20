@@ -28,8 +28,23 @@ def render(
 
     body_rows = _render_body(observation.text, width, height - 2)
     modeline = _clip(_modeline(observation), width)
-    echo_row = _clip(echo, width)
 
+    if observation.minibuffer is not None:
+        # The minibuffer occupies the echo row; the cursor sits at the end
+        # of the prompt + input, and the body point is ignored.
+        prompt = observation.minibuffer_prompt or ""
+        echo_row = _clip(prompt + observation.minibuffer, width)
+        cursor_row = len(body_rows) + 1  # echo row index
+        cursor_col = min(len(_sanitize(prompt + observation.minibuffer)), width - 1)
+        rows = body_rows + (modeline, echo_row)
+        return Frame(
+            rows=rows,
+            cursor=(cursor_row, max(cursor_col, 0)),
+            width=width,
+            height=height,
+        )
+
+    echo_row = _clip(echo, width)
     cursor_row, cursor_col = _cursor_position(observation, width, height - 2)
     rows = body_rows + (modeline, echo_row)
     return Frame(rows=rows, cursor=(cursor_row, cursor_col), width=width, height=height)
