@@ -3,7 +3,7 @@ from drei.render import render
 
 
 def obs(text: str, point: int, buffer_id: str = "scratch") -> BufferObservation:
-    return BufferObservation(buffer_id, text, point)
+    return BufferObservation(buffer_id=buffer_id, text=text, point=point)
 
 
 def test_empty_buffer_frame() -> None:
@@ -92,6 +92,21 @@ def test_cursor_column_accounts_for_sanitized_expansion() -> None:
     frame = render(obs("A\x01B", 3), width=20, height=4)
     assert frame.rows[0].startswith("A^AB")
     assert frame.cursor == (0, 4)  # past 'A^AB', not raw index 3
+
+
+def test_modeline_shows_modified_indicator() -> None:
+    frame = render(
+        BufferObservation(buffer_id="notes.txt", text="x", point=1, modified=True),
+        width=20,
+        height=4,
+        echo="",
+    )
+    assert frame.rows[-2].startswith("Drei: notes.txt **")
+
+
+def test_modeline_unmodified_indicator() -> None:
+    frame = render(obs("x", 1), width=20, height=4)
+    assert frame.rows[-2].startswith("Drei: scratch --")
 
 
 def test_height_two_has_no_body() -> None:

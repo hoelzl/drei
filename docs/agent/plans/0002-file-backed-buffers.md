@@ -1,6 +1,6 @@
 # Second editor slice: file-backed buffers
 
-**Status:** ready — architecture gate inherited from design 0002 (no new state/identity demands beyond one buffer + one injected effect port)
+**Status:** implemented — file-backed buffers, FilePort effect boundary, C-x C-s save, modeline modified indicator, TermVerify save scenario (Windows), and pinned Emacs save differential complete
 
 **Goal:** Open a file into the scratch path's buffer, edit it through the existing production command path, and save it back — with filesystem effects behind an explicit port, never ambient I/O in the command path.
 
@@ -25,7 +25,7 @@ Explicitly out of scope (deferred): minibuffer / `C-x C-f` (prompted open), `C-x
 5. CLI: parse the optional `FILE` argument, load content via the real `FilePort` before entering raw mode; terminal loop unchanged otherwise.
 6. Modeline: `Drei: <name> [**]` when modified (name = basename of file or `scratch`); render tests for both states.
 7. Harness and TermVerify scenarios: open file → edit → `C-x C-s` → file content on disk matches buffer. The TermVerify scenario passes an **absolute path under the delivered sandbox root** (`tmp_path/"sandbox"` mapped via `CooperationConstraintPorts`) as the CLI `FILE` argument — no `TERMVERIFY_FS_ROOT` resolution in the subject is needed, and the host-side test asserts file content directly. CLI file loading happens before raw mode, outside the deterministic command path, so no design-0002 violation. The scenario proves the save path end to end; OS-level sandbox containment is an explicit TermVerify non-goal and is not claimed.
-8. Emacs differential: extend the pinned scenario registry with save semantics. Batch eval: `(progn (find-file "drei-parity.txt") (insert "hello") (backward-char) (forward-char) (message "POINT=%d MODIFIED=%s" (point) (buffer-modified-p)) (save-buffer) (message "AFTER MODIFIED=%s" (buffer-modified-p)))` — verified against GNU Emacs 29.3 in the pinned container (`MODIFIED=t` before save, `nil` after; file content asserted host-side). Drei's verdict: parity required on insert-sets-modified and save-clears-modified; file content asserted on disk.
+8. Emacs differential: extend the pinned scenario registry with save semantics. Batch eval: `(progn (find-file "drei-parity-save.txt") (insert "hi") (message "POINT=%d MODIFIED=%s" (point) (buffer-modified-p)) (save-buffer) (message "AFTER MODIFIED=%s" (buffer-modified-p)))` — verified against GNU Emacs 29.3 in the pinned container (`MODIFIED=t` before save, `nil` after). Drei's verdict: parity required on insert-sets-modified and save-clears-modified; file content asserted in Drei's fake port and in the TermVerify sandbox (the Emacs side compares observable `buffer-modified-p` semantics, not disk content).
 9. Docs: README status, `development.md` verified commands, plan status.
 
 ## Acceptance

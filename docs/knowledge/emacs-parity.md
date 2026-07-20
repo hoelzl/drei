@@ -29,6 +29,12 @@ intentional, and every normalization is explicit.
 | Scenario | Reference behavior | Normalization | Verdict |
 | --- | --- | --- | --- |
 | startup, insert, backward-char, forward-char (`tests/differential/test_emacs_parity.py`) | empty scratch-like buffer; `insert`, `backward-char`, `forward-char` | Emacs point is 1-based; Drei point is 0-based (`point_emacs - 1 == point_drei`) | parity required |
+| find-file (new), insert, save-buffer (`tests/differential/test_emacs_parity.py`) | `buffer-modified-p` is `t` after `insert`, `nil` after `save-buffer`; file content on disk matches buffer text | same point normalization; Drei drives `SaveBuffer` through the production dispatch path with a fake `FilePort` and asserts content in the fake | parity required |
+
+Drei's modified-flag rule is deliberately narrower than Emacs's: any
+`TextInserted` event sets modified; a successful save clears it. Emacs also
+sets the flag on some non-text operations; if a future scenario observes
+drift there, record it as an intentional deviation with rationale.
 
 ## Rules
 

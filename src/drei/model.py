@@ -8,10 +8,12 @@ class BufferId:
     value: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class BufferValue:
     text: str
     point: int
+    file_path: str | None = None
+    modified: bool = False
 
     def __post_init__(self) -> None:
         if not 0 <= self.point <= len(self.text):

@@ -14,7 +14,7 @@ from drei.session import EditorSession
 
 
 def make_session() -> EditorSession:
-    return EditorSession(Buffer(BufferId("scratch"), BufferValue("", 0)))
+    return EditorSession(Buffer(BufferId("scratch"), BufferValue(text="", point=0)))
 
 
 def test_insert_into_empty_buffer() -> None:
@@ -66,7 +66,7 @@ def test_quit_does_not_mutate() -> None:
 
 
 def test_retained_shell_reference_stays_current() -> None:
-    shell = Buffer(BufferId("scratch"), BufferValue("", 0))
+    shell = Buffer(BufferId("scratch"), BufferValue(text="", point=0))
     session = EditorSession(shell)
     session.dispatch(InsertText("x"))
     assert shell.current.text == "x"
