@@ -37,12 +37,14 @@ intentional, and every normalization is explicit.
 
 Drei's modified-flag rule is deliberately narrower than Emacs's: any
 text-changing event (`TextInserted`, `TextKilled`, `TextYanked`,
-`TextYankPopped`, `RegionKilled`) sets modified; a successful save clears
-it. `SetMark`, `RegionCopied`, and `MarkExchanged` never set it (probed:
-`set-mark` and `copy-region-as-kill` leave `buffer-modified-p` nil on a
-clean buffer). Emacs also sets the flag on some non-text operations; if a
-future scenario observes drift there, record it as an intentional
-deviation with rationale.
+`TextYankPopped`, `RegionKilled`) sets modified; a successful save
+clears it; `TextUndone`/`TextRedone` RESTORE the flag from their undo
+group (undoing back to a saved state clears modified, matching Emacs's
+`(t . 0)` undo entries). `SetMark`, `RegionCopied`, and `MarkExchanged`
+never set it (probed: `set-mark` and `copy-region-as-kill` leave
+`buffer-modified-p` nil on a clean buffer). Emacs also sets the flag on
+some non-text operations; if a future scenario observes drift there,
+record it as an intentional deviation with rationale.
 
 ## Intentional deviations
 
@@ -59,6 +61,13 @@ deviation with rationale.
 | Yank pushing the mark | yank does not touch the mark | `yank` sets the mark at the insertion start | deferred to the mark-ring slice; yank bounds stay `(start, end)` |
 | Mark ring (`C-u C-@`) | absent (single mark, re-set replaces) | ring of 16 marks per buffer | deferred; single mark covers the region commands |
 | `C-@`/`C-SPC` on the Windows console | undeliverable — msvcrt treats NUL as an extended-key prefix and swallows the following byte (verified live: NUL+`Z` consumes `Z`); commands reachable via harness/POSIX | real Windows Emacs uses different input plumbing (w32 events) | platform console-API constraint, not semantics; TermVerify scenario is a documented skip, byte-loop proof is in-process |
+| Undo grouping | one group per command | groups are command-loop driven; batch `undo` amalgamates across explicit `undo-boundary` calls (probed) | batch-unverifiable; one-group-per-command is the interactive equivalent |
+| Nothing to undo | silent no-op, no event | signals "No further undo information" (probed in batch) | same no-echo-error rationale as the empty kill |
+| Fresh edit after undo | truncates the redo tail (later undos cannot resurrect) | keeps redo reachable — the fresh edit flips direction and the next undo REDOES the buried undo (probed: insert, undo, insert, undo → text restored, MOD t) | deliberate simplification; stock redo reachability is a follow-up slice |
+| Descent gating | any event-emitting non-undo command breaks the descent; silent no-ops (empty-ring yank, no-mark kill-region) do not | any command flips direction (`last-command` gating), including silent no-ops | batch-unverifiable interactive behavior; event-emitting gating keeps the walk derivable from the transcript |
+| Undo capacity | fixed 100 groups, oldest dropped silently | `undo-limit`/`undo-strong-limit` (80k/120k bytes) | configuration is deferred; mid-descent eviction shortens the deepest history only |
+| Undo of the kill ring | ring untouched by undo | ring untouched (global, not buffer state) | parity — no deviation |
+| Undo restoring mark/modified | restored from the group | markers and `(t . 0)` modified-flag entries are restored (probed: undo to clean state → MOD nil) | parity |
 
 ## Rules
 
