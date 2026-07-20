@@ -320,6 +320,7 @@ def test_decode_key_maps_region_bytes() -> None:
     assert decode_key("\x17") == "C-w"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
 def test_windows_extended_key_pair_is_consumed() -> None:
     """getwch NUL/E0 prefix + scan code: the pair is consumed, unresolved.
 
@@ -327,9 +328,6 @@ def test_windows_extended_key_pair_is_consumed() -> None:
     undeliverable on the Windows console). Only runs where the class has
     the Windows method (win32); elsewhere the method doesn't exist.
     """
-    if sys.platform != "win32":
-        pytest.skip("Windows console input path")
-
     from drei.terminal import SystemTerminalPort
 
     class _FakeMsvcrt:
@@ -339,18 +337,18 @@ def test_windows_extended_key_pair_is_consumed() -> None:
         def getwch(self) -> str:
             return self._chars.pop(0)
 
-    read = SystemTerminalPort._read_key_windows  # unbound; needs no state
+    # getattr: the method only exists on win32 (class-body platform guard);
+    # direct attribute access fails mypy --platform linux in CI.
+    read = getattr(SystemTerminalPort, "_read_key_windows")  # noqa: B009
     fake = _FakeMsvcrt(["\x00", "H", "a"])  # prefix, scan, then plain 'a'
     with patch.dict(sys.modules, {"msvcrt": fake}):
-        assert read(None) == "\x00"  # type: ignore[arg-type]  # pair consumed
+        assert read(None) == "\x00"  # pair consumed
         assert fake._chars == ["a"]  # scan code was eaten
-        assert read(None) == "a"  # type: ignore[arg-type]  # plain char passes
+        assert read(None) == "a"  # plain char passes through
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
 def test_windows_plain_key_passes_through() -> None:
-    if sys.platform != "win32":
-        pytest.skip("Windows console input path")
-
     from drei.terminal import SystemTerminalPort
 
     class _FakeMsvcrt:
@@ -360,11 +358,11 @@ def test_windows_plain_key_passes_through() -> None:
         def getwch(self) -> str:
             return self._chars.pop(0)
 
-    read = SystemTerminalPort._read_key_windows  # unbound; needs no state
+    read = getattr(SystemTerminalPort, "_read_key_windows")  # noqa: B009
     fake = _FakeMsvcrt(["\xe0", "S", "\x06"])
     with patch.dict(sys.modules, {"msvcrt": fake}):
-        assert read(None) == "\x00"  # type: ignore[arg-type]  # E0 pair consumed
-        assert read(None) == "\x06"  # type: ignore[arg-type]  # control byte ok
+        assert read(None) == "\x00"  # E0 pair also consumed
+        assert read(None) == "\x06"  # control byte untouched
 
 
 def test_decode_key_maps_kill_and_yank() -> None:
