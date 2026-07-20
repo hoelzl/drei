@@ -111,6 +111,25 @@ def test_decoder_malformed_line_raises_acp_decode_error() -> None:
     assert excinfo.value.line == b"{not json}"  # carries the offending bytes
 
 
+def test_decoder_invalid_utf8_raises_acp_decode_error_not_unicode_error() -> None:
+    # A peer sending bytes that aren't valid UTF-8 must surface as AcpDecodeError,
+    # not a raw UnicodeDecodeError leaking across the normalized boundary.
+    decoder = JsonRpcDecoder()
+    decoder.feed(b'{"t":"\xff\xfe"}\n')
+    with pytest.raises(AcpDecodeError):
+        decoder.messages()
+
+
+def test_decoder_literal_utf8_split_mid_multibyte_char() -> None:
+    # A peer may send literal (unescaped) UTF-8; a multibyte char can split
+    # across feed() calls. Feed byte-by-byte to force the split.
+    decoder = JsonRpcDecoder()
+    frame = '{"text":"世界"}\n'.encode()
+    for i in range(len(frame)):
+        decoder.feed(frame[i : i + 1])
+    assert decoder.messages() == [{"text": "世界"}]
+
+
 def test_decoder_recovers_after_malformed_line() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(b"garbage\n" + encode({"ok": True}))

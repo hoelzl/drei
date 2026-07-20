@@ -73,3 +73,11 @@ No Emacs-facing behavior and no new user-visible command: this is an internal pr
 - **Chunked decode shape.** `JsonRpcDecoder.feed/messages` is chosen for the §C pump, but no consumer exists yet. Risk of a speculative API. Mitigation: it is the *minimal* incremental-decoder shape (buffer + drain), directly required by "bytes arrive in arbitrary chunks," and is fully exercised by the chunking property today. If §C ends up wanting a `readline`-style pull instead, the change is confined to this module.
 - **Purity guard scope.** The current guard globs `src/drei/*.py`; it must also cover `src/drei/acp/*.py` or the new package escapes the launch-check. Widening the glob is part of this slice.
 - **`_meta`/extensibility.** ACP allows `_meta` fields and `_`-prefixed methods. This slice passes them through opaquely (params is an open dict); no Drei-specific extension is modeled yet.
+
+### Hardening deferred to §C (surfaced by the B.5 adversarial review)
+
+The B.5 review found no blocking issues but flagged three robustness gaps that only matter once a *live* peer exists — they are deferred to the §C streaming slice, which introduces the pump and a real `hermes acp` child:
+
+- **Unbounded decoder buffer.** `JsonRpcDecoder.feed` has no line-length cap; a hostile/buggy peer streaming bytes with no `\n` grows `_buffer` without bound (memory DoS). The SDK bounds this via `asyncio.StreamReader`'s 64 KiB limit. §C should add a `max_line` bound raising `AcpDecodeError` past it. (Not blocking for B.5: no live peer yet.)
+- **EOF partial frame is silently dropped.** A trailing partial message at EOF (child dies mid-frame) is never surfaced — no `close()`/`flush()` exists. §C's pump owns stream lifecycle and should surface a truncated tail as an error.
+- **Purity guard does not check `asyncio`/`socket`.** The guard pins `subprocess`/`pty`/`signal` imports + `os.*` launch attrs, but not `asyncio`/`socket` despite §B's "no asyncio/network" invariant. §C (which must *not* let the core import them) should extend the guard's forbidden set.

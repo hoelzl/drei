@@ -168,3 +168,43 @@ def test_parse_rejects_malformed_error_object() -> None:
         parse_message({"jsonrpc": "2.0", "id": 1, "error": "not-an-object"})
     with pytest.raises(AcpProtocolError):
         parse_message({"jsonrpc": "2.0", "id": 1, "error": {"code": -1}})  # no message
+
+
+def test_parse_rejects_method_with_result_or_error() -> None:
+    # JSON-RPC: an object carrying method+result (or method+error) is invalid.
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": 1, "method": "x", "result": {}})
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": 1, "method": "x", "error": {}})
+
+
+def test_parse_rejects_non_int_error_code_or_non_str_message() -> None:
+    with pytest.raises(AcpProtocolError):
+        parse_message(
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": "nope", "message": "m"}}
+        )
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": 42}})
+
+
+def test_parse_rejects_invalid_id_type() -> None:
+    # JSON-RPC ids are String, Number (int), or NULL — not float/list.
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": 1.5, "method": "x"})
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": [1], "method": "x"})
+
+
+def test_parse_id_null_is_a_request() -> None:
+    # JSON-RPC discourages null ids; we treat {"id": null, "method": ...} as a
+    # Request (has_id is presence-based). Pin that classification.
+    message = parse_message({"jsonrpc": "2.0", "id": None, "method": "foo"})
+    assert isinstance(message, Request)
+    assert message.id is None
+
+
+def test_parse_rejects_batch_array() -> None:
+    # JSON-RPC batches are out of scope; the codec yields the array as one
+    # value and parse_message rejects it as a non-object.
+    with pytest.raises(AcpProtocolError):
+        parse_message([{"jsonrpc": "2.0", "id": 1, "method": "x"}])

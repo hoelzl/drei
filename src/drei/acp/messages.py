@@ -35,7 +35,7 @@ TERMINAL_RELEASE = "terminal/release"
 TERMINAL_WAIT_FOR_EXIT = "terminal/wait_for_exit"
 TERMINAL_KILL = "terminal/kill"
 
-type JsonValue = Any
+JsonValue = Any
 type RequestId = int | str
 
 
@@ -128,6 +128,12 @@ def parse_message(payload: JsonValue) -> Message:
     if has_result and has_error:
         raise AcpProtocolError("response carries both result and error")
 
+    if has_method and (has_result or has_error):
+        raise AcpProtocolError("envelope carries method together with result/error")
+
+    if has_id and not _valid_id(payload["id"]):
+        raise AcpProtocolError(f"id must be str/int/null, got {payload['id']!r}")
+
     if has_method:
         method = payload["method"]
         if not isinstance(method, str):
@@ -146,6 +152,12 @@ def parse_message(payload: JsonValue) -> Message:
             raise AcpProtocolError(
                 f"error must be an object with code and message, got {error!r}"
             )
+        if not isinstance(error["code"], int) or isinstance(error["code"], bool):
+            raise AcpProtocolError(f"error code must be an int, got {error['code']!r}")
+        if not isinstance(error["message"], str):
+            raise AcpProtocolError(
+                f"error message must be a str, got {error['message']!r}"
+            )
         return ResponseError(
             id=payload["id"],
             code=error["code"],
@@ -154,3 +166,12 @@ def parse_message(payload: JsonValue) -> Message:
         )
 
     raise AcpProtocolError(f"unrecognized envelope shape: {sorted(payload)}")
+
+
+def _valid_id(value: JsonValue) -> bool:
+    """JSON-RPC ids are String, Number (int), or NULL — not float/bool/list."""
+    return (
+        value is None
+        or isinstance(value, str)
+        or (isinstance(value, int) and not isinstance(value, bool))
+    )

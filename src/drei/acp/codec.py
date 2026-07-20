@@ -63,6 +63,6 @@ class JsonRpcDecoder:
                 continue  # tolerate blank lines between frames
             try:
                 out.append(json.loads(line))
-            except json.JSONDecodeError as error:
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
                 raise AcpDecodeError(line, error) from error
         return out
