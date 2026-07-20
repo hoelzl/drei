@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
+
+from drei.process import ProcessResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +176,58 @@ class KeyboardQuitEvent:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class DeliverProcessOutput:
+    """External delivery: an already-captured process result enters the session.
+
+    Not a user edit. The session records it as one immutable event; buffer,
+    undo, and kill-ring state are untouched. Exactly one of ``result`` /
+    ``error`` is set: ``result`` is the captured run, ``error`` is a
+    normalized token (``not-found``, ``permission-denied``, ``io-error``,
+    ``timeout``) when the launch itself failed. Validated at construction so
+    machine-generated deliveries (the ACP pump) cannot record corrupt
+    provenance into the transcript.
+    """
+
+    argv: tuple[str, ...]
+    result: ProcessResult | None = None  # None on launch failure
+    error: str | None = None
+
+    _ERROR_TOKENS: ClassVar[frozenset[str]] = frozenset(
+        {"not-found", "permission-denied", "io-error", "timeout"}
+    )
+
+    def __post_init__(self) -> None:
+        if (self.result is None) == (self.error is None):
+            raise ValueError(
+                "exactly one of result / error must be set on a process delivery"
+            )
+        if self.result is not None and self.result.argv != self.argv:
+            raise ValueError(
+                f"result argv {self.result.argv!r} != delivery argv {self.argv!r}"
+            )
+        if self.error is not None and self.error not in self._ERROR_TOKENS:
+            raise ValueError(
+                f"error must be one of {sorted(self._ERROR_TOKENS)}, got {self.error!r}"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessOutputRecorded:
+    """One process delivery, recorded for the transcript oracle.
+
+    Carries lengths and status, not full output, so the fold stays cheap and
+    goldens stay stable. ``status`` is ``ok`` / ``nonzero-exit`` / a
+    normalized launch-error token.
+    """
+
+    argv: tuple[str, ...]
+    exit_code: int
+    stdout_len: int
+    stderr_len: int
+    status: str
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BufferObservation:
     buffer_id: str
@@ -199,7 +254,8 @@ class CommandOutcome:
         | TextRedone
         | BufferSaved
         | SaveFailed
-        | KeyboardQuitEvent,
+        | KeyboardQuitEvent
+        | ProcessOutputRecorded,
         ...,
     ]
     observation: BufferObservation
