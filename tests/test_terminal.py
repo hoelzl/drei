@@ -269,6 +269,13 @@ def test_decode_key_maps_prefix_and_save() -> None:
     assert decode_key("\x13") == "C-s"
 
 
+def test_decode_key_maps_region_bytes() -> None:
+    from drei.terminal import decode_key
+
+    assert decode_key("\x00") == "C-@"
+    assert decode_key("\x17") == "C-w"
+
+
 def test_decode_key_maps_kill_and_yank() -> None:
     from drei.terminal import decode_key
 

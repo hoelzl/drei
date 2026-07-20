@@ -4,10 +4,19 @@ from hypothesis import strategies as st
 
 from drei.commands import (
     BackwardChar,
+    CopyRegionAsKill,
+    ExchangePointAndMark,
     ForwardChar,
     InsertText,
+    KeyboardQuit,
+    KeyboardQuitEvent,
     KillLine,
+    KillRegion,
+    MarkSet,
+    RegionCopied,
+    RegionKilled,
     SaveBuffer,
+    SetMark,
     TextKilled,
     TextYanked,
     TextYankPopped,
@@ -44,6 +53,11 @@ def command_history(draw: st.DrawFn) -> list[object]:
                 st.just(KillLine()),
                 st.just(Yank()),
                 st.just(YankPop()),
+                st.just(SetMark()),
+                st.just(KillRegion()),
+                st.just(CopyRegionAsKill()),
+                st.just(ExchangePointAndMark()),
+                st.just(KeyboardQuit()),
             )
         )
         for _ in range(size)
@@ -60,8 +74,41 @@ def test_point_always_in_bounds(history: list[object]) -> None:
 
 
 @given(command_history())
+def test_mark_always_in_bounds(history: list[object]) -> None:
+    """The mark adjusts with every edit; it can never leave 0..len(text)."""
+    session = _session()
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+        current = session.buffer.current
+        assert current.mark is None or 0 <= current.mark <= len(current.text)
+
+
+@given(command_history())
+def test_mark_fold_matches_transcript(history: list[object]) -> None:
+    """Mark state is derivable from the transcript (the evidence oracle).
+
+    Fold: MarkSet sets; RegionKilled/RegionCopied/KeyboardQuitEvent clear;
+    RegionKilled adjusts prior to clearing — but the fold sees the same
+    edit events as the session, so it can replay adjustment. Here we check
+    the simpler structural rule: mark is set iff a MarkSet event is the
+    most recent of (MarkSet, RegionKilled, RegionCopied, KeyboardQuitEvent)
+    in the transcript.
+    """
+    session = _session()
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+    mark_set = False
+    for event in session.transcript:
+        if isinstance(event, MarkSet):
+            mark_set = True
+        elif isinstance(event, (RegionKilled, RegionCopied, KeyboardQuitEvent)):
+            mark_set = False
+    assert (session.buffer.current.mark is not None) == mark_set
+
+
+@given(command_history())
 def test_replay_produces_identical_evidence(history: list[object]) -> None:
-    def run() -> tuple[tuple[object, ...], str, int, bool, tuple[str, ...]]:
+    def run() -> tuple[tuple[object, ...], str, int, bool, tuple[str, ...], int | None]:
         session = _session()
         outcomes = tuple(session.dispatch(c) for c in history)  # type: ignore[arg-type]
         current = session.buffer.current
@@ -71,15 +118,17 @@ def test_replay_produces_identical_evidence(history: list[object]) -> None:
             current.point,
             current.modified,
             session.kill_ring,
+            current.mark,
         )
 
-    first, text1, point1, modified1, ring1 = run()
-    second, text2, point2, modified2, ring2 = run()
+    first, text1, point1, modified1, ring1, mark1 = run()
+    second, text2, point2, modified2, ring2, mark2 = run()
     assert first == second
     assert text1 == text2
     assert point1 == point2
     assert modified1 == modified2
     assert ring1 == ring2
+    assert mark1 == mark2
 
 
 @given(command_history())
@@ -108,10 +157,15 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
             and any(isinstance(e, TextKilled) for e in outcome.events)
             or isinstance(command, (Yank, YankPop))
             and outcome.events
+            or isinstance(command, KillRegion)
+            and any(isinstance(e, RegionKilled) for e in outcome.events)
         ):
             expect_modified = True
         elif isinstance(command, SaveBuffer):
             expect_modified = False
+        # SetMark / CopyRegionAsKill / ExchangePointAndMark / KeyboardQuit
+        # never change text (verified vs Emacs: copy and set-mark leave
+        # buffer-modified-p nil), so they get no arm here.
         assert session.buffer.current.modified is expect_modified
 
 

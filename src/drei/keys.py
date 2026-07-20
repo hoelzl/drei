@@ -4,30 +4,38 @@ from dataclasses import dataclass
 
 from drei.commands import (
     BackwardChar,
+    CopyRegionAsKill,
+    ExchangePointAndMark,
     ForwardChar,
     InsertText,
     KeyboardQuit,
     KillLine,
+    KillRegion,
     SaveBuffer,
+    SetMark,
     Yank,
     YankPop,
 )
 from drei.session import Command
 
 _CONTROL_KEYS: dict[str, Command] = {
+    "C-@": SetMark(),
     "C-f": ForwardChar(),
     "C-b": BackwardChar(),
     "C-g": KeyboardQuit(),
     "C-k": KillLine(),
+    "C-w": KillRegion(),
     "C-y": Yank(),
 }
 
 _META_KEYS: dict[str, Command] = {
+    "M-w": CopyRegionAsKill(),
     "M-y": YankPop(),
 }
 
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-x", "C-s"): SaveBuffer(),
+    ("C-x", "C-x"): ExchangePointAndMark(),
 }
 
 
