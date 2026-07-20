@@ -57,10 +57,13 @@ def _os_launch_calls(source: str) -> set[str]:
 
 
 def _core_sources() -> list[tuple[str, str]]:
-    """(filename, source) for every core module except the process port."""
+    """(filename, source) for every core module except the process port.
+
+    Recursive (``**/*.py``) so subpackages like ``drei.acp`` are covered.
+    """
     return [
-        (path.name, path.read_text(encoding="utf-8"))
-        for path in sorted(_SRC.glob("*.py"))
+        (str(path.relative_to(_SRC)), path.read_text(encoding="utf-8"))
+        for path in sorted(_SRC.glob("**/*.py"))
         if path.name != "process.py"
     ]
 
