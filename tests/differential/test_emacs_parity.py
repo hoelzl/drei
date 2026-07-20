@@ -576,6 +576,8 @@ def test_undo_parity() -> None:
     truncates (no resurrection). Batch grouping amalgamates (deviation —
     one group per command is Drei's interactive-equivalent rule), but a
     single insert + undo is exact on both sides."""
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
     lines = _run_pinned_emacs(EMACS_UNDO_EVAL)
     blob = "\n".join(lines)
     undo = _UNDO_RE.search(blob)
