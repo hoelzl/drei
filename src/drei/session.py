@@ -8,6 +8,7 @@ from drei.commands import (
     BufferSaved,
     CommandOutcome,
     CopyRegionAsKill,
+    DeliverProcessOutput,
     ExchangePointAndMark,
     ForwardChar,
     InsertText,
@@ -18,6 +19,7 @@ from drei.commands import (
     MarkExchanged,
     MarkSet,
     PointMoved,
+    ProcessOutputRecorded,
     RegionCopied,
     RegionKilled,
     SaveBuffer,
@@ -35,6 +37,12 @@ from drei.commands import (
 )
 from drei.files import FilePort, normalize_os_error
 from drei.model import Buffer, BufferValue
+from drei.process import (
+    ProcessPort,
+    ProcessResult,
+    ProcessTimedOut,
+    normalize_process_error,
+)
 
 Command = (
     InsertText
@@ -50,6 +58,7 @@ Command = (
     | ExchangePointAndMark
     | Undo
     | KeyboardQuit
+    | DeliverProcessOutput
 )
 Event = (
     TextInserted
@@ -66,6 +75,7 @@ Event = (
     | BufferSaved
     | SaveFailed
     | KeyboardQuitEvent
+    | ProcessOutputRecorded
 )
 
 
@@ -206,11 +216,33 @@ class _NullFilePort:
         raise OSError("no file port configured")
 
 
+class _NullProcessPort:
+    """Default port: every launch fails with a normalized token."""
+
+    def run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        input_text: str | None = None,
+        timeout: float | None = None,
+    ) -> ProcessResult:
+        raise FileNotFoundError(argv[0] if argv else "")
+
+
 class EditorSession:
-    def __init__(self, buffer: Buffer, file_port: FilePort | None = None) -> None:
+    def __init__(
+        self,
+        buffer: Buffer,
+        file_port: FilePort | None = None,
+        process_port: ProcessPort | None = None,
+    ) -> None:
         self.buffer = buffer
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
+        self._processes: ProcessPort = (
+            process_port if process_port is not None else _NullProcessPort()
+        )
         self._transcript: list[Event] = []
+        self._process_log: list[ProcessResult] = []
         self._kill_ring: list[str] = []
         self._last_was_kill = False
         self._yank_active = False
@@ -228,6 +260,11 @@ class EditorSession:
     def kill_ring(self) -> tuple[str, ...]:
         """Newest-first view of the kill ring (derived cache, not the oracle)."""
         return tuple(self._kill_ring)
+
+    @property
+    def process_log(self) -> tuple[ProcessResult, ...]:
+        """Captured process results, oldest-first (derived cache, not the oracle)."""
+        return tuple(self._process_log)
 
     def dispatch(self, command: Command) -> CommandOutcome:
         current = self.buffer.current
@@ -283,6 +320,24 @@ class EditorSession:
                     events.append(MarkExchanged(current.point, current.mark))
             case Undo():
                 new_value = self._undo(current, events)
+            case DeliverProcessOutput(argv=argv, result=result, error=error):
+                # External delivery, not a user edit: buffer value untouched.
+                new_value = current
+                if result is not None:
+                    self._process_log.append(result)
+                    events.append(
+                        ProcessOutputRecorded(
+                            argv,
+                            result.exit_code,
+                            len(result.stdout),
+                            len(result.stderr),
+                            "ok" if result.exit_code == 0 else "nonzero-exit",
+                        )
+                    )
+                else:
+                    events.append(
+                        ProcessOutputRecorded(argv, -1, 0, 0, error or "io-error")
+                    )
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
@@ -343,6 +398,33 @@ class EditorSession:
             mark=new_value.mark,
         )
         return CommandOutcome(tuple(events), observation)
+
+    def run_process(
+        self,
+        argv: tuple[str, ...],
+        *,
+        input_text: str | None = None,
+        timeout: float | None = None,
+    ) -> CommandOutcome:
+        """Run a child process via the injected port and record the delivery.
+
+        The port does the blocking run-to-completion; this wraps the captured
+        result (or a normalized launch failure) in ``DeliverProcessOutput``
+        and dispatches it, so the run enters the transcript as one immutable
+        external-delivery event. Never raises for a launch failure — the
+        outcome carries a normalized ``ProcessOutputRecorded`` status token.
+        """
+        try:
+            result = self._processes.run(argv, input_text=input_text, timeout=timeout)
+        except ProcessTimedOut as error:
+            return self.dispatch(
+                DeliverProcessOutput(argv, None, normalize_process_error(error))
+            )
+        except OSError as error:
+            return self.dispatch(
+                DeliverProcessOutput(argv, None, normalize_process_error(error))
+            )
+        return self.dispatch(DeliverProcessOutput(argv, result, None))
 
     def _undo(self, current: BufferValue, events: list[Event]) -> BufferValue:
         """Apply the newest group's inverse (descending) or, after any

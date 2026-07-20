@@ -1,10 +1,11 @@
-from conftest import FakeFilePort
+from conftest import FakeFilePort, FakeProcessPort
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from drei.commands import (
     BackwardChar,
     CopyRegionAsKill,
+    DeliverProcessOutput,
     ExchangePointAndMark,
     ForwardChar,
     InsertText,
@@ -13,6 +14,7 @@ from drei.commands import (
     KillLine,
     KillRegion,
     MarkSet,
+    ProcessOutputRecorded,
     RegionCopied,
     RegionKilled,
     SaveBuffer,
@@ -27,6 +29,7 @@ from drei.commands import (
     YankPop,
 )
 from drei.model import Buffer, BufferId, BufferValue
+from drei.process import ProcessResult
 from drei.session import EditorSession
 
 settings.register_profile("ci", max_examples=50, derandomize=True, deadline=None)
@@ -40,6 +43,37 @@ def _session(port: FakeFilePort | None = None) -> EditorSession:
             BufferValue(text="", point=0, file_path="/tmp/prop.txt"),
         ),
         file_port=port if port is not None else FakeFilePort(),
+    )
+
+
+def _process_session(port: FakeProcessPort | None = None) -> EditorSession:
+    return EditorSession(
+        Buffer(
+            BufferId("scratch"),
+            BufferValue(text="", point=0, file_path="/tmp/prop.txt"),
+        ),
+        file_port=FakeFilePort(),
+        process_port=port if port is not None else FakeProcessPort(),
+    )
+
+
+@st.composite
+def _deliveries(draw: st.DrawFn) -> DeliverProcessOutput:
+    """A process delivery: a captured result or a normalized launch failure."""
+    if draw(st.booleans()):
+        result = ProcessResult(
+            argv=("cmd",),
+            exit_code=draw(st.integers(min_value=0, max_value=3)),
+            stdout=draw(st.text(min_size=0, max_size=6)),
+            stderr=draw(st.text(min_size=0, max_size=6)),
+        )
+        return DeliverProcessOutput(("cmd",), result, None)
+    return DeliverProcessOutput(
+        ("cmd",),
+        None,
+        draw(
+            st.sampled_from(["not-found", "permission-denied", "io-error", "timeout"])
+        ),
     )
 
 
@@ -62,6 +96,7 @@ def command_history(draw: st.DrawFn) -> list[object]:
                 st.just(ExchangePointAndMark()),
                 st.just(KeyboardQuit()),
                 st.just(Undo()),
+                _deliveries(),
             )
         )
         for _ in range(size)
@@ -312,6 +347,38 @@ def test_undo_all_restores_initial_state(history: list[object]) -> None:
     assert current.text == ""
     assert current.point == 0
     assert not current.modified
+
+
+@given(command_history())
+def test_process_deliveries_never_perturb_editor_folds(history: list[object]) -> None:
+    """Process deliveries are external inputs: they never change buffer, undo,
+    or kill-ring folds, and the process log derives from the transcript."""
+    session = _process_session()
+    expected_log_len = 0
+    for command in history:
+        before = session.buffer.current
+        undo_before = (len(session._undo_history), len(session._undo_redo))
+        ring_before = session.kill_ring
+        outcome = session.dispatch(command)  # type: ignore[arg-type]
+        if isinstance(command, DeliverProcessOutput):
+            # Buffer, undo stacks, and kill ring are all untouched.
+            assert session.buffer.current == before
+            assert (len(session._undo_history), len(session._undo_redo)) == undo_before
+            assert session.kill_ring == ring_before
+            # Exactly one delivery event per command; only successes log.
+            recorded = [
+                e for e in outcome.events if isinstance(e, ProcessOutputRecorded)
+            ]
+            assert len(recorded) == 1
+            if command.result is not None:
+                expected_log_len += 1
+        assert len(session.process_log) == expected_log_len
+    # The transcript carries exactly one ProcessOutputRecorded per delivery.
+    deliveries = sum(1 for c in history if isinstance(c, DeliverProcessOutput))
+    recorded_total = sum(
+        1 for e in session.transcript if isinstance(e, ProcessOutputRecorded)
+    )
+    assert recorded_total == deliveries
 
 
 @given(command_history())

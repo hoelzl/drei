@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from drei.process import ProcessResult
+
 
 @dataclass(frozen=True, slots=True)
 class InsertText:
@@ -173,6 +175,37 @@ class KeyboardQuitEvent:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class DeliverProcessOutput:
+    """External delivery: an already-captured process result enters the session.
+
+    Not a user edit. The session records it as one immutable event; buffer,
+    undo, and kill-ring state are untouched. ``result`` is the captured run;
+    ``error`` is a normalized token (``not-found``, ``permission-denied``,
+    ``io-error``, ``timeout``) when the launch itself failed.
+    """
+
+    argv: tuple[str, ...]
+    result: ProcessResult | None = None  # None on launch failure
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessOutputRecorded:
+    """One process delivery, recorded for the transcript oracle.
+
+    Carries lengths and status, not full output, so the fold stays cheap and
+    goldens stay stable. ``status`` is ``ok`` / ``nonzero-exit`` / a
+    normalized launch-error token.
+    """
+
+    argv: tuple[str, ...]
+    exit_code: int
+    stdout_len: int
+    stderr_len: int
+    status: str
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BufferObservation:
     buffer_id: str
@@ -199,7 +232,8 @@ class CommandOutcome:
         | TextRedone
         | BufferSaved
         | SaveFailed
-        | KeyboardQuitEvent,
+        | KeyboardQuitEvent
+        | ProcessOutputRecorded,
         ...,
     ]
     observation: BufferObservation
