@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from drei.acp.machine import SessionEffect
 
 from drei.commands import (
+    AgentTextInserted,
+    AgentTranscriptUpdated,
     BackwardChar,
     BufferObservation,
     BufferOpened,
@@ -10,9 +16,11 @@ from drei.commands import (
     CommandOutcome,
     CopyRegionAsKill,
     DeliverProcessOutput,
+    DeliverSessionEffects,
     ExchangePointAndMark,
     FindFile,
     ForwardChar,
+    InsertAgentText,
     InsertText,
     KeyboardQuit,
     KeyboardQuitEvent,
@@ -68,6 +76,8 @@ Command = (
     | Undo
     | KeyboardQuit
     | DeliverProcessOutput
+    | DeliverSessionEffects
+    | InsertAgentText
     | FindFile
     | MinibufferInput
     | MinibufferBackspace
@@ -94,6 +104,8 @@ Event = (
     | MinibufferAborted
     | BufferOpened
     | OpenFailed
+    | AgentTranscriptUpdated
+    | AgentTextInserted
 )
 
 
@@ -271,6 +283,14 @@ class EditorSession:
         self._undo_descending = False  # last command was an undo
         self._minibuffer: str | None = None  # None = inactive
         self._minibuffer_prompt: str = ""
+        # Agent-transcript fold cache (design 0003 §B.7): a derived,
+        # reconstructible cache of the AgentTranscriptUpdated event stream —
+        # the same discipline as _process_log. The transcript remains
+        # authoritative; the fold only advances after the delivery event is
+        # recorded, so cache and transcript cannot desync mid-dispatch.
+        from drei.acp.transcript import TranscriptFold
+
+        self._agent_fold = TranscriptFold()
 
     @property
     def minibuffer(self) -> str | None:
@@ -309,12 +329,19 @@ class EditorSession:
         events: list[Event] = []
         new_value: BufferValue
 
-        # While the minibuffer is active, only minibuffer commands act;
-        # everything else is a silent no-op (single source of truth for the
-        # gating — the harness routing is a convenience layer over this).
+        # While the minibuffer is active, only minibuffer commands act —
+        # plus external deliveries, which are not user input and must not be
+        # swallowed while a prompt is open (a dropped delivery would desync
+        # the agent-buffer fold from the transcript; parity registry row).
         if self._minibuffer is not None and not isinstance(
             command,
-            MinibufferInput | MinibufferBackspace | MinibufferAccept | MinibufferAbort,
+            MinibufferInput
+            | MinibufferBackspace
+            | MinibufferAccept
+            | MinibufferAbort
+            | DeliverProcessOutput
+            | DeliverSessionEffects
+            | InsertAgentText,
         ):
             return CommandOutcome((), self._observation(current))
 
@@ -385,6 +412,26 @@ class EditorSession:
                     # Construction validation guarantees error is a token here.
                     assert error is not None
                     events.append(ProcessOutputRecorded(argv, -1, 0, 0, error))
+            case DeliverSessionEffects(effects=effects):
+                # External delivery, not a user edit: buffer value untouched.
+                # The fold→append step lives in apply_session_effects (the
+                # atomic delivery seam); a raw dispatch only records the fold.
+                new_value = current
+                rendered = self._render_effects(effects)
+                events.append(AgentTranscriptUpdated(effects, rendered))
+            case InsertAgentText(text=text):
+                if text:
+                    before = len(current.text)
+                    after = before + len(text)
+                    new_value = replace(
+                        current,
+                        text=current.text + text,
+                        point=after,
+                        mark=_adjust_mark_insert(current.mark, before, len(text)),
+                    )
+                    events.append(AgentTextInserted(text, before, after))
+                else:
+                    new_value = current
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
@@ -506,6 +553,40 @@ class EditorSession:
         return BufferValue(
             text=text, point=0, file_path=path, modified=False, mark=None
         )
+
+    def _render_effects(self, effects: tuple[SessionEffect, ...]) -> str:
+        """Fold effects through the cached ``TranscriptFold``; return the
+        newly rendered suffix. The fold is interpreter state only — it never
+        touches the buffer."""
+        from drei.acp.transcript import advance
+
+        parts: list[str] = []
+        fold = self._agent_fold
+        for effect in effects:
+            fold, text = advance(fold, effect)
+            parts.append(text)
+        self._agent_fold = fold
+        return "".join(parts)
+
+    def apply_session_effects(
+        self, effects: tuple[SessionEffect, ...]
+    ) -> CommandOutcome:
+        """The agent-delivery entry point (design 0003 §B.7), mirroring
+        ``run_process``: validate, record the fold as one immutable delivery
+        event, then append the newly rendered text as one buffer edit. One
+        ``handle()`` call's effects land as one ``AgentTranscriptUpdated``
+        plus at most one ``AgentTextInserted`` — atomic per design 0003
+        §consequence-2.
+        """
+        delivery = DeliverSessionEffects(tuple(effects))
+        outcome = self.dispatch(delivery)
+        rendered = next(
+            e.rendered for e in outcome.events if isinstance(e, AgentTranscriptUpdated)
+        )
+        if not rendered:
+            return outcome
+        append = self.dispatch(InsertAgentText(rendered))
+        return CommandOutcome(outcome.events + append.events, append.observation)
 
     def run_process(
         self,

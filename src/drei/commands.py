@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from drei.process import ProcessResult
+
+if TYPE_CHECKING:
+    from drei.acp.machine import SessionEffect
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +97,45 @@ class MinibufferAccept:
 @dataclass(frozen=True, slots=True)
 class MinibufferAbort:
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class DeliverSessionEffects:
+    """External delivery: one ``AcpMachine.handle`` call's ``SessionEffect``
+    list enters the session (design 0003 §B.7).
+
+    Not a user edit. The session records it as one immutable event; buffer,
+    undo, and kill-ring state are untouched. Validated at construction so a
+    machine-generated delivery (the §C ACP pump) cannot record a corrupt
+    transcript fold: the list must be non-empty and every member must be a
+    ``SessionEffect``.
+    """
+
+    effects: tuple[SessionEffect, ...]
+
+    def __post_init__(self) -> None:
+        from drei.acp.machine import SessionEffect as _SessionEffect
+
+        if not self.effects:
+            raise ValueError("a session-effects delivery must be non-empty")
+        for effect in self.effects:
+            if not isinstance(effect, _SessionEffect):
+                raise ValueError(
+                    f"delivery members must be SessionEffect values, got {effect!r}"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class InsertAgentText:
+    """Append agent-streamed text to the agent buffer at end-of-buffer.
+
+    Not a user edit: the buffer's ``modified`` flag is untouched and no undo
+    group is created (undo of an external stream is incoherent with the
+    fold-of-effects invariant — parity registry row). Point moves to the new
+    end so a visible agent buffer tracks the stream.
+    """
+
+    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +306,33 @@ class MinibufferAborted:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentTranscriptUpdated:
+    """One session-effects delivery, recorded for the transcript oracle.
+
+    ``rendered`` is exactly the text this delivery appended to the agent
+    buffer (the incremental suffix, not the whole transcript), so the
+    buffer's agent text is reconstructible as the concatenation of every
+    ``AgentTranscriptUpdated.rendered`` in the transcript — one of the two
+    fold oracles (design 0003 §B.7 verify). ``effects`` carries the folded
+    ``SessionEffect`` values for the second oracle (refolding through
+    ``TranscriptFold.advance`` must reproduce the same text).
+    """
+
+    effects: tuple[SessionEffect, ...]
+    rendered: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentTextInserted:
+    """Agent text appended at end-of-buffer; ``before`` is the pre-insert
+    buffer end, ``after`` the new end."""
+
+    text: str
+    before: int
+    after: int
+
+
+@dataclass(frozen=True, slots=True)
 class BufferOpened:
     path: str
     text_len: int
@@ -314,7 +383,9 @@ class CommandOutcome:
         | MinibufferOpened
         | MinibufferAborted
         | BufferOpened
-        | OpenFailed,
+        | OpenFailed
+        | AgentTranscriptUpdated
+        | AgentTextInserted,
         ...,
     ]
     observation: BufferObservation
