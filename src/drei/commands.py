@@ -89,6 +89,28 @@ class SwitchBuffer:
 
 
 @dataclass(frozen=True, slots=True)
+class SplitWindow:
+    """``C-x 2``: split the focused window into two stacked halves over the
+    same buffer (design 0003 §A.2, plan 0012 D3)."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class OtherWindow:
+    """``C-x o``: move focus to the next window cyclically."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteOtherWindows:
+    """``C-x 1``: collapse the layout to the focused window."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class MinibufferInput:
     char: str
 

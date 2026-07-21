@@ -17,6 +17,7 @@ from drei.commands import (
     BufferSelected,
     CommandOutcome,
     CopyRegionAsKill,
+    DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
     ExchangePointAndMark,
@@ -37,6 +38,7 @@ from drei.commands import (
     MinibufferInput,
     MinibufferOpened,
     OpenFailed,
+    OtherWindow,
     PointMoved,
     ProcessOutputRecorded,
     RegionCopied,
@@ -44,6 +46,7 @@ from drei.commands import (
     SaveBuffer,
     SaveFailed,
     SetMark,
+    SplitWindow,
     SwitchBuffer,
     TextInserted,
     TextKilled,
@@ -52,6 +55,9 @@ from drei.commands import (
     TextYanked,
     TextYankPopped,
     Undo,
+    WindowFocusChanged,
+    WindowsCollapsed,
+    WindowSplit,
     Yank,
     YankPop,
 )
@@ -83,6 +89,9 @@ Command = (
     | InsertAgentText
     | FindFile
     | SwitchBuffer
+    | SplitWindow
+    | OtherWindow
+    | DeleteOtherWindows
     | MinibufferInput
     | MinibufferBackspace
     | MinibufferAccept
@@ -109,6 +118,9 @@ Event = (
     | BufferOpened
     | BufferCreated
     | BufferSelected
+    | WindowSplit
+    | WindowFocusChanged
+    | WindowsCollapsed
     | OpenFailed
     | AgentTranscriptUpdated
     | AgentTextInserted
@@ -224,6 +236,8 @@ def _adjust_mark_delete(mark: int | None, start: int, end: int) -> int | None:
 
 KILL_RING_CAPACITY = 60
 UNDO_CAPACITY = 100
+# A window needs a modeline row plus at least two text rows (plan 0012 D4).
+MIN_WINDOW_ROWS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +254,19 @@ class _UndoGroup:
     mark_after: int | None
     modified_before: bool
     modified_after: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WindowValue:
+    """One window: a layout view over a buffer with its own point/mark
+    (design 0003 §A.2, plan 0012 D3). Window-point is NOT BufferValue.point:
+    the buffer's point is the focused window's; each window stores its own
+    so focus changes restore where that window was (Emacs window-point
+    semantics, probed vs pinned 29.3 — plan 0012 evidence 4)."""
+
+    buffer_id: BufferId
+    point: int
+    mark: int | None
 
 
 class _NullFilePort:
@@ -333,6 +360,10 @@ class EditorSession:
         # current buffer). Maintained on every BufferSelected; the C-x b
         # empty-input default is index 1 (plan 0012 D7, Emacs other-buffer).
         self._mru: list[str] = [buffer.buffer_id.value]
+        self._windows: tuple[WindowValue, ...] = (
+            WindowValue(buffer.buffer_id, buffer.current.point, buffer.current.mark),
+        )
+        self._focused = 0
         # Agent-transcript fold cache (design 0003 §B.7): a derived,
         # reconstructible cache of the AgentTranscriptUpdated event stream —
         # the same discipline as _process_log. The transcript remains
@@ -351,6 +382,16 @@ class EditorSession:
     def buffers(self) -> tuple[str, ...]:
         """Derived view: the session's buffer names, in creation order."""
         return tuple(buffer_id.value for buffer_id in self._buffers)
+
+    @property
+    def windows(self) -> tuple[WindowValue, ...]:
+        """Derived view: the layout, top-to-bottom (plan 0012 D5)."""
+        return self._windows
+
+    @property
+    def focused(self) -> int:
+        """Index of the focused window in ``windows``."""
+        return self._focused
 
     @property
     def _state(self) -> _BufferState:
@@ -496,6 +537,12 @@ class EditorSession:
                     events.append(AgentTextInserted(text, before, after))
                 else:
                     new_value = current
+            case SplitWindow():
+                new_value = self._split_window(events)
+            case OtherWindow():
+                new_value = self._other_window(events)
+            case DeleteOtherWindows():
+                new_value = self._delete_other_windows(events)
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
@@ -611,6 +658,15 @@ class EditorSession:
         # mutation, so command failure is atomic by construction.
         self.buffer.replace(new_value)
 
+        # The focused window tracks the buffer it displays: every command
+        # that moved point/mark updates its WindowValue (plan 0012 D3).
+        self._windows = tuple(
+            WindowValue(w.buffer_id, new_value.point, new_value.mark)
+            if i == self._focused
+            else w
+            for i, w in enumerate(self._windows)
+        )
+
         self._transcript.extend(events)
         return CommandOutcome(tuple(events), self._observation(new_value))
 
@@ -625,6 +681,67 @@ class EditorSession:
             minibuffer=self._minibuffer,
             minibuffer_prompt=self.minibuffer_prompt,
         )
+
+    def _split_window(self, events: list[Event]) -> BufferValue:
+        """C-x 2 (plan 0012 D3): split the focused window into two stacked
+        halves over the same buffer; both inherit the buffer's current
+        point/mark (probed vs pinned 29.3, evidence 4). Needs at least
+        MIN_WINDOW_ROWS per window plus the shared echo row when the frame
+        size is known; otherwise a silent no-op (deviation: Emacs errors
+        'too small for splitting', evidence 6)."""
+        if self._frame_size is not None:
+            _, height = self._frame_size
+            if height < (len(self._windows) + 1) * MIN_WINDOW_ROWS + 1:
+                return self.buffer.current
+        focused = self._windows[self._focused]
+        duplicate = WindowValue(
+            focused.buffer_id, self.buffer.current.point, self.buffer.current.mark
+        )
+        windows = list(self._windows)
+        windows.insert(self._focused + 1, duplicate)
+        self._windows = tuple(windows)
+        events.append(WindowSplit(len(self._windows)))
+        return self.buffer.current
+
+    def _other_window(self, events: list[Event]) -> BufferValue:
+        """C-x o (plan 0012 D3): cycle focus. The departing window keeps its
+        WindowValue (already synced); the arriving window's buffer becomes
+        current at the window's stored point/mark."""
+        if len(self._windows) < 2:
+            return self.buffer.current
+        self._focused = (self._focused + 1) % len(self._windows)
+        window = self._windows[self._focused]
+        events.append(WindowFocusChanged(self._focused, window.buffer_id.value))
+        if window.buffer_id != self._current_id:
+            self._select_window_buffer(window)
+        else:
+            self.buffer.replace(
+                replace(self.buffer.current, point=window.point, mark=window.mark)
+            )
+        return self.buffer.current
+
+    def _select_window_buffer(self, window: WindowValue) -> None:
+        """Focus landed on a window over another buffer: switch current at
+        the window's stored point/mark (no events — OtherWindow already
+        emitted WindowFocusChanged; BufferSelected is for user switches)."""
+        self._state.break_chains()
+        self._current_id = window.buffer_id
+        name = window.buffer_id.value
+        if name in self._mru:
+            self._mru.remove(name)
+        self._mru.insert(0, name)
+        self.buffer.replace(
+            replace(self.buffer.current, point=window.point, mark=window.mark)
+        )
+
+    def _delete_other_windows(self, events: list[Event]) -> BufferValue:
+        """C-x 1 (plan 0012 D3): collapse to the focused window."""
+        if len(self._windows) < 2:
+            return self.buffer.current
+        self._windows = (self._windows[self._focused],)
+        self._focused = 0
+        events.append(WindowsCollapsed())
+        return self.buffer.current
 
     def _select_buffer(self, buffer_id: BufferId, events: list[Event]) -> None:
         """Make ``buffer_id`` the current buffer (plan 0012 D1/D2).
@@ -643,6 +760,15 @@ class EditorSession:
         if name in self._mru:
             self._mru.remove(name)
         self._mru.insert(0, name)
+        # The focused window follows the switch (Emacs set-window-buffer),
+        # displaying the target at the target's own point/mark.
+        target = self._buffers[buffer_id].current
+        self._windows = tuple(
+            WindowValue(buffer_id, target.point, target.mark)
+            if i == self._focused
+            else w
+            for i, w in enumerate(self._windows)
+        )
         events.append(BufferSelected(buffer_id.value))
 
     def _create_buffer(

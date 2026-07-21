@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from drei.commands import (
     BackwardChar,
     CopyRegionAsKill,
+    DeleteOtherWindows,
     ExchangePointAndMark,
     FindFile,
     ForwardChar,
@@ -12,8 +13,10 @@ from drei.commands import (
     KeyboardQuit,
     KillLine,
     KillRegion,
+    OtherWindow,
     SaveBuffer,
     SetMark,
+    SplitWindow,
     SwitchBuffer,
     Undo,
     Yank,
@@ -43,6 +46,9 @@ _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-x", "u"): Undo(),
     ("C-x", "C-f"): FindFile(),
     ("C-x", "b"): SwitchBuffer(),
+    ("C-x", "2"): SplitWindow(),
+    ("C-x", "o"): OtherWindow(),
+    ("C-x", "1"): DeleteOtherWindows(),
 }
 
 
