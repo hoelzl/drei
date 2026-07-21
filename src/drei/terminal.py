@@ -60,6 +60,8 @@ def decode_key(char: str) -> str:
         "\x19": "C-y",
         "\x17": "C-w",
         "\x1f": "C-/",  # C-_ produces the same byte
+        "\x0d": "RET",  # Enter; unresolved in the main map (minibuffer-only)
+        "\x7f": "DEL",  # backspace; unresolved in the main map
     }
     return control.get(char, char)
 

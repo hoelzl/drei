@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -243,6 +244,69 @@ def _run_emacs_on_host(emacs: str, eval_form: str = EMACS_EVAL) -> list[str]:
     )
     output = result.stderr.strip() or result.stdout.strip()
     return output.splitlines()
+
+
+def _docker_mount_spec(cwd: Path) -> str:
+    """Docker CLI mount spec for a host dir: Docker Desktop requires forward
+    slashes in the host path (`C:/Users/...`), backslashes break the mount."""
+    return f"{cwd.as_posix()}:/work"
+
+
+def _run_emacs_in_dir(eval_form: str, cwd: Path) -> list[str]:
+    """Pinned Emacs with a controlled working directory (find-file probes
+    need a fixture on disk and relative paths)."""
+    host_emacs = shutil.which("emacs")
+    if host_emacs is not None:
+        version = subprocess.run(
+            [host_emacs, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        ).stdout.splitlines()[0]
+        if version.startswith(PINNED_VERSION_PREFIX):
+            result = subprocess.run(
+                [host_emacs, "-Q", "--batch", "--eval", eval_form],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+                cwd=cwd,
+            )
+            output = result.stderr.strip() or result.stdout.strip()
+            return output.splitlines()
+        # Same policy as _run_pinned_emacs: an unpinned host Emacs is not a
+        # baseline — fall through to the pinned container without asserting.
+    if not _docker_available():
+        pytest.skip("no pinned GNU Emacs available (no host emacs, no Docker)")
+    setup = "apt-get update -qq && apt-get install -y -qq emacs-nox"
+    check = "emacs --version | head -1"
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            _docker_mount_spec(cwd),
+            "-w",
+            "/work",
+            PINNED_IMAGE,
+            "bash",
+            "-c",
+            f"{setup} >/dev/null 2>&1 && {check} && "
+            f"emacs -Q --batch --eval '{eval_form}' 2>&1",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=True,
+    )
+    lines = result.stdout.strip().splitlines()
+    version_line = lines[0]
+    assert version_line.startswith(PINNED_VERSION_PREFIX), (
+        f"pinned Emacs version drifted: {version_line!r}"
+    )
+    return lines[1:]
 
 
 def _select_line(lines: list[str], pattern: re.Pattern[str], eval_form: str) -> str:
@@ -615,3 +679,95 @@ def test_undo_parity() -> None:
     assert not undone2.observation.modified
     # The truncated redo tail: undo now has nothing left.
     assert session.dispatch(Undo()).events == ()
+
+
+EMACS_FIND_FILE_EVAL = (
+    '(progn (find-file "drei-parity-find.txt")'
+    ' (message "EXIST TEXT=%S POINT=%d MOD=%S"'
+    " (buffer-string) (point) (buffer-modified-p))"
+    ' (find-file "drei-no-such-file.txt")'
+    ' (message "MISSING TEXT=%S POINT=%d MOD=%S"'
+    " (buffer-string) (point) (buffer-modified-p))"
+    ' (find-file "drei-no-such-dir/x.txt")'
+    ' (message "MISSINGDIR TEXT=%S POINT=%d MOD=%S"'
+    " (buffer-string) (point) (buffer-modified-p)))"
+)
+
+_FIND_FILE_RE = re.compile(
+    r'EXIST TEXT="(.*?)" POINT=(\d+) MOD=(\S+)\r?\n.*?'
+    r'MISSING TEXT="(.*?)" POINT=(\d+) MOD=(\S+)\r?\n.*?'
+    r'MISSINGDIR TEXT="(.*?)" POINT=(\d+) MOD=(\S+)\s*$',
+    re.DOTALL,
+)
+
+
+@pytest.mark.integration
+def test_find_file_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """find-file semantics parity: existing file loads with point at start
+    and MOD nil; a missing file (or missing directory) yields an empty
+    unmodified buffer with no error.
+
+    Verdict: parity required on all three arms. Directory paths themselves
+    (dired) are an intentional Drei deviation (OpenFailed) and are NOT
+    probed here; batch minibuffer reads stdin, so the prompt interaction
+    itself is TermVerify's job, not this scenario's.
+    """
+    if os.environ.get("DREI_PARITY") != "1":
+        pytest.skip("set DREI_PARITY=1 to run the pinned Emacs differential")
+
+    existing = tmp_path / "drei-parity-find.txt"
+    existing.write_text("hi there", encoding="utf-8")
+    lines = _run_emacs_in_dir(EMACS_FIND_FILE_EVAL, tmp_path)
+    blob = "\n".join(lines)
+    match = _FIND_FILE_RE.search(blob)
+    assert match is not None, blob
+
+    # Emacs evidence: existing file → contents, point 1, MOD nil.
+    assert match.group(1) == "hi there"
+    assert (int(match.group(2)), match.group(3)) == (1, "nil")
+    # Missing file → empty buffer, point 1, MOD nil, no error.
+    assert (match.group(4), int(match.group(5)), match.group(6)) == ("", 1, "nil")
+    # Missing DIRECTORY → also an empty buffer, no error (probed twice).
+    assert (match.group(7), int(match.group(8)), match.group(9)) == ("", 1, "nil")
+
+    # Drei drives the identical semantic sequence through the production
+    # dispatch path with the real file port rooted at tmp_path.
+    from drei.commands import (
+        BufferOpened,
+        CommandOutcome,
+        FindFile,
+        MinibufferAccept,
+        MinibufferInput,
+    )
+    from drei.files import SystemFilePort
+
+    def drei_open(session: EditorSession, path: str) -> CommandOutcome:
+        session.dispatch(FindFile())
+        for char in path:
+            session.dispatch(MinibufferInput(char))
+        return session.dispatch(MinibufferAccept())
+
+    session = EditorSession(
+        Buffer(BufferId("scratch"), BufferValue(text="", point=0)),
+        file_port=SystemFilePort(),
+    )
+    # SystemFilePort resolves relative paths against the process cwd, so
+    # the Drei side runs from the fixture dir (monkeypatch restores cwd
+    # even on failure).
+    monkeypatch.chdir(tmp_path)
+    opened = drei_open(session, "drei-parity-find.txt")
+    assert BufferOpened("drei-parity-find.txt", 8) in opened.events
+    assert opened.observation.text == match.group(1)
+    assert opened.observation.point == int(match.group(2)) - 1 == 0
+    assert not opened.observation.modified
+
+    missing = drei_open(session, "drei-no-such-file.txt")
+    assert BufferOpened("drei-no-such-file.txt", 0) in missing.events
+    assert missing.observation.text == match.group(4) == ""
+    assert missing.observation.point == int(match.group(5)) - 1 == 0
+    assert not missing.observation.modified
+
+    missing_dir = drei_open(session, "drei-no-such-dir/x.txt")
+    assert BufferOpened("drei-no-such-dir/x.txt", 0) in missing_dir.events
+    assert missing_dir.observation.text == match.group(7) == ""
+    assert not missing_dir.observation.modified

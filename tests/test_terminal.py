@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from drei.files import SystemFilePort
 from drei.terminal import TerminalPort, run_editor
 
 
@@ -167,6 +168,47 @@ def test_editor_undo_through_byte_loop() -> None:
     assert any(r.startswith("ab") for r in rows)
     assert any(r.startswith("a") and not r.startswith("ab") for r in rows)
     assert rows[-1].strip() == ""  # quit frame: both inserts undone
+
+
+def test_editor_find_file_through_byte_loop(tmp_path: Path) -> None:
+    """C-x C-f shows the prompt; typed path echoes; RET opens the file
+    (host fixture); C-g C-g aborts then quits. \x0d and \x7f are ordinary
+    bytes — same delivery path the POSIX terminal uses."""
+
+    fixture = tmp_path / "hello.txt"
+    fixture.write_text("from disk", encoding="utf-8")
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (60, 10)
+
+    path = str(fixture)
+    port = TallPort(
+        [
+            "\x18",
+            "\x06",  # C-x C-f: open the minibuffer
+            *list(path[:3]),
+            "\x7f",  # DEL: remove one char
+            *list(path[2:]),  # retype from the corrected position
+            "\x0d",  # RET: accept → opens the fixture
+            "\x18",
+            "\x06",  # C-x C-f again
+            "\x07",  # C-g: abort (editor keeps running)
+            "\x07",  # C-g: quit
+        ]
+    )
+    run_editor(port, file_port=SystemFilePort(), initial_text="scratch")
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    rows = [f.split("\r\n") for f in frames[1:]]
+    # Prompt visible with the typed path prefix echoed on the echo row.
+    assert any(
+        any(line.startswith("Find file: " + path[:2]) for line in frame)
+        for frame in rows
+    ), rows
+    # After RET the buffer shows the file contents.
+    assert any(frame and frame[0].startswith("from disk") for frame in rows), rows
+    # The last frame: abort kept the buffer (no prompt), then quit.
+    assert rows[-1][0].startswith("from disk")
 
 
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
@@ -344,6 +386,8 @@ def test_decode_key_maps_region_bytes() -> None:
     assert decode_key("\x00") == "C-@"
     assert decode_key("\x17") == "C-w"
     assert decode_key("\x1f") == "C-/"  # C-_ is the same byte
+    assert decode_key("\x0d") == "RET"  # Enter
+    assert decode_key("\x7f") == "DEL"  # backspace
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")

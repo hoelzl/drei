@@ -5,13 +5,17 @@ from drei.commands import (
     BufferSaved,
     CommandOutcome,
     KeyboardQuitEvent,
+    MinibufferAbort,
+    MinibufferAccept,
+    MinibufferBackspace,
+    MinibufferInput,
     SaveFailed,
 )
 from drei.files import FilePort
 from drei.keys import PendingKey, UnresolvedKey, resolve
 from drei.model import Buffer, BufferId, BufferValue
 from drei.render import Frame, render
-from drei.session import EditorSession
+from drei.session import Command, EditorSession
 
 
 class EditorHarness:
@@ -43,7 +47,22 @@ class EditorHarness:
         self._frame = self._render_frame()
 
     def send(self, key: str) -> CommandOutcome | None:
-        """Dispatch one key; return its outcome, or None if unresolved/pending."""
+        """Dispatch one key; return its outcome, or None if unresolved/pending.
+
+        While the minibuffer is active, keys route directly to minibuffer
+        commands (the single routing site — keys.resolve stays pure); any
+        pending prefix is dropped (a C-x typed before activation dies).
+        """
+        if self._session.minibuffer is not None:
+            self._pending = None
+            command = self._minibuffer_command(key)
+            if command is None:
+                return None  # control/meta keys ignored while active
+            outcome = self._session.dispatch(command)
+            self._outcomes.append(outcome)
+            self._echo = self._echo_for(outcome)
+            self._frame = self._render_frame()
+            return outcome
         resolved = resolve(self._pending, key)
         if isinstance(resolved, PendingKey):
             self._pending = resolved.prefix
@@ -57,6 +76,19 @@ class EditorHarness:
         self._echo = self._echo_for(outcome)
         self._frame = self._render_frame()
         return outcome
+
+    @staticmethod
+    def _minibuffer_command(key: str) -> Command | None:
+        """Map a symbolic key to a minibuffer command; None = ignored."""
+        if key == "RET":
+            return MinibufferAccept()
+        if key == "DEL":
+            return MinibufferBackspace()
+        if key == "C-g":
+            return MinibufferAbort()
+        if len(key) == 1 and key.isprintable():
+            return MinibufferInput(key)
+        return None
 
     @staticmethod
     def _echo_for(outcome: CommandOutcome) -> str:
@@ -78,6 +110,9 @@ class EditorHarness:
             point=current.point,
             file_path=current.file_path,
             modified=current.modified,
+            mark=current.mark,
+            minibuffer=self._session.minibuffer,
+            minibuffer_prompt=self._session.minibuffer_prompt,
         )
 
     @property

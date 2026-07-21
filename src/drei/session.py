@@ -5,11 +5,13 @@ from dataclasses import dataclass, replace
 from drei.commands import (
     BackwardChar,
     BufferObservation,
+    BufferOpened,
     BufferSaved,
     CommandOutcome,
     CopyRegionAsKill,
     DeliverProcessOutput,
     ExchangePointAndMark,
+    FindFile,
     ForwardChar,
     InsertText,
     KeyboardQuit,
@@ -18,6 +20,13 @@ from drei.commands import (
     KillRegion,
     MarkExchanged,
     MarkSet,
+    MinibufferAbort,
+    MinibufferAborted,
+    MinibufferAccept,
+    MinibufferBackspace,
+    MinibufferInput,
+    MinibufferOpened,
+    OpenFailed,
     PointMoved,
     ProcessOutputRecorded,
     RegionCopied,
@@ -59,6 +68,11 @@ Command = (
     | Undo
     | KeyboardQuit
     | DeliverProcessOutput
+    | FindFile
+    | MinibufferInput
+    | MinibufferBackspace
+    | MinibufferAccept
+    | MinibufferAbort
 )
 Event = (
     TextInserted
@@ -76,6 +90,10 @@ Event = (
     | SaveFailed
     | KeyboardQuitEvent
     | ProcessOutputRecorded
+    | MinibufferOpened
+    | MinibufferAborted
+    | BufferOpened
+    | OpenFailed
 )
 
 
@@ -251,6 +269,18 @@ class EditorSession:
         self._undo_history: list[_UndoGroup] = []  # applied groups, newest last
         self._undo_redo: list[_UndoGroup] = []  # undone groups, newest last
         self._undo_descending = False  # last command was an undo
+        self._minibuffer: str | None = None  # None = inactive
+        self._minibuffer_prompt: str = ""
+
+    @property
+    def minibuffer(self) -> str | None:
+        """Minibuffer input-so-far; None when inactive."""
+        return self._minibuffer
+
+    @property
+    def minibuffer_prompt(self) -> str | None:
+        """Prompt label while the minibuffer is active; None otherwise."""
+        return self._minibuffer_prompt if self._minibuffer is not None else None
 
     @property
     def transcript(self) -> tuple[Event, ...]:
@@ -278,6 +308,15 @@ class EditorSession:
         current = self.buffer.current
         events: list[Event] = []
         new_value: BufferValue
+
+        # While the minibuffer is active, only minibuffer commands act;
+        # everything else is a silent no-op (single source of truth for the
+        # gating — the harness routing is a convenience layer over this).
+        if self._minibuffer is not None and not isinstance(
+            command,
+            MinibufferInput | MinibufferBackspace | MinibufferAccept | MinibufferAbort,
+        ):
+            return CommandOutcome((), self._observation(current))
 
         match command:
             case InsertText(text=text):
@@ -349,6 +388,38 @@ class EditorSession:
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
+            case FindFile():
+                self._minibuffer = ""
+                self._minibuffer_prompt = "Find file: "
+                events.append(MinibufferOpened(self._minibuffer_prompt))
+                new_value = current
+            case MinibufferInput(char=char):
+                if self._minibuffer is not None:
+                    self._minibuffer += char
+                new_value = current
+            case MinibufferBackspace():
+                if self._minibuffer:
+                    self._minibuffer = self._minibuffer[:-1]
+                new_value = current
+            case MinibufferAbort():
+                # Never emits KeyboardQuitEvent (the terminal exits on that
+                # event); the main buffer's mark survives the abort.
+                if self._minibuffer is not None:
+                    self._minibuffer = None
+                    self._minibuffer_prompt = ""
+                    events.append(MinibufferAborted())
+                new_value = current
+            case MinibufferAccept():
+                if self._minibuffer is not None:
+                    path = self._minibuffer
+                    self._minibuffer = None
+                    self._minibuffer_prompt = ""
+                    # empty input: silent no-op close (new_value stays current)
+                    new_value = (
+                        self._open_file(current, path, events) if path else current
+                    )
+                else:
+                    new_value = current
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
 
@@ -397,15 +468,44 @@ class EditorSession:
         self.buffer.replace(new_value)
 
         self._transcript.extend(events)
-        observation = BufferObservation(
+        return CommandOutcome(tuple(events), self._observation(new_value))
+
+    def _observation(self, value: BufferValue) -> BufferObservation:
+        return BufferObservation(
             buffer_id=self.buffer.buffer_id.value,
-            text=new_value.text,
-            point=new_value.point,
-            file_path=new_value.file_path,
-            modified=new_value.modified,
-            mark=new_value.mark,
+            text=value.text,
+            point=value.point,
+            file_path=value.file_path,
+            modified=value.modified,
+            mark=value.mark,
+            minibuffer=self._minibuffer,
+            minibuffer_prompt=self.minibuffer_prompt,
         )
-        return CommandOutcome(tuple(events), observation)
+
+    def _open_file(
+        self, current: BufferValue, path: str, events: list[Event]
+    ) -> BufferValue:
+        """Find-file accept: replace the single buffer with the file's
+        contents (or an empty buffer for a missing path); the old buffer's
+        undo history is dropped (single-buffer deviation), the kill ring is
+        preserved (Emacs: the ring is global)."""
+        try:
+            text = self._files.read(path)
+        except FileNotFoundError:
+            text = ""  # missing file (or missing directory): new empty buffer
+        except OSError as error:
+            events.append(OpenFailed(path, normalize_os_error(error)))
+            return current
+        except UnicodeDecodeError:
+            events.append(OpenFailed(path, "io-error"))
+            return current
+        # Success: wholesale replacement; old undo history dropped.
+        self._undo_history.clear()
+        self._undo_redo.clear()
+        events.append(BufferOpened(path, len(text)))
+        return BufferValue(
+            text=text, point=0, file_path=path, modified=False, mark=None
+        )
 
     def run_process(
         self,

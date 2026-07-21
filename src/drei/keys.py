@@ -6,6 +6,7 @@ from drei.commands import (
     BackwardChar,
     CopyRegionAsKill,
     ExchangePointAndMark,
+    FindFile,
     ForwardChar,
     InsertText,
     KeyboardQuit,
@@ -39,6 +40,7 @@ _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-x", "C-s"): SaveBuffer(),
     ("C-x", "C-x"): ExchangePointAndMark(),
     ("C-x", "u"): Undo(),
+    ("C-x", "C-f"): FindFile(),
 }
 
 

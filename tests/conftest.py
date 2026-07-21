@@ -9,15 +9,28 @@ from drei.process import ProcessResult, ProcessTimedOut
 class FakeFilePort(FilePort):
     """Deterministic in-memory file port for tests.
 
-    ``fail`` selects the raised error type: ``"permission"`` raises
-    ``PermissionError``, anything else raises plain ``OSError``.
+    ``fail`` selects the raised error type on write: ``"permission"`` raises
+    ``PermissionError``, anything else raises plain ``OSError``. ``fail_read``
+    does the same for read (missing keys still raise ``FileNotFoundError``).
     """
 
-    def __init__(self, files: dict[str, str] | None = None, fail: str | None = None):
+    def __init__(
+        self,
+        files: dict[str, str] | None = None,
+        fail: str | None = None,
+        fail_read: str | None = None,
+    ):
         self.files = dict(files or {})
         self.fail = fail
+        self.fail_read = fail_read
 
     def read(self, path: str) -> str:
+        if self.fail_read is not None:
+            if self.fail_read == "permission":
+                raise PermissionError(path)
+            if self.fail_read == "binary":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            raise OSError(self.fail_read)
         if path not in self.files:
             raise FileNotFoundError(path)
         return self.files[path]

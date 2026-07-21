@@ -79,3 +79,54 @@ def test_harness_outcome_sequence() -> None:
     assert harness.outcomes[1].events == (PointMoved(-1, -1),)
     assert harness.outcomes[2].events == (PointMoved(1, 1),)
     assert harness.outcomes[2].observation.point == 1
+
+
+def test_harness_routes_minibuffer_keys() -> None:
+    """C-x C-f opens the prompt; keys route to the minibuffer; a pending
+    prefix typed before activation is dropped; RET accepts (missing file
+    through the null port → empty buffer); C-g aborts and a second C-g
+    quits."""
+    harness = EditorHarness(width=40, height=6)
+    harness.send("z")  # dirty the buffer: text "z"
+    harness.send("C-x")  # pending prefix...
+    outcome = harness.send("C-f")  # ...completes as C-x C-f → FindFile
+    assert outcome is not None
+    assert any(type(e).__name__ == "MinibufferOpened" for e in outcome.events)
+    assert harness.observation.minibuffer == ""
+    assert harness.frame.rows[-1].startswith("Find file: ")
+
+    harness.send("a")
+    harness.send("b")
+    assert harness.observation.minibuffer == "ab"
+    assert harness.frame.rows[-1].startswith("Find file: ab")
+    assert harness.frame.cursor[0] == len(harness.frame.rows) - 1  # echo row
+    harness.send("DEL")
+    assert harness.observation.minibuffer == "a"
+
+    # Pending prefix is dead; control keys ignored while active.
+    assert harness.send("C-f") is None  # ForwardChar does NOT run
+    assert harness.observation.minibuffer == "a"
+
+    # Abort: prompt closes, buffer and mark untouched, no quit.
+    outcome = harness.send("C-g")
+    assert outcome is not None
+    assert any(type(e).__name__ == "MinibufferAborted" for e in outcome.events)
+    assert all(type(e).__name__ != "KeyboardQuitEvent" for e in outcome.events)
+    closed = harness.observation.minibuffer
+    assert closed is None
+    # The `closed is None` narrowing bleeds into the next expression under
+    # mypy's reachability analysis; the runtime state is unaffected.
+    assert harness.observation.text == "z"  # type: ignore[unreachable]
+
+    # Accept path: open again, type a path, RET → null port read fails
+    # not-found → empty buffer at that path.
+    harness.send("C-x")
+    harness.send("C-f")
+    for char in "/tmp/nope.txt":
+        harness.send(char)
+    outcome = harness.send("RET")
+    assert outcome is not None
+    assert any(type(e).__name__ == "BufferOpened" for e in outcome.events)
+    assert harness.observation.text == ""
+    assert harness.observation.file_path == "/tmp/nope.txt"
+    assert harness.observation.minibuffer is None
