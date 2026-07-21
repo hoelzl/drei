@@ -150,6 +150,31 @@ def test_open_clears_undo_history(tmp_path: Path) -> None:
     assert session.buffer.current.text == "new"
 
 
+def test_open_discards_unsaved_edits_without_guard(tmp_path: Path) -> None:
+    """Registry-owned deviation: a successful find-file wholesale-replaces a
+    MODIFIED buffer — unsaved edits are discarded and the undo history that
+    could recover them is cleared in the same dispatch. Emacs keeps the old
+    buffer (per-file buffers) and would prompt before killing a modified
+    one; Drei's single-buffer model has neither. Documented in
+    docs/knowledge/emacs-parity.md ("find-file replacing the buffer")."""
+    target = tmp_path / "f.txt"
+    target.write_text("new", encoding="utf-8")
+    session = _session()
+    session.dispatch(InsertText("dirty"))
+    assert session.buffer.current.modified
+    session.dispatch(FindFile())
+    for char in str(target):
+        session.dispatch(MinibufferInput(char))
+    outcome = session.dispatch(MinibufferAccept())
+    assert BufferOpened(str(target), 3) in outcome.events
+    assert session.buffer.current.text == "new"  # "dirty" gone
+    from drei.commands import Undo
+
+    # No recovery path: undo history was cleared with the replace.
+    assert session.dispatch(Undo()).events == ()
+    assert not session.buffer.current.modified
+
+
 def test_open_preserves_kill_ring_and_clears_yank_state(tmp_path: Path) -> None:
     from drei.commands import KillLine, YankPop
 

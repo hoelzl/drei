@@ -114,8 +114,8 @@ def test_harness_routes_minibuffer_keys() -> None:
     assert all(type(e).__name__ != "KeyboardQuitEvent" for e in outcome.events)
     closed = harness.observation.minibuffer
     assert closed is None
-    # mypy's property narrowing survives the send() call above; the buffer
-    # really is still "z" at runtime.
+    # The `closed is None` narrowing bleeds into the next expression under
+    # mypy's reachability analysis; the runtime state is unaffected.
     assert harness.observation.text == "z"  # type: ignore[unreachable]
 
     # Accept path: open again, type a path, RET → null port read fails

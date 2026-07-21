@@ -246,6 +246,12 @@ def _run_emacs_on_host(emacs: str, eval_form: str = EMACS_EVAL) -> list[str]:
     return output.splitlines()
 
 
+def _docker_mount_spec(cwd: Path) -> str:
+    """Docker CLI mount spec for a host dir: Docker Desktop requires forward
+    slashes in the host path (`C:/Users/...`), backslashes break the mount."""
+    return f"{cwd.as_posix()}:/work"
+
+
 def _run_emacs_in_dir(eval_form: str, cwd: Path) -> list[str]:
     """Pinned Emacs with a controlled working directory (find-file probes
     need a fixture on disk and relative paths)."""
@@ -269,6 +275,8 @@ def _run_emacs_in_dir(eval_form: str, cwd: Path) -> list[str]:
             )
             output = result.stderr.strip() or result.stdout.strip()
             return output.splitlines()
+        # Same policy as _run_pinned_emacs: an unpinned host Emacs is not a
+        # baseline — fall through to the pinned container without asserting.
     if not _docker_available():
         pytest.skip("no pinned GNU Emacs available (no host emacs, no Docker)")
     setup = "apt-get update -qq && apt-get install -y -qq emacs-nox"
@@ -279,7 +287,7 @@ def _run_emacs_in_dir(eval_form: str, cwd: Path) -> list[str]:
             "run",
             "--rm",
             "-v",
-            f"{cwd}:/work",
+            _docker_mount_spec(cwd),
             "-w",
             "/work",
             PINNED_IMAGE,
@@ -694,7 +702,7 @@ _FIND_FILE_RE = re.compile(
 
 
 @pytest.mark.integration
-def test_find_file_parity(tmp_path: Path) -> None:
+def test_find_file_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """find-file semantics parity: existing file loads with point at start
     and MOD nil; a missing file (or missing directory) yields an empty
     unmodified buffer with no error.
@@ -743,24 +751,23 @@ def test_find_file_parity(tmp_path: Path) -> None:
         Buffer(BufferId("scratch"), BufferValue(text="", point=0)),
         file_port=SystemFilePort(),
     )
-    cwd = os.getcwd()
-    os.chdir(tmp_path)
-    try:
-        opened = drei_open(session, "drei-parity-find.txt")
-        assert BufferOpened("drei-parity-find.txt", 8) in opened.events
-        assert opened.observation.text == match.group(1)
-        assert opened.observation.point == int(match.group(2)) - 1 == 0
-        assert not opened.observation.modified
+    # SystemFilePort resolves relative paths against the process cwd, so
+    # the Drei side runs from the fixture dir (monkeypatch restores cwd
+    # even on failure).
+    monkeypatch.chdir(tmp_path)
+    opened = drei_open(session, "drei-parity-find.txt")
+    assert BufferOpened("drei-parity-find.txt", 8) in opened.events
+    assert opened.observation.text == match.group(1)
+    assert opened.observation.point == int(match.group(2)) - 1 == 0
+    assert not opened.observation.modified
 
-        missing = drei_open(session, "drei-no-such-file.txt")
-        assert BufferOpened("drei-no-such-file.txt", 0) in missing.events
-        assert missing.observation.text == match.group(4) == ""
-        assert missing.observation.point == int(match.group(5)) - 1 == 0
-        assert not missing.observation.modified
+    missing = drei_open(session, "drei-no-such-file.txt")
+    assert BufferOpened("drei-no-such-file.txt", 0) in missing.events
+    assert missing.observation.text == match.group(4) == ""
+    assert missing.observation.point == int(match.group(5)) - 1 == 0
+    assert not missing.observation.modified
 
-        missing_dir = drei_open(session, "drei-no-such-dir/x.txt")
-        assert BufferOpened("drei-no-such-dir/x.txt", 0) in missing_dir.events
-        assert missing_dir.observation.text == match.group(7) == ""
-        assert not missing_dir.observation.modified
-    finally:
-        os.chdir(cwd)
+    missing_dir = drei_open(session, "drei-no-such-dir/x.txt")
+    assert BufferOpened("drei-no-such-dir/x.txt", 0) in missing_dir.events
+    assert missing_dir.observation.text == match.group(7) == ""
+    assert not missing_dir.observation.modified

@@ -376,6 +376,17 @@ def test_shipped_editor_find_file_scenario(tmp_path: Path) -> None:
         # replace keeps it) — the minibuffer prompt is gone.
         assert not any("Find file:" in line for line in accepted_lines), accepted_lines
 
+        # Composition proof: the opened file_path propagated — C-x C-s after
+        # an edit writes through the real SystemFilePort to the typed path.
+        # (Point is 0 after open, so "!" prepends.)
+        appended = adapter.dispatch(TextInput(ManualTime(0), "!"))
+        assert type(appended) is EpochCompleted, appended
+        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        saved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "s")))
+        assert type(saved) is EpochCompleted, saved
+        assert any("Wrote" in line for line in _frame_lines(saved.observation))
+        assert target.read_text(encoding="utf-8") == "!found me"
+
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
