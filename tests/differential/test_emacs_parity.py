@@ -6,9 +6,12 @@ against Drei's production session, then compares normalized observations.
 
 Pinning strategy (per docs/developer-guide/development.md): the pinned
 reference is GNU Emacs 29.3 from `ubuntu:24.04` (`apt-get install emacs-nox`).
-Locally the scenario runs in that container via Docker; in CI a dedicated
-parity job uses the pinned `ubuntu-24.04` runner with `emacs-nox` installed.
-If neither Docker nor a host `emacs` binary is available, the scenario skips.
+Locally the scenario runs in a derived image (`drei-parity-emacs:24.04`,
+built once with emacs-nox baked in; refresh with DREI_PARITY_REFRESH=1) —
+the `GNU Emacs 29.` version assert still pins the series regardless of
+image age. In CI a dedicated parity job uses the pinned `ubuntu-24.04`
+runner with `emacs-nox` installed. If neither Docker nor a host `emacs`
+binary is available, the scenario skips.
 """
 
 from __future__ import annotations
@@ -153,6 +156,11 @@ _UNDO_RE = re.compile(
 
 PINNED_IMAGE = "ubuntu:24.04"
 PINNED_VERSION_PREFIX = "GNU Emacs 29."
+# Derived image with the pinned emacs-nox baked in, so the local differential
+# loop skips the ~2 min apt install per scenario. Built once, refreshed on
+# demand (DREI_PARITY_REFRESH=1); the version assert below still pins 29.x
+# regardless of image staleness.
+CACHED_IMAGE = "drei-parity-emacs:24.04"
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,23 +201,49 @@ def _docker_available() -> bool:
     return result.returncode == 0
 
 
+def _cached_image_ready() -> bool:
+    result = subprocess.run(
+        ["docker", "image", "inspect", CACHED_IMAGE],
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _build_cached_image() -> None:
+    """Bake the pinned emacs-nox into a derived image (one apt install)."""
+    dockerfile = (
+        f"FROM {PINNED_IMAGE}\n"
+        "RUN apt-get update -qq && apt-get install -y -qq emacs-nox\n"
+    )
+    subprocess.run(
+        ["docker", "build", "-t", CACHED_IMAGE, "-"],
+        input=dockerfile,
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=True,
+    )
+
+
 def _run_emacs_in_pinned_container(eval_form: str = EMACS_EVAL) -> list[str]:
-    setup = "apt-get update -qq && apt-get install -y -qq emacs-nox"
-    check = "emacs --version | head -1"
+    if os.environ.get("DREI_PARITY_REFRESH") == "1" or not _cached_image_ready():
+        _build_cached_image()
     result = subprocess.run(
         [
             "docker",
             "run",
             "--rm",
-            PINNED_IMAGE,
+            CACHED_IMAGE,
             "bash",
             "-c",
-            f"{setup} >/dev/null 2>&1 && {check} && cd /tmp && "
+            f"emacs --version | head -1 && cd /tmp && "
             f"emacs -Q --batch --eval '{eval_form}' 2>&1",
         ],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=120,
         check=True,
     )
     lines = result.stdout.strip().splitlines()
@@ -279,8 +313,8 @@ def _run_emacs_in_dir(eval_form: str, cwd: Path) -> list[str]:
         # baseline — fall through to the pinned container without asserting.
     if not _docker_available():
         pytest.skip("no pinned GNU Emacs available (no host emacs, no Docker)")
-    setup = "apt-get update -qq && apt-get install -y -qq emacs-nox"
-    check = "emacs --version | head -1"
+    if os.environ.get("DREI_PARITY_REFRESH") == "1" or not _cached_image_ready():
+        _build_cached_image()
     result = subprocess.run(
         [
             "docker",
@@ -290,15 +324,14 @@ def _run_emacs_in_dir(eval_form: str, cwd: Path) -> list[str]:
             _docker_mount_spec(cwd),
             "-w",
             "/work",
-            PINNED_IMAGE,
+            CACHED_IMAGE,
             "bash",
             "-c",
-            f"{setup} >/dev/null 2>&1 && {check} && "
-            f"emacs -Q --batch --eval '{eval_form}' 2>&1",
+            f"emacs --version | head -1 && emacs -Q --batch --eval '{eval_form}' 2>&1",
         ],
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=120,
         check=True,
     )
     lines = result.stdout.strip().splitlines()
