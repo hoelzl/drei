@@ -20,9 +20,11 @@ from drei.acp.machine import (
     AgentTextChunk,
     Initialized,
     PermissionRequested,
+    PermissionResolved,
     PlanUpdated,
     PromptCompleted,
     ProtocolError,
+    Selected,
     SessionEffect,
     SessionEstablished,
     ThoughtChunk,
@@ -88,6 +90,13 @@ def advance(fold: TranscriptFold, effect: SessionEffect) -> tuple[TranscriptFold
         case PermissionRequested(request_id=request_id):
             fold, prefix = _close_thought(fold)
             return fold, prefix + f"\n── permission requested (id {request_id}) ──\n"
+        case PermissionResolved(decision=decision, granted=granted):
+            fold, prefix = _close_thought(fold)
+            if granted and isinstance(decision, Selected):
+                line = f"\n── permission granted: {decision.option_id} ──\n"
+            else:
+                line = "\n── permission denied ──\n"
+            return fold, prefix + line
         case ProtocolError(detail=detail):
             fold, prefix = _close_thought(fold)
             return fold, prefix + f"\n── protocol error: {detail} ──\n"

@@ -86,3 +86,8 @@ The current minibuffer is a text prompt. Approvals need a **choice** prompt: the
 ## Deferred to §C (unchanged)
 
 The `hermes acp` launcher (§C.9), the end-to-end scenario (§C.10), the text-prompt variant of §A.4, fs/terminal capability advertisement, and any `allow_always` persistence across Drei restarts.
+
+## Deferred to §C (added by adversarial review)
+
+- **`session/cancel` MUST sweep pending permissions.** ACP 0.9.0 requires the client to answer every pending `session/request_permission` with `cancelled` when the prompt turn is cancelled. This slice ships no cancellation/pump path (`cancel()` does not clear `in_flight_incoming`, and there is no editor-level sweep of `_permission_queue`/`_choice`), so a `session/cancel` while a permission prompt is open or queued leaves the agent hanging. The slice that wires cancellation (§C pump) must route a synthetic abort through the choice minibuffer and answer all pending requests `cancelled`. Latent until the pump exists.
+- **`MinibufferClosed` event.** The event stream can show two consecutive `MinibufferOpened` with no close event (choice resolution opens the next queued prompt without an explicit close; text-prompt accept never had one either — pre-existing asymmetry B.8 amplifies). A future event-stream consumer that pairs open/close would need this; recorded, not added in this slice (no consumer pairs them today).
