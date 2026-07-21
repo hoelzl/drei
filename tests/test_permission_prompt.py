@@ -38,7 +38,7 @@ def make_session() -> EditorSession:
     return EditorSession(Buffer(BufferId("scratch"), BufferValue(text="", point=0)))
 
 
-def _permission(request_id: int = 42) -> PermissionRequested:
+def _permission(request_id: int | str = 42) -> PermissionRequested:
     return PermissionRequested(
         request_id=request_id,
         params={
@@ -315,6 +315,41 @@ class TestPermissionQueue:
         session.dispatch(MinibufferAbort())
         assert session.pending_permission_count() == 0
         assert session.minibuffer is not None  # permission prompt now open
+
+    def test_string_request_id_flows_through(self) -> None:
+        # ACP RequestId is int | str; a string id must survive
+        # prompt → decision → machine answer unchanged.
+        from drei.acp.machine import handle, new_session, start
+        from drei.acp.messages import Request, Response
+
+        machine, init_req = start()
+        machine, _, _ = handle(
+            machine, Response(id=init_req.id, result={"agentCapabilities": {}})
+        )
+        machine, new_req = new_session(machine, cwd="/tmp")
+        machine, _, _ = handle(
+            machine, Response(id=new_req.id, result={"sessionId": "s1"})
+        )
+        machine, _, _ = handle(
+            machine,
+            Request(
+                id="perm-abc",
+                method="session/request_permission",
+                params=_permission("perm-abc").params,
+            ),
+        )
+        session = make_session()
+        session.dispatch(PromptPermission(_permission("perm-abc")))
+        outcome = session.dispatch(MinibufferInput("y"))
+        decided = [e for e in outcome.events if isinstance(e, PermissionDecided)]
+        assert decided == [
+            PermissionDecided(request_id="perm-abc", decision=Selected("o-once"))
+        ]
+        machine, out, _ = session.apply_permission_decision(
+            machine, "perm-abc", decided[0].decision
+        )
+        assert isinstance(out[0], Response)
+        assert out[0].id == "perm-abc"
 
 
 class TestApplyPermissionDecision:
