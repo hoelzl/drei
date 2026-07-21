@@ -3,14 +3,18 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from drei.commands import (
+    AgentTextInserted,
+    AgentTranscriptUpdated,
     BackwardChar,
     BufferOpened,
     BufferSaved,
     CopyRegionAsKill,
     DeliverProcessOutput,
+    DeliverSessionEffects,
     ExchangePointAndMark,
     FindFile,
     ForwardChar,
+    InsertAgentText,
     InsertText,
     KeyboardQuit,
     KeyboardQuitEvent,
@@ -117,6 +121,47 @@ def command_history(draw: st.DrawFn) -> list[object]:
                 st.just(MinibufferBackspace()),
                 st.just(MinibufferAccept()),
                 st.just(MinibufferAbort()),
+            )
+        )
+        for _ in range(size)
+    ]
+
+
+@st.composite
+def _session_effects(draw: st.DrawFn) -> DeliverSessionEffects:
+    from drei.acp.machine import AgentTextChunk, PromptCompleted, ThoughtChunk
+
+    effects = draw(
+        st.lists(
+            st.one_of(
+                st.builds(AgentTextChunk, st.text(min_size=0, max_size=6)),
+                st.builds(ThoughtChunk, st.text(min_size=0, max_size=6)),
+                st.builds(
+                    PromptCompleted,
+                    st.sampled_from(["end_turn", "refusal", "cancelled"]),
+                ),
+            ),
+            min_size=1,
+            max_size=4,
+        )
+    )
+    return DeliverSessionEffects(tuple(effects))
+
+
+@st.composite
+def agent_history(draw: st.DrawFn) -> list[object]:
+    """Editing history interleaved with agent deliveries (design 0003 §B.7)."""
+    size = draw(st.integers(min_value=0, max_value=20))
+    return [
+        draw(
+            st.one_of(
+                st.builds(InsertText, st.text(min_size=0, max_size=5)),
+                st.just(KillLine()),
+                st.just(Yank()),
+                st.just(Undo()),
+                st.just(SetMark()),
+                _session_effects(),
+                st.builds(InsertAgentText, st.text(min_size=0, max_size=5)),
             )
         )
         for _ in range(size)
@@ -412,38 +457,19 @@ def test_process_deliveries_never_perturb_editor_folds(history: list[object]) ->
         ring_before = session.kill_ring
         outcome = session.dispatch(command)  # type: ignore[arg-type]
         if isinstance(command, DeliverProcessOutput):
-            if session.minibuffer is not None:
-                # Gated: no event, no state change — like any other
-                # non-minibuffer command while the prompt is open.
-                assert outcome.events == ()
-                assert session.buffer.current == before
-                assert (
-                    len(session._undo_history),
-                    len(session._undo_redo),
-                ) == undo_before
-                assert session.kill_ring == ring_before
-                continue
             # Buffer, undo stacks, and kill ring are all untouched.
             assert session.buffer.current == before
             assert (len(session._undo_history), len(session._undo_redo)) == undo_before
             assert session.kill_ring == ring_before
-            # Exactly one delivery event per command.
+            # Exactly one delivery event per command — even with the
+            # minibuffer open: external deliveries bypass the gate (parity
+            # registry row); a swallowed delivery would desync folds.
             recorded = [
                 e for e in outcome.events if isinstance(e, ProcessOutputRecorded)
             ]
             assert len(recorded) == 1
-    # The transcript carries exactly one ProcessOutputRecorded per delivery
-    # that ran (deliveries gated by an open minibuffer record nothing).
-    deliveries = 0
-    active = False
-    for c in history:
-        if active:
-            if isinstance(c, MinibufferAccept | MinibufferAbort):
-                active = False
-        elif isinstance(c, FindFile):
-            active = True
-        elif isinstance(c, DeliverProcessOutput):
-            deliveries += 1
+    # The transcript carries exactly one ProcessOutputRecorded per delivery.
+    deliveries = sum(isinstance(c, DeliverProcessOutput) for c in history)
     events = [e for e in session.transcript if isinstance(e, ProcessOutputRecorded)]
     assert len(events) == deliveries
     # The process log holds one entry per *successful* delivery, and each is
@@ -496,3 +522,54 @@ def test_minibuffer_accept_always_closes_with_boundary_event(chars: list[str]) -
         assert any(isinstance(e, (BufferOpened, OpenFailed)) for e in outcome.events)
     else:
         assert outcome.events == ()  # empty input: silent no-op close
+
+
+@given(agent_history())
+def test_agent_deliveries_never_create_undo_groups(history: list[object]) -> None:
+    """InsertAgentText / DeliverSessionEffects are external deliveries: no
+    undo group, no kill-ring change, buffer modified-flag untouched."""
+    session = _session()
+    for command in history:
+        undo_before = (len(session._undo_history), len(session._undo_redo))
+        ring_before = session.kill_ring
+        modified_before = session.buffer.current.modified
+        outcome = session.dispatch(command)  # type: ignore[arg-type]
+        if isinstance(command, (InsertAgentText, DeliverSessionEffects)):
+            assert (len(session._undo_history), len(session._undo_redo)) == undo_before
+            assert session.kill_ring == ring_before
+            assert session.buffer.current.modified == modified_before
+            # Every outcome event is an agent-delivery event, never a user-edit
+            # event (TextInserted/TextKilled/...), so _make_group cannot fire.
+            assert all(
+                isinstance(e, (AgentTranscriptUpdated, AgentTextInserted))
+                for e in outcome.events
+            )
+
+
+@given(agent_history())
+def test_agent_insert_events_match_the_buffer_at_delivery(
+    history: list[object],
+) -> None:
+    """Each AgentTextInserted describes exactly the append that happened at
+    that dispatch: the event's text equals the buffer span it records, at the
+    moment it is recorded. (Later user edits/undo may overwrite the span —
+    the owned deviation — so the check is delivery-local, not cumulative.)"""
+    session = _session()
+    for command in history:
+        outcome = session.dispatch(command)  # type: ignore[arg-type]
+        text = session.buffer.current.text
+        for event in outcome.events:
+            if isinstance(event, AgentTextInserted):
+                assert event.text == text[event.before : event.after]
+                assert event.after == len(text)  # appended at end-of-buffer
+
+
+@given(agent_history())
+def test_point_in_bounds_with_agent_deliveries(history: list[object]) -> None:
+    session = _session()
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+        current = session.buffer.current
+        assert 0 <= current.point <= len(current.text)
+        if current.mark is not None:
+            assert 0 <= current.mark <= len(current.text)

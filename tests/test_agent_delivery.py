@@ -27,6 +27,7 @@ from drei.commands import (
     FindFile,
     InsertAgentText,
     InsertText,
+    KillLine,
     MinibufferAbort,
     Undo,
 )
@@ -195,6 +196,28 @@ class TestMinibufferDoesNotSwallowDeliveries:
             DeliverProcessOutput(("cmd",), ProcessResult(("cmd",), 0, "out", ""), None)
         )
         assert any(type(e).__name__ == "ProcessOutputRecorded" for e in outcome.events)
+
+
+class TestDeliveriesAndTheKillChain:
+    """An event-emitting delivery breaks the kill append chain (the chain
+    rule is 'event-emitting commands intervene'); a delivery whose append
+    moves point to end-of-buffer also turns a following KillLine into a
+    silent no-op, which leaves the chain intact. Both pinned as deliberate."""
+
+    def test_fold_only_delivery_breaks_the_chain(self) -> None:
+        session = make_session(text="aa\nbb\n", point=0)
+        session.dispatch(KillLine())
+        session.dispatch(DeliverSessionEffects((AgentTextChunk(text="x"),)))
+        session.dispatch(KillLine())
+        assert session.kill_ring == ("\n", "aa")  # two entries: chain broken
+
+    def test_append_delivery_indirectly_preserves_the_chain(self) -> None:
+        session = make_session(text="aa\nbb\n", point=0)
+        session.dispatch(KillLine())
+        session.dispatch(InsertAgentText("X"))  # point → end-of-buffer
+        outcome = session.dispatch(KillLine())  # silent no-op at buffer end
+        assert outcome.events == ()
+        assert session.kill_ring == ("aa",)  # chain intact (no intervening event)
 
 
 class TestDispatchRejectsCorruptDelivery:
