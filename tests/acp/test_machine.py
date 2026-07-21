@@ -131,13 +131,107 @@ class TestHandshake:
         with pytest.raises(AcpStateError):
             prompt(machine, "hi")
 
-    def test_start_twice_raises(self) -> None:
+    def test_second_initialize_response_is_protocol_error(self) -> None:
+        # A response with an id the machine never sent is a ProtocolError, not
+        # a crash (the real start()-twice guard is covered elsewhere).
         machine, _ = start()
-        # start() always begins a fresh machine; calling start() is only valid
-        # on a pristine machine, so we test that a second initialize response
-        # (unknown id) is a ProtocolError, not a crash.
         machine, out, effects = handle(machine, Response(id=99, result=_init_result()))
-        assert effects and isinstance(effects[-1], ProtocolError)
+        assert out == []
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+
+
+class TestErrorRecovery:
+    """Adversarial-review B1: a ResponseError must not leave the machine stuck
+    in a non-advanced phase."""
+
+    def test_prompt_error_returns_to_session_active_and_recovers(self) -> None:
+        machine, _ = _drive_handshake()
+        machine, req = prompt(machine, "hi")
+        assert machine.phase == "PROMPT_IN_FLIGHT"
+        machine, out, effects = handle(
+            machine, ResponseError(id=req.id, code=-32603, message="boom")
+        )
+        assert out == []
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        # Machine is no longer stuck: prompt() works again, cancel() does not.
+        assert machine.phase == "SESSION_ACTIVE"
+        machine, _ = prompt(machine, "retry")
+        assert machine.phase == "PROMPT_IN_FLIGHT"
+
+    def test_initialize_error_returns_to_disconnected_and_recovers(self) -> None:
+        machine, req = start()
+        assert machine.phase == "INITIALIZING"
+        machine, _, effects = handle(
+            machine, ResponseError(id=req.id, code=-32603, message="nope")
+        )
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.phase == "DISCONNECTED"
+        # Recoverable: start() works again.
+        machine, _ = start(machine)
+        assert machine.phase == "INITIALIZING"
+
+    def test_session_new_error_stays_ready_and_recovers(self) -> None:
+        machine, _ = start()
+        machine, _, _ = handle(machine, Response(id=0, result=_init_result()))
+        machine, req = new_session(machine, "/repo")
+        machine, _, effects = handle(
+            machine, ResponseError(id=req.id, code=-32603, message="bad cwd")
+        )
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.phase == "READY"
+        machine, _ = new_session(machine, "/repo")
+        assert machine.phase == "READY"
+
+
+class TestMalformedResponses:
+    """Adversarial-review N1: malformed responses must not be reported as a
+    normal completion / advance the machine to a bogus state."""
+
+    def test_session_new_missing_session_id_is_protocol_error(self) -> None:
+        machine, _ = start()
+        machine, _, _ = handle(machine, Response(id=0, result=_init_result()))
+        machine, req = new_session(machine, "/repo")
+        machine, _, effects = handle(machine, Response(id=req.id, result={}))
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.session_id is None
+        assert machine.phase == "READY"
+
+    def test_prompt_missing_stop_reason_is_protocol_error(self) -> None:
+        machine, _ = _drive_handshake()
+        machine, req = prompt(machine, "hi")
+        machine, _, effects = handle(machine, Response(id=req.id, result={}))
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.phase == "PROMPT_IN_FLIGHT"
+
+    def test_prompt_invalid_stop_reason_is_protocol_error(self) -> None:
+        machine, _ = _drive_handshake()
+        machine, req = prompt(machine, "hi")
+        machine, _, effects = handle(
+            machine, Response(id=req.id, result={"stopReason": "bogus"})
+        )
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+
+
+class TestPreSessionGuards:
+    """Adversarial-review B2: session/update before a session is established
+    must be a ProtocolError, never folded into a DISCONNECTED machine."""
+
+    def test_update_before_session_is_protocol_error(self) -> None:
+        machine = AcpMachine()
+        update = Notification(
+            method=SESSION_UPDATE,
+            params={
+                "sessionId": None,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "x"},
+                },
+            },
+        )
+        machine, out, effects = handle(machine, update)
+        assert out == []
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.phase == "DISCONNECTED"
 
 
 class TestPromptLifecycle:

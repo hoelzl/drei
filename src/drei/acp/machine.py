@@ -48,8 +48,12 @@ Phase = Literal[
     "READY",
     "SESSION_ACTIVE",
     "PROMPT_IN_FLIGHT",
-    "CLOSED",
 ]
+
+# The StopReason literal, pinned from agent-client-protocol 0.9.0 schema.py:14.
+_STOP_REASONS = frozenset(
+    {"end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"}
+)
 
 
 class AcpStateError(Exception):
@@ -108,32 +112,8 @@ class PermissionRequested:
 
 
 @dataclass(frozen=True, slots=True)
-class FsReadRequested:
-    request_id: RequestId
-    params: JsonValue
-
-
-@dataclass(frozen=True, slots=True)
-class FsWriteRequested:
-    request_id: RequestId
-    params: JsonValue
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalRequested:
-    request_id: RequestId
-    method: str
-    params: JsonValue
-
-
-@dataclass(frozen=True, slots=True)
 class ProtocolError:
     detail: str
-
-
-@dataclass(frozen=True, slots=True)
-class Cancelled:
-    pass
 
 
 SessionEffect = (
@@ -146,11 +126,7 @@ SessionEffect = (
     | PlanUpdated
     | PromptCompleted
     | PermissionRequested
-    | FsReadRequested
-    | FsWriteRequested
-    | TerminalRequested
     | ProtocolError
-    | Cancelled
 )
 
 
@@ -279,6 +255,15 @@ def _handle_response(
     machine = replace(machine, in_flight_outgoing=in_flight)
 
     if isinstance(message, ResponseError):
+        # Restore the phase so the machine is not stuck: a failed prompt returns
+        # to SESSION_ACTIVE, a failed initialize to DISCONNECTED (re-startable),
+        # a failed session/new stays READY. (Adversarial-review B1.)
+        recovery: dict[str, Phase] = {
+            INITIALIZE: "DISCONNECTED",
+            SESSION_NEW: "READY",
+            SESSION_PROMPT: "SESSION_ACTIVE",
+        }
+        machine = replace(machine, phase=recovery.get(method, machine.phase))
         return (
             machine,
             [],
@@ -298,14 +283,30 @@ def _handle_response(
             [Initialized(agent_capabilities=caps)],
         )
     if method == SESSION_NEW:
-        session_id = result.get("sessionId", "")
+        # 0.9.0 requires sessionId; a missing/non-str value is malformed and
+        # must not advance the machine to an empty-id session. (Review N1.)
+        session_id = result.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return (
+                machine,
+                [],
+                [ProtocolError(detail="session/new response missing sessionId")],
+            )
         return (
             replace(machine, phase="SESSION_ACTIVE", session_id=session_id),
             [],
             [SessionEstablished(session_id=session_id)],
         )
     if method == SESSION_PROMPT:
-        stop = result.get("stopReason", "end_turn")
+        # 0.9.0 requires stopReason; validate against the StopReason literal
+        # rather than defaulting to a spurious end_turn. (Review N1.)
+        stop = result.get("stopReason")
+        if not isinstance(stop, str) or stop not in _STOP_REASONS:
+            return (
+                machine,
+                [],
+                [ProtocolError(detail=f"session/prompt bad stopReason {stop!r}")],
+            )
         return (
             replace(machine, phase="SESSION_ACTIVE"),
             [],
@@ -323,6 +324,15 @@ def _handle_notification(
         # Other agent→client notifications are not modelled; ignore.
         return machine, [], []
     params = message.params if isinstance(message.params, dict) else {}
+    # A session/update is only meaningful once a session exists. Without this
+    # guard, sessionId=None matches a fresh machine (None == None) and a
+    # pre-session update is folded into a DISCONNECTED machine. (Review B2.)
+    if machine.session_id is None:
+        return (
+            machine,
+            [],
+            [ProtocolError(detail="session/update before any session is established")],
+        )
     if params.get("sessionId") != machine.session_id:
         return (
             machine,
