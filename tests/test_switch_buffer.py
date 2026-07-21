@@ -28,7 +28,7 @@ from drei.commands import (
     YankPop,
 )
 from drei.model import Buffer, BufferId, BufferValue
-from drei.session import EditorSession
+from drei.session import EditorSession, Event
 
 
 def _session() -> EditorSession:
@@ -38,7 +38,7 @@ def _session() -> EditorSession:
     )
 
 
-def _switch(session: EditorSession, name: str) -> tuple:
+def _switch(session: EditorSession, name: str) -> tuple[Event, ...]:
     session.dispatch(SwitchBuffer())
     for char in name:
         session.dispatch(MinibufferInput(char))

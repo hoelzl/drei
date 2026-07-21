@@ -20,7 +20,7 @@ from drei.commands import (
     WindowSplit,
 )
 from drei.model import Buffer, BufferId, BufferValue
-from drei.session import EditorSession, WindowValue
+from drei.session import EditorSession, Event, WindowValue
 
 
 def _session(height: int | None = 24) -> EditorSession:
@@ -117,7 +117,7 @@ def test_buffer_switch_retargets_the_focused_window() -> None:
     session = _session()
     session._create_buffer("beta", BufferValue(text="bbb", point=0), [])
     session.dispatch(SplitWindow())
-    events: list = []
+    events: list[Event] = []
     session._select_buffer(BufferId("beta"), events)
     assert BufferSelected("beta") in events
     assert session.windows[session.focused].buffer_id == BufferId("beta")

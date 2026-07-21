@@ -13,6 +13,8 @@ Oracles:
 
 from __future__ import annotations
 
+from typing import cast
+
 import hypothesis.strategies as st
 from conftest import FakeFilePort
 from hypothesis import HealthCheck, given, settings
@@ -36,7 +38,7 @@ from drei.commands import (
     Yank,
 )
 from drei.model import Buffer, BufferId, BufferValue
-from drei.session import Command, EditorSession
+from drei.session import Command, EditorSession, Event
 
 _MAX_HISTORY = 15
 
@@ -69,7 +71,7 @@ def _histories(draw: st.DrawFn) -> list[tuple[str, Command]]:
     for _ in range(draw(st.integers(min_value=1, max_value=_MAX_HISTORY))):
         if draw(st.booleans()):
             current = buffers[1 - buffers.index(current)]
-        command = draw(_BUFFER_EDIT_COMMANDS)
+        command = cast(Command, draw(_BUFFER_EDIT_COMMANDS))
         history.append((current, command))
     return history
 
@@ -89,7 +91,7 @@ def _apply_history(session: EditorSession, history: list[tuple[str, Command]]) -
     """Drive the interleaved history through real buffer switches."""
     for buffer_name, command in history:
         if session.buffer.buffer_id.value != buffer_name:
-            events: list = []
+            events: list[Event] = []
             session._select_buffer(BufferId(buffer_name), events)
         session.dispatch(command)
 
@@ -281,7 +283,7 @@ class TestTranscriptReplay:
         current = "alpha"
         for buffer_name, command in history:
             if session.buffer.buffer_id.value != buffer_name:
-                events: list = []
+                events: list[Event] = []
                 session._select_buffer(BufferId(buffer_name), events)
                 current = buffer_name
             outcome = session.dispatch(command)

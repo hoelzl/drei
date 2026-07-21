@@ -22,7 +22,7 @@ from drei.commands import (
     Yank,
 )
 from drei.model import Buffer, BufferId, BufferValue
-from drei.session import EditorSession
+from drei.session import EditorSession, Event
 
 
 def _session(files: dict[str, str] | None = None, text: str = "") -> EditorSession:
@@ -32,7 +32,7 @@ def _session(files: dict[str, str] | None = None, text: str = "") -> EditorSessi
     )
 
 
-def _find_file(session: EditorSession, path: str) -> tuple:
+def _find_file(session: EditorSession, path: str) -> tuple[Event, ...]:
     session.dispatch(FindFile())
     for char in path:
         session.dispatch(MinibufferInput(char))
