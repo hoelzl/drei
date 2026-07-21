@@ -53,7 +53,7 @@ from drei.commands import (
     YankPop,
 )
 from drei.files import FilePort, normalize_os_error
-from drei.model import Buffer, BufferValue
+from drei.model import Buffer, BufferId, BufferValue
 from drei.process import (
     ProcessPort,
     ProcessResult,
@@ -259,14 +259,58 @@ class _NullProcessPort:
         raise FileNotFoundError(argv[0] if argv else "")
 
 
+class _BufferState:
+    """Per-buffer editing state (design 0003 §A.2, plan 0012 D2).
+
+    Everything Emacs scopes per buffer lives here: undo history/redo/descent,
+    yank-pop chaining, and the kill-append chain flag. Session-global state
+    (kill ring, transcript, process log, minibuffer, ports) stays on the
+    session — the ring is global in Emacs (kill in one buffer, yank in
+    another), pinned since slice 7.
+    """
+
+    __slots__ = (
+        "undo_history",
+        "undo_redo",
+        "undo_descending",
+        "yank_active",
+        "yank_cursor",
+        "yank_bounds",
+        "last_was_kill",
+    )
+
+    def __init__(self) -> None:
+        self.undo_history: list[_UndoGroup] = []  # applied groups, newest last
+        self.undo_redo: list[_UndoGroup] = []  # undone groups, newest last
+        self.undo_descending = False  # last command was an undo
+        self.yank_active = False
+        self.yank_cursor = 0
+        self.yank_bounds = (0, 0)
+        self.last_was_kill = False
+
+    def break_chains(self) -> None:
+        """Switching buffers intervenes like any other command in Emacs:
+        kill-append and yank-pop chaining (last-command state) do not
+        survive the switch. Undo history is per-buffer and is NOT touched —
+        returning to a buffer resumes its own undo stack (probed vs pinned
+        29.3, plan 0012 evidence 2/3)."""
+        self.last_was_kill = False
+        self.yank_active = False
+        self.undo_descending = False
+
+
 class EditorSession:
     def __init__(
         self,
         buffer: Buffer,
         file_port: FilePort | None = None,
         process_port: ProcessPort | None = None,
+        frame_size: tuple[int, int] | None = None,
     ) -> None:
-        self.buffer = buffer
+        self._buffers: dict[BufferId, Buffer] = {buffer.buffer_id: buffer}
+        self._current_id: BufferId = buffer.buffer_id
+        self._states: dict[BufferId, _BufferState] = {buffer.buffer_id: _BufferState()}
+        self._frame_size = frame_size
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
         self._processes: ProcessPort = (
             process_port if process_port is not None else _NullProcessPort()
@@ -274,13 +318,6 @@ class EditorSession:
         self._transcript: list[Event] = []
         self._process_log: list[ProcessResult] = []
         self._kill_ring: list[str] = []
-        self._last_was_kill = False
-        self._yank_active = False
-        self._yank_cursor = 0
-        self._yank_bounds = (0, 0)
-        self._undo_history: list[_UndoGroup] = []  # applied groups, newest last
-        self._undo_redo: list[_UndoGroup] = []  # undone groups, newest last
-        self._undo_descending = False  # last command was an undo
         self._minibuffer: str | None = None  # None = inactive
         self._minibuffer_prompt: str = ""
         # Agent-transcript fold cache (design 0003 §B.7): a derived,
@@ -291,6 +328,20 @@ class EditorSession:
         from drei.acp.transcript import TranscriptFold
 
         self._agent_fold = TranscriptFold()
+
+    @property
+    def buffer(self) -> Buffer:
+        """The current buffer (identity shell; plan 0012 D1)."""
+        return self._buffers[self._current_id]
+
+    @property
+    def buffers(self) -> tuple[str, ...]:
+        """Derived view: the session's buffer names, in creation order."""
+        return tuple(buffer_id.value for buffer_id in self._buffers)
+
+    @property
+    def _state(self) -> _BufferState:
+        return self._states[self._current_id]
 
     @property
     def minibuffer(self) -> str | None:
@@ -474,23 +525,23 @@ class EditorSession:
             # A kill that emits an event starts/continues the append chain;
             # a no-op kill leaves the chain intact.
             if any(isinstance(e, TextKilled) for e in events):
-                self._last_was_kill = True
+                self._state.last_was_kill = True
         elif events:
             # Only event-emitting commands break the chain. A silent no-op
             # (empty insert) leaves no trace in the transcript, so it must
             # not intervene — keeping the chain derivable from the evidence
             # (modulo capacity eviction, which emits nothing).
-            self._last_was_kill = False
+            self._state.last_was_kill = False
 
         if isinstance(command, Yank):
             # Active only on an event-emitting yank; a no-op yank clears it.
-            self._yank_active = any(isinstance(e, TextYanked) for e in events)
+            self._state.yank_active = any(isinstance(e, TextYanked) for e in events)
         elif isinstance(command, YankPop):
             # Active stays on for a successful pop (chains), off for a no-op.
-            self._yank_active = any(isinstance(e, TextYankPopped) for e in events)
+            self._state.yank_active = any(isinstance(e, TextYankPopped) for e in events)
         elif events:
             # Same rule as the chain: only event-emitting commands intervene.
-            self._yank_active = False
+            self._state.yank_active = False
 
         # Undo bookkeeping: text-changing commands push a group and
         # truncate the redo tail (owned deviation — stock Emacs keeps redo
@@ -498,17 +549,17 @@ class EditorSession:
         # breaks the descent (matches Emacs's last-command gating); a
         # silent no-op intervenes in nothing.
         if isinstance(command, Undo):
-            self._undo_descending = bool(events)
+            self._state.undo_descending = bool(events)
         else:
             group = _make_group(command, current, events)
             if group is not None:
-                self._undo_history.append(group)
-                del self._undo_history[
-                    : max(0, len(self._undo_history) - UNDO_CAPACITY)
+                self._state.undo_history.append(group)
+                del self._state.undo_history[
+                    : max(0, len(self._state.undo_history) - UNDO_CAPACITY)
                 ]
-                self._undo_redo.clear()
+                self._state.undo_redo.clear()
             if events:
-                self._undo_descending = False
+                self._state.undo_descending = False
 
         # Validation happens in BufferValue.__post_init__ before any
         # mutation, so command failure is atomic by construction.
@@ -547,8 +598,8 @@ class EditorSession:
             events.append(OpenFailed(path, "io-error"))
             return current
         # Success: wholesale replacement; old undo history dropped.
-        self._undo_history.clear()
-        self._undo_redo.clear()
+        self._state.undo_history.clear()
+        self._state.undo_redo.clear()
         events.append(BufferOpened(path, len(text)))
         return BufferValue(
             text=text, point=0, file_path=path, modified=False, mark=None
@@ -614,11 +665,11 @@ class EditorSession:
         """Apply the newest group's inverse (descending) or, after any
         intervening event-emitting command, redo the newest undone group
         (Emacs's direction flip on last-command != undo)."""
-        if self._undo_descending or not self._undo_redo:
-            if not self._undo_history:
+        if self._state.undo_descending or not self._state.undo_redo:
+            if not self._state.undo_history:
                 return current  # nothing to undo: silent no-op
-            group = self._undo_history.pop()
-            self._undo_redo.append(group)
+            group = self._state.undo_history.pop()
+            self._state.undo_redo.append(group)
             events.append(
                 TextUndone(
                     group.start,
@@ -641,8 +692,8 @@ class EditorSession:
                 mark=group.mark_before,
                 modified=group.modified_before,
             )
-        group = self._undo_redo.pop()
-        self._undo_history.append(group)
+        group = self._state.undo_redo.pop()
+        self._state.undo_history.append(group)
         events.append(
             TextRedone(
                 group.start,
@@ -692,7 +743,7 @@ class EditorSession:
                 end = len(text)
             killed = text[point:end]
         new_text = text[:point] + text[end:]
-        if self._last_was_kill and self._kill_ring:
+        if self._state.last_was_kill and self._kill_ring:
             self._kill_ring[0] += killed
         else:
             self._kill_ring.insert(0, killed)
@@ -741,8 +792,8 @@ class EditorSession:
         after = before + len(text)
         new_text = current.text[:before] + text + current.text[before:]
         events.append(TextYanked(text, before, after))
-        self._yank_cursor = 0
-        self._yank_bounds = (before, after)
+        self._state.yank_cursor = 0
+        self._state.yank_bounds = (before, after)
         return replace(
             current,
             text=new_text,
@@ -752,17 +803,17 @@ class EditorSession:
         )
 
     def _yank_pop(self, current: BufferValue, events: list[Event]) -> BufferValue:
-        if not self._yank_active or len(self._kill_ring) < 2:
+        if not self._state.yank_active or len(self._kill_ring) < 2:
             return current  # no active yank / empty or 1-entry ring: silent no-op
-        start, end = self._yank_bounds
+        start, end = self._state.yank_bounds
         old = current.text[start:end]
-        cursor = (self._yank_cursor + 1) % len(self._kill_ring)
+        cursor = (self._state.yank_cursor + 1) % len(self._kill_ring)
         new = self._kill_ring[cursor]
         after = start + len(new)
         new_text = current.text[:start] + new + current.text[end:]
         events.append(TextYankPopped(old, new, start, after))
-        self._yank_cursor = cursor
-        self._yank_bounds = (start, after)
+        self._state.yank_cursor = cursor
+        self._state.yank_bounds = (start, after)
         return replace(
             current,
             text=new_text,
