@@ -10,7 +10,7 @@ if TYPE_CHECKING:
         PermissionRequested,
         SessionEffect,
     )
-    from drei.acp.messages import Message
+    from drei.acp.messages import JsonValue, Message, RequestId
 
 from drei.commands import (
     AgentTextInserted,
@@ -496,6 +496,11 @@ class EditorSession:
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
                     events.append(MinibufferAborted())
+                    # Draining here too: a queued permission request must not
+                    # wait forever behind an aborted text prompt.
+                    if self._permission_queue:
+                        nxt = self._permission_queue.pop(0)
+                        self._open_choice(nxt, events)
                 new_value = current
             case MinibufferAccept():
                 if self._choice is not None:
@@ -514,6 +519,12 @@ class EditorSession:
                     new_value = (
                         self._open_file(current, path, events) if path else current
                     )
+                    # A permission request queued behind this text prompt is
+                    # presented next — otherwise it would wait forever and
+                    # hang the agent.
+                    if self._permission_queue:
+                        nxt = self._permission_queue.pop(0)
+                        self._open_choice(nxt, events)
                 else:
                     new_value = current
             case PromptPermission(request=request):
@@ -595,7 +606,7 @@ class EditorSession:
             self._open_choice(nxt, events)
 
     @staticmethod
-    def _choice_options(request: PermissionRequested) -> list[dict]:
+    def _choice_options(request: PermissionRequested) -> list[dict[str, JsonValue]]:
         params = request.params
         if isinstance(params, dict):
             options = params.get("options")
@@ -674,9 +685,9 @@ class EditorSession:
     def apply_permission_decision(
         self,
         machine: AcpMachine,
-        request_id: int,
+        request_id: RequestId,
         decision: PermissionDecision,
-    ) -> tuple[AcpMachine, list[Message], list]:
+    ) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
         """Feed a human decision back to the ACP machine (B.8 seam), mirroring
         ``apply_session_effects``. The session owns no machine (the §C pump
         does); this takes and returns it so the pure ``resolve_permission``

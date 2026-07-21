@@ -57,7 +57,7 @@ class TestAutoApprovalCache:
         machine, out2, effects = handle(machine, _request(2))
         assert not any(isinstance(e, PermissionRequested) for e in effects)
         # The auto-answer is a real Response for request 2, still recorded.
-        assert out2 != [] and out2[0].id == 2
+        assert out2 and isinstance(out2[0], Response) and out2[0].id == 2
         assert any(isinstance(e, PermissionResolved) for e in effects)
         assert 2 not in machine.in_flight_incoming  # answered, not pending
 
@@ -135,3 +135,57 @@ class TestAutoApprovalCache:
         machine, _, effects = handle(machine, bad2)
         # Identical malformed payloads share the fallback key → auto-answered.
         assert not any(isinstance(e, PermissionRequested) for e in effects)
+
+
+class TestIdentityKeyTotality:
+    """_permission_identity / _permission_options are total over malformed
+    payloads; exercise the defensive branches directly."""
+
+    def test_non_dict_params_fall_back_to_canonical_json(self) -> None:
+        from drei.acp.machine import _permission_identity
+
+        assert _permission_identity(None).startswith("params:")
+        assert _permission_identity("x").startswith("params:")
+
+    def test_non_dict_tool_call_falls_back(self) -> None:
+        from drei.acp.machine import _permission_identity
+
+        assert _permission_identity({"toolCall": "notadict"}).startswith("params:")
+
+    def test_non_string_tool_call_id_falls_back(self) -> None:
+        from drei.acp.machine import _permission_identity
+
+        key = _permission_identity({"toolCall": {"toolCallId": 7}})
+        assert key.startswith("params:")
+
+    def test_unserializable_params_do_not_crash(self) -> None:
+        from drei.acp.machine import _permission_identity
+
+        class Unjsonable:
+            pass
+
+        # default=str serializes unknown objects; a sort_keys TypeError on
+        # mixed-type keys would hit the except arm — both stay total.
+        assert _permission_identity({"k": Unjsonable()}).startswith("params:")
+
+    def test_dump_failure_falls_back_to_question_mark(self) -> None:
+        # The except arm: if json.dumps raises, identity is still total.
+        import json as _json
+
+        from drei.acp.machine import _permission_identity
+
+        original = _json.dumps
+        try:
+            _json.dumps = lambda *a, **k: (_ for _ in ()).throw(ValueError("boom"))
+            assert _permission_identity({"toolCall": "x"}) == "params:?"
+        finally:
+            _json.dumps = original
+
+    def test_permission_options_total(self) -> None:
+        from drei.acp.machine import _permission_options
+
+        assert _permission_options(None) == []
+        assert _permission_options({"options": "notalist"}) == []
+        assert _permission_options({"options": [{"kind": "allow_once"}, "junk"]}) == [
+            {"kind": "allow_once"}
+        ]

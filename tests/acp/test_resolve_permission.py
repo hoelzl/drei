@@ -93,6 +93,7 @@ class TestResolvePermission:
         machine = _handshake()
         machine, _, _ = handle(machine, _permission_request())
         _, out, _ = resolve_permission(machine, 42, Selected("allow-xyz"))
+        assert isinstance(out[0], Response)
         result = out[0].result
         assert result == {"outcome": {"outcome": "selected", "optionId": "allow-xyz"}}
         assert "option_id" not in str(result)

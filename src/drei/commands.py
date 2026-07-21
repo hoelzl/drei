@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         PermissionRequested,
         SessionEffect,
     )
+    from drei.acp.messages import RequestId
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,7 +330,7 @@ class PermissionDecided:
     """The human resolved a permission prompt (B.8). Carries the decision the
     machine's ``resolve_permission`` maps onto the 0.9.0 response."""
 
-    request_id: int
+    request_id: RequestId
     decision: PermissionDecision
 
 
