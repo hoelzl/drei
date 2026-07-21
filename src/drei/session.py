@@ -10,9 +10,11 @@ from drei.commands import (
     AgentTextInserted,
     AgentTranscriptUpdated,
     BackwardChar,
+    BufferCreated,
     BufferObservation,
     BufferOpened,
     BufferSaved,
+    BufferSelected,
     CommandOutcome,
     CopyRegionAsKill,
     DeliverProcessOutput,
@@ -103,6 +105,8 @@ Event = (
     | MinibufferOpened
     | MinibufferAborted
     | BufferOpened
+    | BufferCreated
+    | BufferSelected
     | OpenFailed
     | AgentTranscriptUpdated
     | AgentTextInserted
@@ -512,10 +516,17 @@ class EditorSession:
                     path = self._minibuffer
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
-                    # empty input: silent no-op close (new_value stays current)
-                    new_value = (
-                        self._open_file(current, path, events) if path else current
-                    )
+                    if path:
+                        # Create-or-select CONSUMES the old buffer's value:
+                        # a successful open switches identity (the new buffer
+                        # carries its own value); a failed open keeps the old
+                        # buffer as-is. The trailing buffer.replace must not
+                        # write the old value into the new buffer.
+                        self._open_file(current, path, events)
+                        new_value = self.buffer.current
+                    else:
+                        # empty input: silent no-op close
+                        new_value = current
                 else:
                     new_value = current
             case _:
@@ -580,13 +591,58 @@ class EditorSession:
             minibuffer_prompt=self.minibuffer_prompt,
         )
 
+    def _select_buffer(self, buffer_id: BufferId, events: list[Event]) -> None:
+        """Make ``buffer_id`` the current buffer (plan 0012 D1/D2).
+
+        Switching intervenes like any other command in Emacs: the departing
+        buffer's kill-append and yank-pop chains break (last-command state);
+        its undo history is per-buffer and survives (probed vs pinned 29.3,
+        plan 0012 evidence 2/3). Selecting the already-current buffer is a
+        quiet no-op — no event, no chain break.
+        """
+        if buffer_id == self._current_id:
+            return
+        self._state.break_chains()
+        self._current_id = buffer_id
+        events.append(BufferSelected(buffer_id.value))
+
+    def _create_buffer(
+        self, name: str, value: BufferValue, events: list[Event]
+    ) -> BufferId:
+        """Add a new buffer to the set with a unique name (plan 0012 D1).
+
+        Same-basename collisions get numeric ``<N>`` suffixes — a recorded
+        deviation from Emacs 29.3's ``<dirname>`` uniquify suffixes (plan
+        0012 evidence 1; deterministic without directory context).
+        """
+        candidate = name
+        suffix = 2
+        while BufferId(candidate) in self._buffers:
+            candidate = f"{name}<{suffix}>"
+            suffix += 1
+        buffer_id = BufferId(candidate)
+        self._buffers[buffer_id] = Buffer(buffer_id, value)
+        self._states[buffer_id] = _BufferState()
+        events.append(BufferCreated(buffer_id.value, value.file_path))
+        return buffer_id
+
     def _open_file(
         self, current: BufferValue, path: str, events: list[Event]
     ) -> BufferValue:
-        """Find-file accept: replace the single buffer with the file's
-        contents (or an empty buffer for a missing path); the old buffer's
-        undo history is dropped (single-buffer deviation), the kill ring is
-        preserved (Emacs: the ring is global)."""
+        """Find-file accept (plan 0012 D1): create-or-select.
+
+        An already-open path (string equality on ``file_path``) SELECTS its
+        buffer — re-reading a file the user may have edited would be data
+        loss. A new path reads through the port: success or missing-file
+        creates a new buffer named by basename (with ``<N>`` collision
+        suffixes); the old buffer, its undo history, and the global kill
+        ring all survive. Other read errors report and leave everything
+        untouched.
+        """
+        for buffer_id, buffer in self._buffers.items():
+            if buffer.current.file_path == path:
+                self._select_buffer(buffer_id, events)
+                return current
         try:
             text = self._files.read(path)
         except FileNotFoundError:
@@ -597,13 +653,15 @@ class EditorSession:
         except UnicodeDecodeError:
             events.append(OpenFailed(path, "io-error"))
             return current
-        # Success: wholesale replacement; old undo history dropped.
-        self._state.undo_history.clear()
-        self._state.undo_redo.clear()
-        events.append(BufferOpened(path, len(text)))
-        return BufferValue(
-            text=text, point=0, file_path=path, modified=False, mark=None
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        buffer_id = self._create_buffer(
+            name,
+            BufferValue(text=text, point=0, file_path=path, modified=False, mark=None),
+            events,
         )
+        events.append(BufferOpened(path, len(text)))
+        self._select_buffer(buffer_id, events)
+        return current
 
     def _render_effects(self, effects: tuple[SessionEffect, ...]) -> str:
         """Fold effects through the cached ``TranscriptFold``; return the

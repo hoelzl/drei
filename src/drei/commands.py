@@ -339,6 +339,56 @@ class BufferOpened:
 
 
 @dataclass(frozen=True, slots=True)
+class BufferCreated:
+    """A new buffer entered the session's buffer set (design 0003 §A.2).
+
+    ``file_path`` is None for name-created buffers (``C-x b`` to an unknown
+    name); file buffers carry their path. Buffer creation is recorded once,
+    at creation — the buffer set is derivable from the transcript.
+    """
+
+    buffer_id: str
+    file_path: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BufferSelected:
+    """The current buffer changed (find-file reuse, ``C-x b``).
+
+    Recorded on every switch whose target differs from the current buffer;
+    the current-buffer fold of the transcript is the oracle for which buffer
+    is live.
+    """
+
+    buffer_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class WindowSplit:
+    """The focused window was split in two (``C-x 2``); ``count`` is the new
+    total window count."""
+
+    count: int
+
+
+@dataclass(frozen=True, slots=True)
+class WindowFocusChanged:
+    """Window focus moved (``C-x o`` or a buffer switch landing in another
+    window); ``index`` is the new focused window, ``buffer_id`` what it
+    shows."""
+
+    index: int
+    buffer_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class WindowsCollapsed:
+    """``C-x 1`` collapsed the layout to the focused window."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class OpenFailed:
     """A find-file read that failed at the file port.
 
@@ -383,6 +433,11 @@ class CommandOutcome:
         | MinibufferOpened
         | MinibufferAborted
         | BufferOpened
+        | BufferCreated
+        | BufferSelected
+        | WindowSplit
+        | WindowFocusChanged
+        | WindowsCollapsed
         | OpenFailed
         | AgentTranscriptUpdated
         | AgentTextInserted,
