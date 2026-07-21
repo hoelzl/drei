@@ -213,7 +213,19 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
     expect_modified = False
     for command in history:
         outcome = session.dispatch(command)  # type: ignore[arg-type]
-        if (
+        # While the minibuffer is open, non-minibuffer commands are silent
+        # no-ops (the dispatch gate) — nothing about the flag changes.
+        gated = session.minibuffer is not None and not isinstance(
+            command,
+            (
+                FindFile,
+                MinibufferInput,
+                MinibufferBackspace,
+                MinibufferAccept,
+                MinibufferAbort,
+            ),
+        )
+        if not gated and (
             isinstance(command, InsertText)
             and command.text
             or isinstance(command, KillLine)
@@ -224,7 +236,11 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
             and any(isinstance(e, RegionKilled) for e in outcome.events)
         ):
             expect_modified = True
-        elif isinstance(command, SaveBuffer):
+        elif isinstance(command, SaveBuffer) and any(
+            isinstance(e, BufferSaved) for e in outcome.events
+        ):
+            # Only an event-emitting save clears the flag; a gated save is
+            # a silent no-op.
             expect_modified = False
         elif isinstance(command, Undo):
             # Undo/redo restore the flag from the group, they don't set it.
@@ -270,8 +286,10 @@ def test_successful_kill_then_yank_restores_text(history: list[object]) -> None:
     chain_open = False
     for command in history:
         if armed and isinstance(command, Yank):
-            session.dispatch(command)
-            assert session.buffer.current.text == pre_kill_text
+            outcome = session.dispatch(command)
+            if session.minibuffer is None and outcome.events:
+                # A gated yank (minibuffer open) inserts nothing.
+                assert session.buffer.current.text == pre_kill_text
             armed = False
             chain_open = False
             continue
@@ -394,6 +412,17 @@ def test_process_deliveries_never_perturb_editor_folds(history: list[object]) ->
         ring_before = session.kill_ring
         outcome = session.dispatch(command)  # type: ignore[arg-type]
         if isinstance(command, DeliverProcessOutput):
+            if session.minibuffer is not None:
+                # Gated: no event, no state change — like any other
+                # non-minibuffer command while the prompt is open.
+                assert outcome.events == ()
+                assert session.buffer.current == before
+                assert (
+                    len(session._undo_history),
+                    len(session._undo_redo),
+                ) == undo_before
+                assert session.kill_ring == ring_before
+                continue
             # Buffer, undo stacks, and kill ring are all untouched.
             assert session.buffer.current == before
             assert (len(session._undo_history), len(session._undo_redo)) == undo_before
@@ -403,8 +432,18 @@ def test_process_deliveries_never_perturb_editor_folds(history: list[object]) ->
                 e for e in outcome.events if isinstance(e, ProcessOutputRecorded)
             ]
             assert len(recorded) == 1
-    # The transcript carries exactly one ProcessOutputRecorded per delivery.
-    deliveries = sum(1 for c in history if isinstance(c, DeliverProcessOutput))
+    # The transcript carries exactly one ProcessOutputRecorded per delivery
+    # that ran (deliveries gated by an open minibuffer record nothing).
+    deliveries = 0
+    active = False
+    for c in history:
+        if active:
+            if isinstance(c, MinibufferAccept | MinibufferAbort):
+                active = False
+        elif isinstance(c, FindFile):
+            active = True
+        elif isinstance(c, DeliverProcessOutput):
+            deliveries += 1
     events = [e for e in session.transcript if isinstance(e, ProcessOutputRecorded)]
     assert len(events) == deliveries
     # The process log holds one entry per *successful* delivery, and each is
