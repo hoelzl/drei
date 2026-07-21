@@ -15,6 +15,7 @@ discriminators).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
@@ -111,6 +112,27 @@ class PermissionRequested:
     params: JsonValue
 
 
+# A client-side approval decision (B.8): not a wire shape — resolve_permission
+# maps it onto the exact 0.9.0 RequestPermissionResponse.
+@dataclass(frozen=True, slots=True)
+class Selected:
+    option_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Cancelled:
+    pass
+
+
+PermissionDecision = Selected | Cancelled
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionResolved:
+    request_id: RequestId
+    decision: PermissionDecision
+
+
 @dataclass(frozen=True, slots=True)
 class ProtocolError:
     detail: str
@@ -126,6 +148,7 @@ SessionEffect = (
     | PlanUpdated
     | PromptCompleted
     | PermissionRequested
+    | PermissionResolved
     | ProtocolError
 )
 
@@ -147,6 +170,15 @@ class AcpMachine:
     in_flight_outgoing: dict[RequestId, str] = field(default_factory=dict)
     # Inbound agent→client requests Drei must answer: id → method.
     in_flight_incoming: dict[RequestId, str] = field(default_factory=dict)
+    # Session-scoped auto-approval (B.8): tool-call identity keys the user has
+    # pre-approved via an allow_session/allow_always option. Cleared on
+    # new_session() — honoured within the ACP session only (owned deviation:
+    # no cross-session persistence).
+    auto_approvals: tuple[str, ...] = ()
+    # Params of in-flight inbound requests (id → params), so resolve_permission
+    # can recover the chosen option's kind for the cache write. Cleared with
+    # the in_flight_incoming entry.
+    request_params: dict[RequestId, JsonValue] = field(default_factory=dict)
 
 
 def start(machine: AcpMachine | None = None) -> tuple[AcpMachine, Request]:
@@ -185,6 +217,9 @@ def new_session(machine: AcpMachine, cwd: str) -> tuple[AcpMachine, Request]:
         machine,
         next_request_id=machine.next_request_id + 1,
         in_flight_outgoing={**machine.in_flight_outgoing, request.id: SESSION_NEW},
+        # Session-scoped auto-approval resets on new session (design 0003 §B.8
+        # verify line: "session-scoped cache resets on new session").
+        auto_approvals=(),
     )
     return machine, request
 
@@ -224,6 +259,82 @@ def cancel(machine: AcpMachine) -> tuple[AcpMachine, Notification]:
 # ---------------------------------------------------------------------------
 # The fold.
 # ---------------------------------------------------------------------------
+
+
+def _permission_identity(params: JsonValue) -> str:
+    """Tool-call identity key for the auto-approval cache (total over
+    malformed payloads). Prefers toolCall.toolCallId; falls back to the
+    canonical-JSON of the whole params so identical malformed payloads share
+    a stable key (they are already a protocol violation; the fallback avoids
+    a crash, it does not promise precision)."""
+    if isinstance(params, dict):
+        tool_call = params.get("toolCall")
+        if isinstance(tool_call, dict):
+            tool_call_id = tool_call.get("toolCallId")
+            if isinstance(tool_call_id, str) and tool_call_id:
+                return f"tool:{tool_call_id}"
+    try:
+        return "params:" + json.dumps(params, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return "params:?"
+
+
+def _permission_options(params: JsonValue) -> list[dict[str, JsonValue]]:
+    """The request's PermissionOption list as raw dicts (total)."""
+    if isinstance(params, dict):
+        options = params.get("options")
+        if isinstance(options, list):
+            return [o for o in options if isinstance(o, dict)]
+    return []
+
+
+def resolve_permission(
+    machine: AcpMachine, request_id: RequestId, decision: PermissionDecision
+) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
+    """Answer an in-flight ``session/request_permission`` (B.8).
+
+    Reads **and clears** the ``in_flight_incoming`` entry and emits the exact
+    0.9.0 ``RequestPermissionResponse``. Resolving an id that is not in flight
+    is a caller bug (a stale/duplicate answer would respond to a request the
+    agent no longer awaits) — raise ``AcpStateError``, mirroring the phase
+    strictness of ``prompt()``/``cancel()``.
+    """
+    if request_id not in machine.in_flight_incoming:
+        raise AcpStateError(f"permission request {request_id!r} not in flight")
+    in_flight = {k: v for k, v in machine.in_flight_incoming.items() if k != request_id}
+    params = machine.request_params.get(request_id)
+    machine = replace(
+        machine,
+        in_flight_incoming=in_flight,
+        request_params={
+            k: v for k, v in machine.request_params.items() if k != request_id
+        },
+    )
+    if isinstance(decision, Selected):
+        # Session-scoped cache write: an allow_session/allow_always option
+        # pre-approves this tool-call identity for the rest of the session.
+        # We recover the option's kind from the cached request params.
+        for option in _permission_options(params):
+            if option.get("optionId") == decision.option_id:
+                kind = option.get("kind")
+                if kind in ("allow_session", "allow_always"):
+                    identity = _permission_identity(params)
+                    if identity not in machine.auto_approvals:
+                        machine = replace(
+                            machine,
+                            auto_approvals=(*machine.auto_approvals, identity),
+                        )
+                break
+        result: JsonValue = {
+            "outcome": {"outcome": "selected", "optionId": decision.option_id}
+        }
+    else:
+        result = {"outcome": {"outcome": "cancelled"}}
+    return (
+        machine,
+        [Response(id=request_id, result=result)],
+        [PermissionResolved(request_id=request_id, decision=decision)],
+    )
 
 
 def handle(
@@ -374,9 +485,58 @@ def _handle_inbound_request(
 ) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
     method = message.method
     if method == SESSION_REQUEST_PERMISSION:
+        # Phase gating (B.8, 0010's last deferred note): a permission request
+        # is only meaningful inside a live session. Out-of-phase requests are
+        # a protocol violation, not a trackable inbound request.
+        if machine.phase not in ("SESSION_ACTIVE", "PROMPT_IN_FLIGHT"):
+            return (
+                machine,
+                [],
+                [
+                    ProtocolError(
+                        detail=(
+                            f"session/request_permission out of phase {machine.phase}"
+                        )
+                    )
+                ],
+            )
+        identity = _permission_identity(message.params)
+        if identity in machine.auto_approvals:
+            # Session-scoped auto-approval: the human already pre-approved
+            # this tool-call identity. Answer immediately with the first
+            # allow_* option; do not surface a prompt. The answer is still
+            # recorded (PermissionResolved) so the transcript shows it.
+            options = _permission_options(message.params)
+            option_id = next(
+                (
+                    str(o.get("optionId"))
+                    for o in options
+                    if isinstance(o.get("kind"), str)
+                    and str(o["kind"]).startswith("allow")
+                    and o.get("optionId") is not None
+                ),
+                "allow",
+            )
+            machine, out, resolved = resolve_permission(
+                replace(
+                    machine,
+                    in_flight_incoming={
+                        **machine.in_flight_incoming,
+                        message.id: method,
+                    },
+                    request_params={
+                        **machine.request_params,
+                        message.id: message.params,
+                    },
+                ),
+                message.id,
+                Selected(option_id),
+            )
+            return machine, out, resolved
         machine = replace(
             machine,
             in_flight_incoming={**machine.in_flight_incoming, message.id: method},
+            request_params={**machine.request_params, message.id: message.params},
         )
         return (
             machine,

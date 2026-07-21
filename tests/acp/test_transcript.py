@@ -11,11 +11,14 @@ import pytest
 
 from drei.acp.machine import (
     AgentTextChunk,
+    Cancelled,
     Initialized,
     PermissionRequested,
+    PermissionResolved,
     PlanUpdated,
     PromptCompleted,
     ProtocolError,
+    Selected,
     SessionEffect,
     SessionEstablished,
     ThoughtChunk,
@@ -144,6 +147,20 @@ class TestAuditLines:
         fold, text = advance(fold, PermissionRequested(request_id=1, params={}))
         assert fold.thought_open is False
         assert text == "\n── permission requested (id 1) ──\n"
+
+    def test_permission_resolved_granted_renders_option_id(self) -> None:
+        _, text = advance(
+            TranscriptFold(),
+            PermissionResolved(request_id=7, decision=Selected("allow-xyz")),
+        )
+        assert text == "\n── permission granted: allow-xyz ──\n"
+
+    def test_permission_resolved_cancelled_renders_denied(self) -> None:
+        _, text = advance(
+            TranscriptFold(),
+            PermissionResolved(request_id=7, decision=Cancelled()),
+        )
+        assert text == "\n── permission denied ──\n"
 
     def test_protocol_error_is_never_dropped(self) -> None:
         # Dropping a protocol error would silently misalign the live text
