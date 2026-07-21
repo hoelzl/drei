@@ -731,9 +731,11 @@ class EditorSession:
             if height < (len(self._windows) + 1) * MIN_WINDOW_ROWS + 1:
                 return self.buffer.current
         focused = self._windows[self._focused]
-        duplicate = WindowValue(
-            focused.buffer_id, self.buffer.current.point, self.buffer.current.mark
-        )
+        # The new window copies the FOCUSED WINDOW's point/mark (not the
+        # buffer's): from here on the two windows hold independent points
+        # (design 0002's stress case), and the focused window's stored
+        # value is the authoritative copy of the split position.
+        duplicate = WindowValue(focused.buffer_id, focused.point, focused.mark)
         windows = list(self._windows)
         windows.insert(self._focused + 1, duplicate)
         self._windows = tuple(windows)
