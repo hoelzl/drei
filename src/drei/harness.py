@@ -14,7 +14,7 @@ from drei.commands import (
 from drei.files import FilePort
 from drei.keys import PendingKey, UnresolvedKey, resolve
 from drei.model import Buffer, BufferId, BufferValue
-from drei.render import Frame, render
+from drei.render import Frame, render_session
 from drei.session import Command, EditorSession
 
 
@@ -37,7 +37,11 @@ class EditorHarness:
             file_path.replace("\\", "/").rsplit("/", 1)[-1] if file_path else "scratch"
         )
         value = BufferValue(text=initial_text, point=0, file_path=file_path)
-        self._session = EditorSession(Buffer(buffer_id, value), file_port=file_port)
+        self._session = EditorSession(
+            Buffer(buffer_id, value),
+            file_port=file_port,
+            frame_size=(width, height),
+        )
         self._width = width
         self._height = height
         self._pending: str | None = None
@@ -128,8 +132,8 @@ class EditorHarness:
         return tuple(self._unresolved)
 
     def _render_frame(self) -> Frame:
-        return render(
-            self.observation,
+        return render_session(
+            self._session.session_observation(),
             width=self._width,
             height=self._height,
             echo=self._echo,

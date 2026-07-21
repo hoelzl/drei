@@ -45,6 +45,7 @@ from drei.commands import (
     RegionKilled,
     SaveBuffer,
     SaveFailed,
+    SessionObservation,
     SetMark,
     SplitWindow,
     SwitchBuffer,
@@ -56,6 +57,7 @@ from drei.commands import (
     TextYankPopped,
     Undo,
     WindowFocusChanged,
+    WindowObservation,
     WindowsCollapsed,
     WindowSplit,
     Yank,
@@ -678,6 +680,41 @@ class EditorSession:
             file_path=value.file_path,
             modified=value.modified,
             mark=value.mark,
+            minibuffer=self._minibuffer,
+            minibuffer_prompt=self.minibuffer_prompt,
+        )
+
+    def session_observation(self) -> SessionObservation:
+        """Derived read model over the whole session (plan 0012 D5): one
+        WindowObservation per window (each with its buffer snapshot and its
+        own point/mark), the buffer names, and the focused index. Rebuilt on
+        demand — windows are layout state, not session facts; the events
+        already record every layout change."""
+        windows = tuple(
+            WindowObservation(
+                buffer=self._buffer_observation(w.buffer_id),
+                point=w.point,
+                mark=w.mark,
+            )
+            for w in self._windows
+        )
+        return SessionObservation(
+            buffers=self.buffers,
+            windows=windows,
+            focused=self._focused,
+            minibuffer=self.minibuffer,
+            minibuffer_prompt=self.minibuffer_prompt,
+        )
+
+    def _buffer_observation(self, buffer_id: BufferId) -> BufferObservation:
+        current = self._buffers[buffer_id].current
+        return BufferObservation(
+            buffer_id=buffer_id.value,
+            text=current.text,
+            point=current.point,
+            file_path=current.file_path,
+            modified=current.modified,
+            mark=current.mark,
             minibuffer=self._minibuffer,
             minibuffer_prompt=self.minibuffer_prompt,
         )

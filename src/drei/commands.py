@@ -444,6 +444,31 @@ class BufferObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class WindowObservation:
+    """One pane (design 0003 §A.2): a buffer snapshot plus this window's own
+    point/mark (window-point, plan 0012 D3/D5)."""
+
+    buffer: BufferObservation
+    point: int
+    mark: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionObservation:
+    """Derived read model over the whole session (plan 0012 D5): the buffer
+    names, one WindowObservation per window top-to-bottom, the focused
+    index, and the shared minibuffer state. CommandOutcome keeps returning
+    the legacy BufferObservation — the focused window's view — so existing
+    consumers are untouched."""
+
+    buffers: tuple[str, ...]
+    windows: tuple[WindowObservation, ...]
+    focused: int
+    minibuffer: str | None
+    minibuffer_prompt: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class CommandOutcome:
     events: tuple[
         TextInserted
