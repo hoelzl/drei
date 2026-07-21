@@ -124,6 +124,13 @@ class TestSilentEffects:
         assert text == ""
         assert fold == TranscriptFold()
 
+    def test_non_effect_raises_type_error(self) -> None:
+        # Totality mirrors session.dispatch: a non-SessionEffect is a caller
+        # bug, never peer data (peer payloads arrive as opaque JsonValue
+        # inside effects and degrade to placeholders instead).
+        with pytest.raises(TypeError, match="unsupported effect"):
+            advance(TranscriptFold(), object())  # type: ignore[arg-type]
+
 
 class TestAuditLines:
     def test_permission_requested_renders_audit_line(self) -> None:
@@ -177,6 +184,11 @@ class TestToolCallStarted:
 
     def test_location_without_line_defaults_to_1(self) -> None:
         text = format_tool_call_started({"locations": [{"path": "f.py"}]})
+        assert "  f.py:1\n" in text
+
+    def test_boolean_line_is_malformed_and_defaults_to_1(self) -> None:
+        # bool is int in Python; a boolean "line" must not render as f:True.
+        text = format_tool_call_started({"locations": [{"path": "f.py", "line": True}]})
         assert "  f.py:1\n" in text
 
     def test_diff_renders_old_and_new_verbatim(self) -> None:

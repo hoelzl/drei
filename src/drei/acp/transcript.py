@@ -87,7 +87,7 @@ def advance(fold: TranscriptFold, effect: SessionEffect) -> tuple[TranscriptFold
             return fold, f"\n── end turn ({reason}) ──\n"
         case PermissionRequested(request_id=request_id):
             fold, prefix = _close_thought(fold)
-            return fold, prefix + f"\n── permission requested (id {request_id!r}) ──\n"
+            return fold, prefix + f"\n── permission requested (id {request_id}) ──\n"
         case ProtocolError(detail=detail):
             fold, prefix = _close_thought(fold)
             return fold, prefix + f"\n── protocol error: {detail} ──\n"
@@ -95,6 +95,12 @@ def advance(fold: TranscriptFold, effect: SessionEffect) -> tuple[TranscriptFold
             # Handshake milestones carry no agent-visible text; the §C
             # launcher surfaces them as status, not transcript.
             return fold, ""
+        case _:
+            # Totality at the effect level, mirroring session.dispatch:
+            # a non-SessionEffect reaching advance() is a caller bug, not
+            # peer data (peer payloads arrive as opaque JsonValue inside
+            # effects and degrade to placeholders instead).
+            raise TypeError(f"unsupported effect: {type(effect)}")
 
 
 def _close_thought(fold: TranscriptFold) -> tuple[TranscriptFold, str]:
@@ -129,7 +135,8 @@ def _format_locations(locations: JsonValue) -> str:
         loc = _as_dict(entry)
         path = _as_str(loc.get("path")) or _MISSING
         line = loc.get("line")
-        line_no = line if isinstance(line, int) else 1
+        # bool is int in Python; a boolean "line" is malformed peer data.
+        line_no = line if isinstance(line, int) and not isinstance(line, bool) else 1
         lines.append(f"  {path}:{line_no}\n")
     return "".join(lines)
 

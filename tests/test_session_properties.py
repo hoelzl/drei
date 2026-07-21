@@ -573,3 +573,22 @@ def test_point_in_bounds_with_agent_deliveries(history: list[object]) -> None:
         assert 0 <= current.point <= len(current.text)
         if current.mark is not None:
             assert 0 <= current.mark <= len(current.text)
+
+
+@given(agent_history())
+def test_fold_cache_coherent_with_transcript_events(history: list[object]) -> None:
+    """The _agent_fold cache is reconstructible: refolding every recorded
+    AgentTranscriptUpdated.effects from the initial state yields the cache.
+    (Catches fold corruption invisible to outcome tuples — the class of bug
+    test_replay_produces_identical_evidence cannot see.)"""
+    from drei.acp.transcript import TranscriptFold, advance
+
+    session = _session()
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+        fold = TranscriptFold()
+        for event in session.transcript:
+            if isinstance(event, AgentTranscriptUpdated):
+                for effect in event.effects:
+                    fold, _ = advance(fold, effect)
+        assert session._agent_fold == fold
