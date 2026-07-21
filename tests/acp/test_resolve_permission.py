@@ -66,14 +66,30 @@ class TestResolvePermission:
             )
         ]
         assert 42 not in machine.in_flight_incoming  # read AND clear
-        assert effects == [PermissionResolved(request_id=42, decision=Selected("o1"))]
+        assert effects == [
+            PermissionResolved(request_id=42, decision=Selected("o1"), granted=True)
+        ]
+
+    def test_reject_selection_is_not_granted(self) -> None:
+        # A Selected of a reject option is a deny, not a grant (review: the
+        # transcript must not render a reject-shaped selection as "granted").
+        machine = _handshake()
+        machine, _, _ = handle(machine, _permission_request())
+        machine, out, effects = resolve_permission(machine, 42, Selected("o2"))
+        assert isinstance(out[0], Response)
+        assert out[0].result == {"outcome": {"outcome": "selected", "optionId": "o2"}}
+        assert effects == [
+            PermissionResolved(request_id=42, decision=Selected("o2"), granted=False)
+        ]
 
     def test_cancelled_emits_cancelled_outcome(self) -> None:
         machine = _handshake()
         machine, _, _ = handle(machine, _permission_request())
         machine, out, effects = resolve_permission(machine, 42, Cancelled())
         assert out == [Response(id=42, result={"outcome": {"outcome": "cancelled"}})]
-        assert effects == [PermissionResolved(request_id=42, decision=Cancelled())]
+        assert effects == [
+            PermissionResolved(request_id=42, decision=Cancelled(), granted=False)
+        ]
 
     def test_resolving_unknown_id_raises(self) -> None:
         machine = _handshake()

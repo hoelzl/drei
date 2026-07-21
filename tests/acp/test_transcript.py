@@ -151,14 +151,25 @@ class TestAuditLines:
     def test_permission_resolved_granted_renders_option_id(self) -> None:
         _, text = advance(
             TranscriptFold(),
-            PermissionResolved(request_id=7, decision=Selected("allow-xyz")),
+            PermissionResolved(
+                request_id=7, decision=Selected("allow-xyz"), granted=True
+            ),
         )
         assert text == "\n── permission granted: allow-xyz ──\n"
+
+    def test_permission_resolved_reject_selection_renders_denied(self) -> None:
+        # A Selected of a reject option is a deny (granted=False): render the
+        # denial, never "granted" (review: the transcript must not lie).
+        _, text = advance(
+            TranscriptFold(),
+            PermissionResolved(request_id=7, decision=Selected("o-no"), granted=False),
+        )
+        assert text == "\n── permission denied ──\n"
 
     def test_permission_resolved_cancelled_renders_denied(self) -> None:
         _, text = advance(
             TranscriptFold(),
-            PermissionResolved(request_id=7, decision=Cancelled()),
+            PermissionResolved(request_id=7, decision=Cancelled(), granted=False),
         )
         assert text == "\n── permission denied ──\n"
 

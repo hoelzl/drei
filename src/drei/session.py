@@ -299,7 +299,10 @@ class EditorSession:
         # than appending text). None in text mode / when inactive.
         self._choice: PermissionRequested | None = None
         # Permission requests that arrived while a prompt was open, in order.
-        # Bounded by the set of in-flight permission requests.
+        # Grows only while a prompt is open and drains on resolution; in
+        # practice bounded by the agent's concurrent in-flight requests (a
+        # hostile agent can flood it — accepted: each request is already in the
+        # machine's in_flight_incoming, so this adds no new resource class).
         self._permission_queue: list[PermissionRequested] = []
         # Agent-transcript fold cache (design 0003 §B.7): a derived,
         # reconstructible cache of the AgentTranscriptUpdated event stream —
@@ -638,7 +641,7 @@ class EditorSession:
     def _choice_key_to_decision(
         cls, request: PermissionRequested, char: str
     ) -> PermissionDecision | None:
-        from drei.acp.machine import Cancelled, Selected
+        from drei.acp.machine import _REJECT_KINDS, Cancelled, Selected
 
         key_to_kind = {
             "y": "allow_once",
@@ -651,11 +654,10 @@ class EditorSession:
             return None
         options = cls._choice_options(request)
         if kind == "reject":
-            # First reject_* option; absent any, a deny is a cancel.
+            # First enum reject option; absent any, a deny is a cancel. Match
+            # by membership, not startswith ("reject_evil" is not a deny).
             for option in options:
-                if isinstance(option.get("kind"), str) and option["kind"].startswith(
-                    "reject"
-                ):
+                if option.get("kind") in _REJECT_KINDS:
                     oid = option.get("optionId")
                     if oid is not None:
                         return Selected(str(oid))
@@ -671,12 +673,12 @@ class EditorSession:
     def _choice_accept_decision(
         cls, request: PermissionRequested
     ) -> PermissionDecision:
-        from drei.acp.machine import Cancelled, Selected
+        from drei.acp.machine import _ALLOW_KINDS, Cancelled, Selected
 
+        # Accept takes the first enum allow option; absent any, fail-closed to
+        # a cancel (never auto-approve an invented "allow_*" kind).
         for option in cls._choice_options(request):
-            if isinstance(option.get("kind"), str) and option["kind"].startswith(
-                "allow"
-            ):
+            if option.get("kind") in _ALLOW_KINDS:
                 oid = option.get("optionId")
                 if oid is not None:
                     return Selected(str(oid))

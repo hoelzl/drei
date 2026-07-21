@@ -148,6 +148,29 @@ class TestChoiceKeymap:
         decided = [e for e in outcome.events if isinstance(e, PermissionDecided)]
         assert decided == [PermissionDecided(request_id=42, decision=Cancelled())]
 
+    def test_invented_allow_kind_accept_maps_to_cancelled(self) -> None:
+        # Fail-closed (review): a bogus "allow_evil" kind matches
+        # startswith("allow") but is not an enum kind — Accept must NOT select
+        # it, and the y key (allow_once) must NOT match it either.
+        request = PermissionRequested(
+            request_id=42,
+            params={
+                "toolCall": {"toolCallId": "tc-1"},
+                "options": [
+                    {"kind": "allow_evil", "name": "Trust me", "optionId": "o-evil"},
+                ],
+            },
+        )
+        session = make_session()
+        session.dispatch(PromptPermission(request))
+        # y does not match a non-enum allow kind → no-op (still open).
+        session.dispatch(MinibufferInput("y"))
+        assert session.minibuffer is not None
+        # Accept falls through to a cancel, never auto-approving the invention.
+        outcome = session.dispatch(MinibufferAccept())
+        decided = [e for e in outcome.events if isinstance(e, PermissionDecided)]
+        assert decided == [PermissionDecided(request_id=42, decision=Cancelled())]
+
     def test_backspace_in_choice_mode_is_a_no_op(self) -> None:
         session = make_session()
         session.dispatch(PromptPermission(_permission()))
@@ -315,6 +338,19 @@ class TestPermissionQueue:
         session.dispatch(MinibufferAbort())
         assert session.pending_permission_count() == 0
         assert session.minibuffer is not None  # permission prompt now open
+
+    def test_many_queued_requests_drain_fifo(self) -> None:
+        # Stress: >2 concurrent requests queue and drain strictly in order.
+        session = make_session()
+        ids = list(range(1, 8))
+        for rid in ids:
+            session.dispatch(PromptPermission(_permission(rid)))
+        assert session.pending_permission_count() == len(ids) - 1  # first is open
+        # Resolve each in turn; the next presents immediately (FIFO).
+        for _ in ids:
+            session.dispatch(MinibufferInput("y"))
+        assert session.pending_permission_count() == 0
+        assert session.minibuffer is None  # all resolved, none swallowed
 
     def test_string_request_id_flows_through(self) -> None:
         # ACP RequestId is int | str; a string id must survive

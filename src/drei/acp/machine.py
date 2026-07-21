@@ -127,10 +127,24 @@ class Cancelled:
 PermissionDecision = Selected | Cancelled
 
 
+# Explicit 0.9.0 PermissionOptionKind sets (plus Drei's session scope). Match
+# by membership, never startswith — a hostile agent could name an option
+# "allow_evil" and a startswith gate would auto-approve it (fail-open).
+_ALLOW_KINDS = frozenset({"allow_once", "allow_session", "allow_always"})
+_REJECT_KINDS = frozenset({"reject_once", "reject_always"})
+# Kinds that populate the session-scoped auto-approval cache.
+_CACHEABLE_KINDS = frozenset({"allow_session", "allow_always"})
+
+
 @dataclass(frozen=True, slots=True)
 class PermissionResolved:
     request_id: RequestId
     decision: PermissionDecision
+    # True when the resolution grants the tool call (a Selected of an allow
+    # option, or an auto-approval); False for a deny/abort (Cancelled, or a
+    # Selected of a reject option). Drives the transcript's granted/denied
+    # wording — a Selected is not necessarily a grant.
+    granted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,7 +260,14 @@ def prompt(machine: AcpMachine, text: str) -> tuple[AcpMachine, Request]:
 
 
 def cancel(machine: AcpMachine) -> tuple[AcpMachine, Notification]:
-    """Emit the ``session/cancel`` notification (prompt must be in flight)."""
+    """Emit the ``session/cancel`` notification (prompt must be in flight).
+
+    TODO(§C): ACP 0.9.0 also requires the client to answer every pending
+    ``session/request_permission`` with ``cancelled`` when the turn is
+    cancelled. This slice ships no cancellation/pump path, so ``cancel()`` does
+    not sweep ``in_flight_incoming`` here; the §C slice that wires cancellation
+    must answer all pending permissions ``cancelled`` (plan 0013, deferred).
+    """
     if machine.phase != "PROMPT_IN_FLIGHT":
         raise AcpStateError(f"cancel() requires PROMPT_IN_FLIGHT, got {machine.phase}")
     notification = Notification(
@@ -262,21 +283,52 @@ def cancel(machine: AcpMachine) -> tuple[AcpMachine, Notification]:
 
 
 def _permission_identity(params: JsonValue) -> str:
-    """Tool-call identity key for the auto-approval cache (total over
-    malformed payloads). Prefers toolCall.toolCallId; falls back to the
-    canonical-JSON of the whole params so identical malformed payloads share
-    a stable key (they are already a protocol violation; the fallback avoids
-    a crash, it does not promise precision)."""
+    """Auto-approval identity key (total over malformed payloads).
+
+    The key is the tool **identity plus arguments**, not the per-call
+    ``toolCallId``: ACP agents mint a fresh ``toolCallId`` per invocation, so
+    keying on it would (a) almost never hit the cache and (b) fail *open* if
+    an agent reused an id with different arguments. We therefore prefer a
+    tool discriminator (``toolCall.kind``/``title`` when present) combined
+    with the canonical-JSON of the full params — a request whose arguments
+    changed yields a different key and re-prompts (fail-closed). Total: any
+    payload yields a stable key (malformed payloads are already a protocol
+    violation; totality avoids a crash, it does not promise precision).
+    """
+    discriminator = ""
     if isinstance(params, dict):
         tool_call = params.get("toolCall")
         if isinstance(tool_call, dict):
-            tool_call_id = tool_call.get("toolCallId")
-            if isinstance(tool_call_id, str) and tool_call_id:
-                return f"tool:{tool_call_id}"
+            for field in ("kind", "title"):
+                value = tool_call.get(field)
+                if isinstance(value, str) and value:
+                    discriminator = f"{field}:{value}"
+                    break
     try:
-        return "params:" + json.dumps(params, sort_keys=True, default=str)
+        canonical = json.dumps(params, sort_keys=True, default=str)
     except (TypeError, ValueError):
-        return "params:?"
+        canonical = "?"
+    return f"{discriminator}|params:{canonical}"
+
+
+def _select_auto_option(options: list[dict[str, JsonValue]]) -> str | None:
+    """Choose the optionId to report on a session-scoped auto-approval.
+
+    Match by explicit enum (never startswith — "allow_evil" must not
+    auto-approve). Prefer the broadest cached scope (session/always) so the
+    agent sees the grant the human actually made, not a downgraded allow_once;
+    fall back to allow_once. ``None`` when the request offers no allow option
+    (the caller then re-prompts the human rather than inventing an optionId).
+    """
+
+    def _id_of(kinds: frozenset[str]) -> str | None:
+        for o in options:
+            oid = o.get("optionId")
+            if o.get("kind") in kinds and oid is not None:
+                return str(oid)
+        return None
+
+    return _id_of(_CACHEABLE_KINDS) or _id_of(frozenset({"allow_once"}))
 
 
 def _permission_options(params: JsonValue) -> list[dict[str, JsonValue]]:
@@ -311,29 +363,35 @@ def resolve_permission(
         },
     )
     if isinstance(decision, Selected):
-        # Session-scoped cache write: an allow_session/allow_always option
-        # pre-approves this tool-call identity for the rest of the session.
-        # We recover the option's kind from the cached request params.
-        for option in _permission_options(params):
+        # Recover the chosen option's kind from the cached request params. A
+        # hostile agent may send duplicate optionIds; iterate in reverse so
+        # the LAST option with a matching id wins (later duplicates shadow
+        # earlier — the human resolved the rendered tail), never the first.
+        kind: JsonValue = None
+        for option in reversed(_permission_options(params)):
             if option.get("optionId") == decision.option_id:
                 kind = option.get("kind")
-                if kind in ("allow_session", "allow_always"):
-                    identity = _permission_identity(params)
-                    if identity not in machine.auto_approvals:
-                        machine = replace(
-                            machine,
-                            auto_approvals=(*machine.auto_approvals, identity),
-                        )
                 break
+        granted = kind in _ALLOW_KINDS
+        # Session-scoped cache write: an allow_session/allow_always option
+        # pre-approves this tool identity for the rest of the session.
+        if kind in _CACHEABLE_KINDS:
+            identity = _permission_identity(params)
+            if identity not in machine.auto_approvals:
+                machine = replace(
+                    machine,
+                    auto_approvals=(*machine.auto_approvals, identity),
+                )
         result: JsonValue = {
             "outcome": {"outcome": "selected", "optionId": decision.option_id}
         }
     else:
+        granted = False
         result = {"outcome": {"outcome": "cancelled"}}
     return (
         machine,
         [Response(id=request_id, result=result)],
-        [PermissionResolved(request_id=request_id, decision=decision)],
+        [PermissionResolved(request_id=request_id, decision=decision, granted=granted)],
     )
 
 
@@ -503,36 +561,38 @@ def _handle_inbound_request(
         identity = _permission_identity(message.params)
         if identity in machine.auto_approvals:
             # Session-scoped auto-approval: the human already pre-approved
-            # this tool-call identity. Answer immediately with the first
-            # allow_* option; do not surface a prompt. The answer is still
-            # recorded (PermissionResolved) so the transcript shows it.
-            options = _permission_options(message.params)
-            option_id = next(
-                (
-                    str(o.get("optionId"))
-                    for o in options
-                    if isinstance(o.get("kind"), str)
-                    and str(o["kind"]).startswith("allow")
-                    and o.get("optionId") is not None
-                ),
-                "allow",
-            )
-            machine, out, resolved = resolve_permission(
-                replace(
-                    machine,
-                    in_flight_incoming={
-                        **machine.in_flight_incoming,
-                        message.id: method,
-                    },
-                    request_params={
-                        **machine.request_params,
-                        message.id: message.params,
-                    },
-                ),
-                message.id,
-                Selected(option_id),
-            )
-            return machine, out, resolved
+            # this tool identity. Answer immediately; do not surface a prompt.
+            # The answer is still recorded (PermissionResolved, granted=True)
+            # so the transcript shows the auto-approval.
+            option_id = _select_auto_option(_permission_options(message.params))
+            if (
+                option_id is not None
+            ):  # pragma: no cover - a cache hit always finds an option
+                # The identity key includes the options list, so on a cache hit
+                # the request's options are byte-identical to the ones that
+                # populated the cache (which contained a cacheable allow option);
+                # _select_auto_option therefore never returns None over the fold.
+                # The None arm (re-prompt, never invent an optionId) is unit-
+                # tested on _select_auto_option directly.
+                machine, out, resolved = resolve_permission(
+                    replace(
+                        machine,
+                        in_flight_incoming={
+                            **machine.in_flight_incoming,
+                            message.id: method,
+                        },
+                        request_params={
+                            **machine.request_params,
+                            message.id: message.params,
+                        },
+                    ),
+                    message.id,
+                    Selected(option_id),
+                )
+                return machine, out, resolved
+            # Fail-closed: a cached identity whose current request offers no
+            # allow option (a protocol-violating corner) re-prompts the human
+            # rather than inventing an optionId the agent never sent.
         machine = replace(
             machine,
             in_flight_incoming={**machine.in_flight_incoming, message.id: method},
