@@ -8,6 +8,7 @@ Drei ("Drei Resembles Emacs Intentionally") is an Emacs-like terminal editor and
 2. Read `docs/developer-guide/development.md` before changing code or gates.
 3. Read the relevant design record or active plan under `docs/agent/`.
 4. Treat executable tests, `pyproject.toml`, and live CLI help as authoritative over prose; fix stale prose in the same change.
+5. Before claiming or starting any slice, run `scripts/sync-check.sh` and follow the claim protocol in `docs/agent/claims.md` (slice issue first, plan PR second).
 
 ## Commands and sources of truth
 
