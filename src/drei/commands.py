@@ -80,6 +80,15 @@ class FindFile:
 
 
 @dataclass(frozen=True, slots=True)
+class SwitchBuffer:
+    """``C-x b``: prompt for a buffer name and switch to it (design 0003
+    §A.2). The minibuffer carries the most-recently-used other buffer as its
+    default."""
+
+    pass
+
+
+@dataclass(frozen=True, slots=True)
 class MinibufferInput:
     char: str
 

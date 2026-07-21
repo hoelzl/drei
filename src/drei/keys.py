@@ -14,6 +14,7 @@ from drei.commands import (
     KillRegion,
     SaveBuffer,
     SetMark,
+    SwitchBuffer,
     Undo,
     Yank,
     YankPop,
@@ -41,6 +42,7 @@ _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-x", "C-x"): ExchangePointAndMark(),
     ("C-x", "u"): Undo(),
     ("C-x", "C-f"): FindFile(),
+    ("C-x", "b"): SwitchBuffer(),
 }
 
 

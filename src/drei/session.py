@@ -44,6 +44,7 @@ from drei.commands import (
     SaveBuffer,
     SaveFailed,
     SetMark,
+    SwitchBuffer,
     TextInserted,
     TextKilled,
     TextRedone,
@@ -81,6 +82,7 @@ Command = (
     | DeliverSessionEffects
     | InsertAgentText
     | FindFile
+    | SwitchBuffer
     | MinibufferInput
     | MinibufferBackspace
     | MinibufferAccept
@@ -324,6 +326,13 @@ class EditorSession:
         self._kill_ring: list[str] = []
         self._minibuffer: str | None = None  # None = inactive
         self._minibuffer_prompt: str = ""
+        # What MinibufferAccept does with the input: find-file opens a path,
+        # switch-buffer selects/creates a buffer by name (plan 0012 D7).
+        self._minibuffer_kind: str | None = None
+        # Most-recently-used buffer names, most recent first (index 0 is the
+        # current buffer). Maintained on every BufferSelected; the C-x b
+        # empty-input default is index 1 (plan 0012 D7, Emacs other-buffer).
+        self._mru: list[str] = [buffer.buffer_id.value]
         # Agent-transcript fold cache (design 0003 §B.7): a derived,
         # reconstructible cache of the AgentTranscriptUpdated event stream —
         # the same discipline as _process_log. The transcript remains
@@ -493,6 +502,13 @@ class EditorSession:
             case FindFile():
                 self._minibuffer = ""
                 self._minibuffer_prompt = "Find file: "
+                self._minibuffer_kind = "find-file"
+                events.append(MinibufferOpened(self._minibuffer_prompt))
+                new_value = current
+            case SwitchBuffer():
+                self._minibuffer = ""
+                self._minibuffer_prompt = "Switch to buffer: "
+                self._minibuffer_kind = "switch-buffer"
                 events.append(MinibufferOpened(self._minibuffer_prompt))
                 new_value = current
             case MinibufferInput(char=char):
@@ -509,20 +525,39 @@ class EditorSession:
                 if self._minibuffer is not None:
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
+                    self._minibuffer_kind = None
                     events.append(MinibufferAborted())
                 new_value = current
             case MinibufferAccept():
                 if self._minibuffer is not None:
-                    path = self._minibuffer
+                    text = self._minibuffer
+                    kind = self._minibuffer_kind
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
-                    if path:
+                    self._minibuffer_kind = None
+                    if kind == "switch-buffer":
+                        # C-x b: empty input takes the MRU default (Emacs
+                        # other-buffer); an unknown name creates a new empty
+                        # buffer (probed vs pinned 29.3, plan 0012
+                        # evidence 5). Selection consumes the old value.
+                        name = text or (self._mru[1] if len(self._mru) > 1 else "")
+                        if name:
+                            buffer_id = BufferId(name)
+                            if buffer_id not in self._buffers:
+                                buffer_id = self._create_buffer(
+                                    name,
+                                    BufferValue(text="", point=0),
+                                    events,
+                                )
+                            self._select_buffer(buffer_id, events)
+                        new_value = self.buffer.current
+                    elif text:
                         # Create-or-select CONSUMES the old buffer's value:
                         # a successful open switches identity (the new buffer
                         # carries its own value); a failed open keeps the old
                         # buffer as-is. The trailing buffer.replace must not
                         # write the old value into the new buffer.
-                        self._open_file(current, path, events)
+                        self._open_file(current, text, events)
                         new_value = self.buffer.current
                     else:
                         # empty input: silent no-op close
@@ -604,6 +639,10 @@ class EditorSession:
             return
         self._state.break_chains()
         self._current_id = buffer_id
+        name = buffer_id.value
+        if name in self._mru:
+            self._mru.remove(name)
+        self._mru.insert(0, name)
         events.append(BufferSelected(buffer_id.value))
 
     def _create_buffer(
