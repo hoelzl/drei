@@ -120,6 +120,31 @@ def test_render_session_minibuffer_without_prompt_uses_empty_prompt() -> None:
     assert frame.cursor == (3, 1)
 
 
+def test_window_heights_clamp_the_bottom_pane_when_windows_exceed_rows() -> None:
+    """More windows than body rows: each pane keeps its modeline row and the
+    bottom pane clamps to 1 (M2 — the clamp IS reachable, e.g. 4 windows in
+    2 body rows)."""
+    from drei.render import _window_heights
+
+    assert _window_heights(2, 4) == (1, 1, 1, 1)
+    assert _window_heights(3, 6) == (1, 1, 1, 1, 1, 1)
+
+
+def test_render_session_row_count_clamps_to_the_frame_height() -> None:
+    """A hand-built observation with more windows than rows (possible when
+    frame_size=None removed the split gate) must not overflow the Frame
+    contract: at most `height` rows, cursor inside (M1)."""
+    session = _session()
+    obs = session.session_observation()
+    from dataclasses import replace as dc_replace
+
+    window = obs.windows[0]
+    obs = dc_replace(obs, windows=(window, window, window, window, window))
+    frame = render_session(obs, width=10, height=4)
+    assert len(frame.rows) <= 4
+    assert frame.cursor[0] < len(frame.rows)
+
+
 def test_render_session_height_zero_is_an_empty_frame() -> None:
     session = _session()
     frame = render_session(session.session_observation(), width=10, height=0)

@@ -937,9 +937,24 @@ class EditorSession:
             self._select_window_buffer(window)
         else:
             self.buffer.replace(
-                replace(self.buffer.current, point=window.point, mark=window.mark)
+                replace(
+                    self.buffer.current,
+                    point=self._clamped_point(window.point),
+                    mark=self._clamped_mark(window.mark),
+                )
             )
         return self.buffer.current
+
+    def _clamped_point(self, point: int) -> int:
+        """A non-focused window's stored point is stale when the focused
+        window shrank the shared buffer; restore clamps to the buffer bounds
+        (Emacs adjusts window-point markers on edit — plan 0012 D3 note)."""
+        return min(max(point, 0), len(self.buffer.current.text))
+
+    def _clamped_mark(self, mark: int | None) -> int | None:
+        if mark is None:
+            return None
+        return self._clamped_point(mark)
 
     def _select_window_buffer(self, window: WindowValue) -> None:
         """Focus landed on a window over another buffer: switch current at
@@ -952,7 +967,11 @@ class EditorSession:
             self._mru.remove(name)
         self._mru.insert(0, name)
         self.buffer.replace(
-            replace(self.buffer.current, point=window.point, mark=window.mark)
+            replace(
+                self.buffer.current,
+                point=self._clamped_point(window.point),
+                mark=self._clamped_mark(window.mark),
+            )
         )
 
     def _delete_other_windows(self, events: list[Event]) -> BufferValue:

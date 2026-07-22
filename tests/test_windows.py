@@ -10,11 +10,15 @@ from __future__ import annotations
 from conftest import FakeFilePort
 
 from drei.commands import (
+    BackwardChar,
     BufferSelected,
     DeleteOtherWindows,
     ForwardChar,
+    KillLine,
     OtherWindow,
+    SetMark,
     SplitWindow,
+    Undo,
     WindowFocusChanged,
     WindowsCollapsed,
     WindowSplit,
@@ -173,3 +177,68 @@ def test_window_value_is_frozen() -> None:
         raise AssertionError("WindowValue must be frozen")
     except dataclasses.FrozenInstanceError:
         pass
+
+
+def test_focus_return_after_shrink_clamps_the_window_point() -> None:
+    """The non-focused window's stored point is stale after the focused
+    window shrinks the shared buffer; on focus return the point clamps to
+    the buffer end (Emacs adjusts window-point markers — plan 0012 D3
+    deviation note; found by adversarial review B1)."""
+    session = _session()
+    for _ in range(3):
+        session.dispatch(ForwardChar())  # point 3 ("aaa| bbb")
+    session.dispatch(SplitWindow())  # both windows at point 3
+    session.dispatch(OtherWindow())  # bottom window focused
+    session.dispatch(KillLine())  # kills " bbb" — buffer shrinks to "aaa"
+    outcome = session.dispatch(OtherWindow())  # back to the top window
+    assert WindowFocusChanged(0, "alpha") in outcome.events
+    assert session.buffer.current.text == "aaa"
+    assert session.buffer.current.point == 3  # in range: no clamp, no crash
+
+
+def test_focus_return_after_shrink_below_point_clamps_to_the_end() -> None:
+    session = _session()
+    for _ in range(7):
+        session.dispatch(ForwardChar())  # point 7 (end of "aaa bbb")
+    session.dispatch(SplitWindow())  # both windows at point 7
+    session.dispatch(OtherWindow())  # bottom window focused
+    session.dispatch(BackwardChar())
+    session.dispatch(BackwardChar())
+    session.dispatch(BackwardChar())  # point 4
+    session.dispatch(KillLine())  # kills "bbb" — buffer shrinks to "aaa "
+    outcome = session.dispatch(OtherWindow())  # top window, stale point 7
+    assert WindowFocusChanged(0, "alpha") in outcome.events
+    assert session.buffer.current.point == 4  # clamped to the buffer end
+
+
+def test_focus_return_after_shrink_clamps_a_stale_mark() -> None:
+    session = _session()
+    for _ in range(7):
+        session.dispatch(ForwardChar())
+    session.dispatch(SetMark())  # mark 7 in the top window
+    session.dispatch(SplitWindow())
+    session.dispatch(OtherWindow())
+    for _ in range(3):
+        session.dispatch(BackwardChar())
+    session.dispatch(KillLine())  # buffer shrinks to "aaa "
+    session.dispatch(OtherWindow())  # back to the top window
+    assert session.buffer.current.mark == 4  # clamped
+
+
+def test_focus_return_after_undo_shrink_clamps_the_window_point() -> None:
+    session = _session()
+    session.dispatch(SplitWindow())
+    session.dispatch(OtherWindow())  # bottom window, point 0
+    for _ in range(4):
+        session.dispatch(ForwardChar())  # point 4
+    session.dispatch(KillLine())  # kills "bbb" → "aaa " (undoable)
+    session.dispatch(Undo())  # text back to "aaa bbb"
+    # The bottom window's stored point is 4; shrink below it from the top.
+    session.dispatch(OtherWindow())  # top window focused (stored point 0)
+    for _ in range(2):
+        session.dispatch(ForwardChar())  # point 2
+    session.dispatch(KillLine())  # kills "a bbb" → "aa"
+    outcome = session.dispatch(OtherWindow())  # bottom window, stale point 4
+    assert WindowFocusChanged(1, "alpha") in outcome.events
+    assert session.buffer.current.text == "aa"
+    assert session.buffer.current.point == 2  # clamped to the buffer end

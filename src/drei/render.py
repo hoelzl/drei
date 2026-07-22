@@ -107,6 +107,11 @@ def render_session(
         row_offset += pane_height
 
     rows.append(echo_row)
+    # The Frame contract caps rows at `height`: with more windows than rows
+    # (only possible via a hand-built observation — the session's split gate
+    # prevents it when the frame size is known), drop lower panes.
+    rows = rows[:height]
+    cursor_row = min(cursor_row, max(len(rows) - 1, 0))
     return Frame(
         rows=tuple(rows), cursor=(cursor_row, cursor_col), width=width, height=height
     )
@@ -122,7 +127,9 @@ def _window_heights(body_height: int, window_count: int) -> tuple[int, ...]:
     # Give any leftover rows to the bottom window (Emacs rounds down to the
     # last window when the frame doesn't divide evenly).
     heights[-1] += body_height - base * window_count
-    if heights[-1] < 1:  # pragma: no cover — base ≥ 1 keeps this unreachable
+    if heights[-1] < 1:
+        # More windows than body rows: the bottom pane still gets its
+        # modeline row (the caller caps the total rows at the frame height).
         heights[-1] = 1
     return tuple(heights)
 
