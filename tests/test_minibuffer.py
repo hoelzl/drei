@@ -90,6 +90,8 @@ def test_nested_find_file_ignored() -> None:
 
 
 def test_accept_existing_file_replaces_buffer(tmp_path: Path) -> None:
+    """A.2: find-file creates a new buffer and selects it (no more
+    single-buffer wholesale replacement — the old buffer survives)."""
     target = tmp_path / "fixture.txt"
     target.write_text("line one\nline two", encoding="utf-8")
     session = _session(text="old dirty text")
@@ -108,6 +110,8 @@ def test_accept_existing_file_replaces_buffer(tmp_path: Path) -> None:
     assert not current.modified
     assert current.mark is None
     assert session.minibuffer is None
+    # The old buffer survives with its dirty text (A.2 create-or-select).
+    assert session._buffers[BufferId("scratch")].current.text == "old dirty text!"
 
 
 def test_accept_missing_file_creates_empty_buffer(tmp_path: Path) -> None:
@@ -134,7 +138,9 @@ def test_accept_empty_input_is_noop_close() -> None:
     assert session.buffer.current.text == "keep"
 
 
-def test_open_clears_undo_history(tmp_path: Path) -> None:
+def test_open_keeps_old_buffer_undo_history(tmp_path: Path) -> None:
+    """A.2 resolves the slice-7 deviation: the old buffer's undo history is
+    no longer dropped — switching back to it resumes its own undo stack."""
     target = tmp_path / "f.txt"
     target.write_text("new", encoding="utf-8")
     session = _session()
@@ -143,20 +149,20 @@ def test_open_clears_undo_history(tmp_path: Path) -> None:
     for char in str(target):
         session.dispatch(MinibufferInput(char))
     session.dispatch(MinibufferAccept())
-    # Old buffer's undo history dropped: undo is a silent no-op now.
+    # New buffer selected; the old buffer's undo history survived the open.
+    assert session.buffer.current.text == "new"
+    session._select_buffer(BufferId("scratch"), [])
     from drei.commands import Undo
 
-    assert session.dispatch(Undo()).events == ()
-    assert session.buffer.current.text == "new"
+    assert len(session.dispatch(Undo()).events) == 1
+    assert session.buffer.current.text == ""
 
 
-def test_open_discards_unsaved_edits_without_guard(tmp_path: Path) -> None:
-    """Registry-owned deviation: a successful find-file wholesale-replaces a
-    MODIFIED buffer — unsaved edits are discarded and the undo history that
-    could recover them is cleared in the same dispatch. Emacs keeps the old
-    buffer (per-file buffers) and would prompt before killing a modified
-    one; Drei's single-buffer model has neither. Documented in
-    docs/knowledge/emacs-parity.md ("find-file replacing the buffer")."""
+def test_open_no_longer_discards_unsaved_edits(tmp_path: Path) -> None:
+    """A.2 resolves the registry row 'find-file replacing the buffer': a
+    successful find-file on a MODIFIED buffer creates a new buffer instead
+    of wholesale-replacing — the dirty buffer and its undo history survive
+    (Emacs per-file buffer behavior)."""
     target = tmp_path / "f.txt"
     target.write_text("new", encoding="utf-8")
     session = _session()
@@ -167,12 +173,11 @@ def test_open_discards_unsaved_edits_without_guard(tmp_path: Path) -> None:
         session.dispatch(MinibufferInput(char))
     outcome = session.dispatch(MinibufferAccept())
     assert BufferOpened(str(target), 3) in outcome.events
-    assert session.buffer.current.text == "new"  # "dirty" gone
-    from drei.commands import Undo
-
-    # No recovery path: undo history was cleared with the replace.
-    assert session.dispatch(Undo()).events == ()
-    assert not session.buffer.current.modified
+    assert session.buffer.current.text == "new"
+    # The dirty buffer survives, still modified, edits intact.
+    old = session._buffers[BufferId("scratch")].current
+    assert old.text == "dirty"
+    assert old.modified
 
 
 def test_open_preserves_kill_ring_and_clears_yank_state(tmp_path: Path) -> None:

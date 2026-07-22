@@ -16,11 +16,14 @@ from drei.commands import (
     AgentTextInserted,
     AgentTranscriptUpdated,
     BackwardChar,
+    BufferCreated,
     BufferObservation,
     BufferOpened,
     BufferSaved,
+    BufferSelected,
     CommandOutcome,
     CopyRegionAsKill,
+    DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
     ExchangePointAndMark,
@@ -41,6 +44,7 @@ from drei.commands import (
     MinibufferInput,
     MinibufferOpened,
     OpenFailed,
+    OtherWindow,
     PermissionDecided,
     PointMoved,
     ProcessOutputRecorded,
@@ -49,7 +53,10 @@ from drei.commands import (
     RegionKilled,
     SaveBuffer,
     SaveFailed,
+    SessionObservation,
     SetMark,
+    SplitWindow,
+    SwitchBuffer,
     TextInserted,
     TextKilled,
     TextRedone,
@@ -57,11 +64,15 @@ from drei.commands import (
     TextYanked,
     TextYankPopped,
     Undo,
+    WindowFocusChanged,
+    WindowObservation,
+    WindowsCollapsed,
+    WindowSplit,
     Yank,
     YankPop,
 )
 from drei.files import FilePort, normalize_os_error
-from drei.model import Buffer, BufferValue
+from drei.model import Buffer, BufferId, BufferValue
 from drei.process import (
     ProcessPort,
     ProcessResult,
@@ -88,6 +99,10 @@ Command = (
     | InsertAgentText
     | PromptPermission
     | FindFile
+    | SwitchBuffer
+    | SplitWindow
+    | OtherWindow
+    | DeleteOtherWindows
     | MinibufferInput
     | MinibufferBackspace
     | MinibufferAccept
@@ -113,6 +128,11 @@ Event = (
     | MinibufferAborted
     | PermissionDecided
     | BufferOpened
+    | BufferCreated
+    | BufferSelected
+    | WindowSplit
+    | WindowFocusChanged
+    | WindowsCollapsed
     | OpenFailed
     | AgentTranscriptUpdated
     | AgentTextInserted
@@ -228,6 +248,8 @@ def _adjust_mark_delete(mark: int | None, start: int, end: int) -> int | None:
 
 KILL_RING_CAPACITY = 60
 UNDO_CAPACITY = 100
+# A window needs a modeline row plus at least two text rows (plan 0012 D4).
+MIN_WINDOW_ROWS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +266,19 @@ class _UndoGroup:
     mark_after: int | None
     modified_before: bool
     modified_after: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WindowValue:
+    """One window: a layout view over a buffer with its own point/mark
+    (design 0003 §A.2, plan 0012 D3). Window-point is NOT BufferValue.point:
+    the buffer's point is the focused window's; each window stores its own
+    so focus changes restore where that window was (Emacs window-point
+    semantics, probed vs pinned 29.3 — plan 0012 evidence 4)."""
+
+    buffer_id: BufferId
+    point: int
+    mark: int | None
 
 
 class _NullFilePort:
@@ -269,14 +304,58 @@ class _NullProcessPort:
         raise FileNotFoundError(argv[0] if argv else "")
 
 
+class _BufferState:
+    """Per-buffer editing state (design 0003 §A.2, plan 0012 D2).
+
+    Everything Emacs scopes per buffer lives here: undo history/redo/descent,
+    yank-pop chaining, and the kill-append chain flag. Session-global state
+    (kill ring, transcript, process log, minibuffer, ports) stays on the
+    session — the ring is global in Emacs (kill in one buffer, yank in
+    another), pinned since slice 7.
+    """
+
+    __slots__ = (
+        "undo_history",
+        "undo_redo",
+        "undo_descending",
+        "yank_active",
+        "yank_cursor",
+        "yank_bounds",
+        "last_was_kill",
+    )
+
+    def __init__(self) -> None:
+        self.undo_history: list[_UndoGroup] = []  # applied groups, newest last
+        self.undo_redo: list[_UndoGroup] = []  # undone groups, newest last
+        self.undo_descending = False  # last command was an undo
+        self.yank_active = False
+        self.yank_cursor = 0
+        self.yank_bounds = (0, 0)
+        self.last_was_kill = False
+
+    def break_chains(self) -> None:
+        """Switching buffers intervenes like any other command in Emacs:
+        kill-append and yank-pop chaining (last-command state) do not
+        survive the switch. Undo history is per-buffer and is NOT touched —
+        returning to a buffer resumes its own undo stack (probed vs pinned
+        29.3, plan 0012 evidence 2/3)."""
+        self.last_was_kill = False
+        self.yank_active = False
+        self.undo_descending = False
+
+
 class EditorSession:
     def __init__(
         self,
         buffer: Buffer,
         file_port: FilePort | None = None,
         process_port: ProcessPort | None = None,
+        frame_size: tuple[int, int] | None = None,
     ) -> None:
-        self.buffer = buffer
+        self._buffers: dict[BufferId, Buffer] = {buffer.buffer_id: buffer}
+        self._current_id: BufferId = buffer.buffer_id
+        self._states: dict[BufferId, _BufferState] = {buffer.buffer_id: _BufferState()}
+        self._frame_size = frame_size
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
         self._processes: ProcessPort = (
             process_port if process_port is not None else _NullProcessPort()
@@ -284,15 +363,19 @@ class EditorSession:
         self._transcript: list[Event] = []
         self._process_log: list[ProcessResult] = []
         self._kill_ring: list[str] = []
-        self._last_was_kill = False
-        self._yank_active = False
-        self._yank_cursor = 0
-        self._yank_bounds = (0, 0)
-        self._undo_history: list[_UndoGroup] = []  # applied groups, newest last
-        self._undo_redo: list[_UndoGroup] = []  # undone groups, newest last
-        self._undo_descending = False  # last command was an undo
         self._minibuffer: str | None = None  # None = inactive
         self._minibuffer_prompt: str = ""
+        # What MinibufferAccept does with the input: find-file opens a path,
+        # switch-buffer selects/creates a buffer by name (plan 0012 D7).
+        self._minibuffer_kind: str | None = None
+        # Most-recently-used buffer names, most recent first (index 0 is the
+        # current buffer). Maintained on every BufferSelected; the C-x b
+        # empty-input default is index 1 (plan 0012 D7, Emacs other-buffer).
+        self._mru: list[str] = [buffer.buffer_id.value]
+        self._windows: tuple[WindowValue, ...] = (
+            WindowValue(buffer.buffer_id, buffer.current.point, buffer.current.mark),
+        )
+        self._focused = 0
         # Choice-minibuffer state (B.8): when a permission prompt is open,
         # _choice holds the in-flight PermissionRequested and the minibuffer
         # is in choice mode (MinibufferInput maps a key to an option rather
@@ -312,6 +395,30 @@ class EditorSession:
         from drei.acp.transcript import TranscriptFold
 
         self._agent_fold = TranscriptFold()
+
+    @property
+    def buffer(self) -> Buffer:
+        """The current buffer (identity shell; plan 0012 D1)."""
+        return self._buffers[self._current_id]
+
+    @property
+    def buffers(self) -> tuple[str, ...]:
+        """Derived view: the session's buffer names, in creation order."""
+        return tuple(buffer_id.value for buffer_id in self._buffers)
+
+    @property
+    def windows(self) -> tuple[WindowValue, ...]:
+        """Derived view: the layout, top-to-bottom (plan 0012 D5)."""
+        return self._windows
+
+    @property
+    def focused(self) -> int:
+        """Index of the focused window in ``windows``."""
+        return self._focused
+
+    @property
+    def _state(self) -> _BufferState:
+        return self._states[self._current_id]
 
     @property
     def minibuffer(self) -> str | None:
@@ -460,12 +567,25 @@ class EditorSession:
                     events.append(AgentTextInserted(text, before, after))
                 else:
                     new_value = current
+            case SplitWindow():
+                new_value = self._split_window(events)
+            case OtherWindow():
+                new_value = self._other_window(events)
+            case DeleteOtherWindows():
+                new_value = self._delete_other_windows(events)
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
             case FindFile():
                 self._minibuffer = ""
                 self._minibuffer_prompt = "Find file: "
+                self._minibuffer_kind = "find-file"
+                events.append(MinibufferOpened(self._minibuffer_prompt))
+                new_value = current
+            case SwitchBuffer():
+                self._minibuffer = ""
+                self._minibuffer_prompt = "Switch to buffer: "
+                self._minibuffer_kind = "switch-buffer"
                 events.append(MinibufferOpened(self._minibuffer_prompt))
                 new_value = current
             case MinibufferInput(char=char):
@@ -498,6 +618,7 @@ class EditorSession:
                 elif self._minibuffer is not None:
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
+                    self._minibuffer_kind = None
                     events.append(MinibufferAborted())
                     # Draining here too: a queued permission request must not
                     # wait forever behind an aborted text prompt.
@@ -515,13 +636,38 @@ class EditorSession:
                     self._close_choice(events)
                     new_value = current
                 elif self._minibuffer is not None:
-                    path = self._minibuffer
+                    text = self._minibuffer
+                    kind = self._minibuffer_kind
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
-                    # empty input: silent no-op close (new_value stays current)
-                    new_value = (
-                        self._open_file(current, path, events) if path else current
-                    )
+                    self._minibuffer_kind = None
+                    if kind == "switch-buffer":
+                        # C-x b: empty input takes the MRU default (Emacs
+                        # other-buffer); an unknown name creates a new empty
+                        # buffer (probed vs pinned 29.3, plan 0012
+                        # evidence 5). Selection consumes the old value.
+                        name = text or (self._mru[1] if len(self._mru) > 1 else "")
+                        if name:
+                            buffer_id = BufferId(name)
+                            if buffer_id not in self._buffers:
+                                buffer_id = self._create_buffer(
+                                    name,
+                                    BufferValue(text="", point=0),
+                                    events,
+                                )
+                            self._select_buffer(buffer_id, events)
+                        new_value = self.buffer.current
+                    elif text:
+                        # Create-or-select CONSUMES the old buffer's value:
+                        # a successful open switches identity (the new buffer
+                        # carries its own value); a failed open keeps the old
+                        # buffer as-is. The trailing buffer.replace must not
+                        # write the old value into the new buffer.
+                        self._open_file(current, text, events)
+                        new_value = self.buffer.current
+                    else:
+                        # empty input: silent no-op close
+                        new_value = current
                     # A permission request queued behind this text prompt is
                     # presented next — otherwise it would wait forever and
                     # hang the agent.
@@ -545,23 +691,23 @@ class EditorSession:
             # A kill that emits an event starts/continues the append chain;
             # a no-op kill leaves the chain intact.
             if any(isinstance(e, TextKilled) for e in events):
-                self._last_was_kill = True
+                self._state.last_was_kill = True
         elif events:
             # Only event-emitting commands break the chain. A silent no-op
             # (empty insert) leaves no trace in the transcript, so it must
             # not intervene — keeping the chain derivable from the evidence
             # (modulo capacity eviction, which emits nothing).
-            self._last_was_kill = False
+            self._state.last_was_kill = False
 
         if isinstance(command, Yank):
             # Active only on an event-emitting yank; a no-op yank clears it.
-            self._yank_active = any(isinstance(e, TextYanked) for e in events)
+            self._state.yank_active = any(isinstance(e, TextYanked) for e in events)
         elif isinstance(command, YankPop):
             # Active stays on for a successful pop (chains), off for a no-op.
-            self._yank_active = any(isinstance(e, TextYankPopped) for e in events)
+            self._state.yank_active = any(isinstance(e, TextYankPopped) for e in events)
         elif events:
             # Same rule as the chain: only event-emitting commands intervene.
-            self._yank_active = False
+            self._state.yank_active = False
 
         # Undo bookkeeping: text-changing commands push a group and
         # truncate the redo tail (owned deviation — stock Emacs keeps redo
@@ -569,21 +715,30 @@ class EditorSession:
         # breaks the descent (matches Emacs's last-command gating); a
         # silent no-op intervenes in nothing.
         if isinstance(command, Undo):
-            self._undo_descending = bool(events)
+            self._state.undo_descending = bool(events)
         else:
             group = _make_group(command, current, events)
             if group is not None:
-                self._undo_history.append(group)
-                del self._undo_history[
-                    : max(0, len(self._undo_history) - UNDO_CAPACITY)
+                self._state.undo_history.append(group)
+                del self._state.undo_history[
+                    : max(0, len(self._state.undo_history) - UNDO_CAPACITY)
                 ]
-                self._undo_redo.clear()
+                self._state.undo_redo.clear()
             if events:
-                self._undo_descending = False
+                self._state.undo_descending = False
 
         # Validation happens in BufferValue.__post_init__ before any
         # mutation, so command failure is atomic by construction.
         self.buffer.replace(new_value)
+
+        # The focused window tracks the buffer it displays: every command
+        # that moved point/mark updates its WindowValue (plan 0012 D3).
+        self._windows = tuple(
+            WindowValue(w.buffer_id, new_value.point, new_value.mark)
+            if i == self._focused
+            else w
+            for i, w in enumerate(self._windows)
+        )
 
         self._transcript.extend(events)
         return CommandOutcome(tuple(events), self._observation(new_value))
@@ -711,13 +866,188 @@ class EditorSession:
             minibuffer_prompt=self.minibuffer_prompt,
         )
 
+    def session_observation(self) -> SessionObservation:
+        """Derived read model over the whole session (plan 0012 D5): one
+        WindowObservation per window (each with its buffer snapshot and its
+        own point/mark), the buffer names, and the focused index. Rebuilt on
+        demand — windows are layout state, not session facts; the events
+        already record every layout change."""
+        windows = tuple(
+            WindowObservation(
+                buffer=self._buffer_observation(w.buffer_id),
+                point=w.point,
+                mark=w.mark,
+            )
+            for w in self._windows
+        )
+        return SessionObservation(
+            buffers=self.buffers,
+            windows=windows,
+            focused=self._focused,
+            minibuffer=self.minibuffer,
+            minibuffer_prompt=self.minibuffer_prompt,
+        )
+
+    def _buffer_observation(self, buffer_id: BufferId) -> BufferObservation:
+        current = self._buffers[buffer_id].current
+        return BufferObservation(
+            buffer_id=buffer_id.value,
+            text=current.text,
+            point=current.point,
+            file_path=current.file_path,
+            modified=current.modified,
+            mark=current.mark,
+            minibuffer=self._minibuffer,
+            minibuffer_prompt=self.minibuffer_prompt,
+        )
+
+    def _split_window(self, events: list[Event]) -> BufferValue:
+        """C-x 2 (plan 0012 D3): split the focused window into two stacked
+        halves over the same buffer; both inherit the buffer's current
+        point/mark (probed vs pinned 29.3, evidence 4). Needs at least
+        MIN_WINDOW_ROWS per window plus the shared echo row when the frame
+        size is known; otherwise a silent no-op (deviation: Emacs errors
+        'too small for splitting', evidence 6)."""
+        if self._frame_size is not None:
+            _, height = self._frame_size
+            if height < (len(self._windows) + 1) * MIN_WINDOW_ROWS + 1:
+                return self.buffer.current
+        focused = self._windows[self._focused]
+        # The new window copies the FOCUSED WINDOW's point/mark (not the
+        # buffer's): from here on the two windows hold independent points
+        # (design 0002's stress case), and the focused window's stored
+        # value is the authoritative copy of the split position.
+        duplicate = WindowValue(focused.buffer_id, focused.point, focused.mark)
+        windows = list(self._windows)
+        windows.insert(self._focused + 1, duplicate)
+        self._windows = tuple(windows)
+        events.append(WindowSplit(len(self._windows)))
+        return self.buffer.current
+
+    def _other_window(self, events: list[Event]) -> BufferValue:
+        """C-x o (plan 0012 D3): cycle focus. The departing window keeps its
+        WindowValue (already synced); the arriving window's buffer becomes
+        current at the window's stored point/mark."""
+        if len(self._windows) < 2:
+            return self.buffer.current
+        self._focused = (self._focused + 1) % len(self._windows)
+        window = self._windows[self._focused]
+        events.append(WindowFocusChanged(self._focused, window.buffer_id.value))
+        if window.buffer_id != self._current_id:
+            self._select_window_buffer(window)
+        else:
+            self.buffer.replace(
+                replace(
+                    self.buffer.current,
+                    point=self._clamped_point(window.point),
+                    mark=self._clamped_mark(window.mark),
+                )
+            )
+        return self.buffer.current
+
+    def _clamped_point(self, point: int) -> int:
+        """A non-focused window's stored point is stale when the focused
+        window shrank the shared buffer; restore clamps to the buffer bounds
+        (Emacs adjusts window-point markers on edit — plan 0012 D3 note)."""
+        return min(max(point, 0), len(self.buffer.current.text))
+
+    def _clamped_mark(self, mark: int | None) -> int | None:
+        if mark is None:
+            return None
+        return self._clamped_point(mark)
+
+    def _select_window_buffer(self, window: WindowValue) -> None:
+        """Focus landed on a window over another buffer: switch current at
+        the window's stored point/mark (no events — OtherWindow already
+        emitted WindowFocusChanged; BufferSelected is for user switches)."""
+        self._state.break_chains()
+        self._current_id = window.buffer_id
+        name = window.buffer_id.value
+        if name in self._mru:
+            self._mru.remove(name)
+        self._mru.insert(0, name)
+        self.buffer.replace(
+            replace(
+                self.buffer.current,
+                point=self._clamped_point(window.point),
+                mark=self._clamped_mark(window.mark),
+            )
+        )
+
+    def _delete_other_windows(self, events: list[Event]) -> BufferValue:
+        """C-x 1 (plan 0012 D3): collapse to the focused window."""
+        if len(self._windows) < 2:
+            return self.buffer.current
+        self._windows = (self._windows[self._focused],)
+        self._focused = 0
+        events.append(WindowsCollapsed())
+        return self.buffer.current
+
+    def _select_buffer(self, buffer_id: BufferId, events: list[Event]) -> None:
+        """Make ``buffer_id`` the current buffer (plan 0012 D1/D2).
+
+        Switching intervenes like any other command in Emacs: the departing
+        buffer's kill-append and yank-pop chains break (last-command state);
+        its undo history is per-buffer and survives (probed vs pinned 29.3,
+        plan 0012 evidence 2/3). Selecting the already-current buffer is a
+        quiet no-op — no event, no chain break.
+        """
+        if buffer_id == self._current_id:
+            return
+        self._state.break_chains()
+        self._current_id = buffer_id
+        name = buffer_id.value
+        if name in self._mru:
+            self._mru.remove(name)
+        self._mru.insert(0, name)
+        # The focused window follows the switch (Emacs set-window-buffer),
+        # displaying the target at the target's own point/mark.
+        target = self._buffers[buffer_id].current
+        self._windows = tuple(
+            WindowValue(buffer_id, target.point, target.mark)
+            if i == self._focused
+            else w
+            for i, w in enumerate(self._windows)
+        )
+        events.append(BufferSelected(buffer_id.value))
+
+    def _create_buffer(
+        self, name: str, value: BufferValue, events: list[Event]
+    ) -> BufferId:
+        """Add a new buffer to the set with a unique name (plan 0012 D1).
+
+        Same-basename collisions get numeric ``<N>`` suffixes — a recorded
+        deviation from Emacs 29.3's ``<dirname>`` uniquify suffixes (plan
+        0012 evidence 1; deterministic without directory context).
+        """
+        candidate = name
+        suffix = 2
+        while BufferId(candidate) in self._buffers:
+            candidate = f"{name}<{suffix}>"
+            suffix += 1
+        buffer_id = BufferId(candidate)
+        self._buffers[buffer_id] = Buffer(buffer_id, value)
+        self._states[buffer_id] = _BufferState()
+        events.append(BufferCreated(buffer_id.value, value.file_path))
+        return buffer_id
+
     def _open_file(
         self, current: BufferValue, path: str, events: list[Event]
     ) -> BufferValue:
-        """Find-file accept: replace the single buffer with the file's
-        contents (or an empty buffer for a missing path); the old buffer's
-        undo history is dropped (single-buffer deviation), the kill ring is
-        preserved (Emacs: the ring is global)."""
+        """Find-file accept (plan 0012 D1): create-or-select.
+
+        An already-open path (string equality on ``file_path``) SELECTS its
+        buffer — re-reading a file the user may have edited would be data
+        loss. A new path reads through the port: success or missing-file
+        creates a new buffer named by basename (with ``<N>`` collision
+        suffixes); the old buffer, its undo history, and the global kill
+        ring all survive. Other read errors report and leave everything
+        untouched.
+        """
+        for buffer_id, buffer in self._buffers.items():
+            if buffer.current.file_path == path:
+                self._select_buffer(buffer_id, events)
+                return current
         try:
             text = self._files.read(path)
         except FileNotFoundError:
@@ -728,13 +1058,15 @@ class EditorSession:
         except UnicodeDecodeError:
             events.append(OpenFailed(path, "io-error"))
             return current
-        # Success: wholesale replacement; old undo history dropped.
-        self._undo_history.clear()
-        self._undo_redo.clear()
-        events.append(BufferOpened(path, len(text)))
-        return BufferValue(
-            text=text, point=0, file_path=path, modified=False, mark=None
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        buffer_id = self._create_buffer(
+            name,
+            BufferValue(text=text, point=0, file_path=path, modified=False, mark=None),
+            events,
         )
+        events.append(BufferOpened(path, len(text)))
+        self._select_buffer(buffer_id, events)
+        return current
 
     def _render_effects(self, effects: tuple[SessionEffect, ...]) -> str:
         """Fold effects through the cached ``TranscriptFold``; return the
@@ -796,11 +1128,11 @@ class EditorSession:
         """Apply the newest group's inverse (descending) or, after any
         intervening event-emitting command, redo the newest undone group
         (Emacs's direction flip on last-command != undo)."""
-        if self._undo_descending or not self._undo_redo:
-            if not self._undo_history:
+        if self._state.undo_descending or not self._state.undo_redo:
+            if not self._state.undo_history:
                 return current  # nothing to undo: silent no-op
-            group = self._undo_history.pop()
-            self._undo_redo.append(group)
+            group = self._state.undo_history.pop()
+            self._state.undo_redo.append(group)
             events.append(
                 TextUndone(
                     group.start,
@@ -823,8 +1155,8 @@ class EditorSession:
                 mark=group.mark_before,
                 modified=group.modified_before,
             )
-        group = self._undo_redo.pop()
-        self._undo_history.append(group)
+        group = self._state.undo_redo.pop()
+        self._state.undo_history.append(group)
         events.append(
             TextRedone(
                 group.start,
@@ -874,7 +1206,7 @@ class EditorSession:
                 end = len(text)
             killed = text[point:end]
         new_text = text[:point] + text[end:]
-        if self._last_was_kill and self._kill_ring:
+        if self._state.last_was_kill and self._kill_ring:
             self._kill_ring[0] += killed
         else:
             self._kill_ring.insert(0, killed)
@@ -923,8 +1255,8 @@ class EditorSession:
         after = before + len(text)
         new_text = current.text[:before] + text + current.text[before:]
         events.append(TextYanked(text, before, after))
-        self._yank_cursor = 0
-        self._yank_bounds = (before, after)
+        self._state.yank_cursor = 0
+        self._state.yank_bounds = (before, after)
         return replace(
             current,
             text=new_text,
@@ -934,17 +1266,17 @@ class EditorSession:
         )
 
     def _yank_pop(self, current: BufferValue, events: list[Event]) -> BufferValue:
-        if not self._yank_active or len(self._kill_ring) < 2:
+        if not self._state.yank_active or len(self._kill_ring) < 2:
             return current  # no active yank / empty or 1-entry ring: silent no-op
-        start, end = self._yank_bounds
+        start, end = self._state.yank_bounds
         old = current.text[start:end]
-        cursor = (self._yank_cursor + 1) % len(self._kill_ring)
+        cursor = (self._state.yank_cursor + 1) % len(self._kill_ring)
         new = self._kill_ring[cursor]
         after = start + len(new)
         new_text = current.text[:start] + new + current.text[end:]
         events.append(TextYankPopped(old, new, start, after))
-        self._yank_cursor = cursor
-        self._yank_bounds = (start, after)
+        self._state.yank_cursor = cursor
+        self._state.yank_bounds = (start, after)
         return replace(
             current,
             text=new_text,

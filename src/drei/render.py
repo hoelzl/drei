@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from drei.commands import BufferObservation
+from drei.commands import BufferObservation, SessionObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,90 @@ def render(
     cursor_row, cursor_col = _cursor_position(observation, width, height - 2)
     rows = body_rows + (modeline, echo_row)
     return Frame(rows=rows, cursor=(cursor_row, cursor_col), width=width, height=height)
+
+
+def render_session(
+    observation: SessionObservation,
+    width: int,
+    height: int,
+    echo: str = "",
+) -> Frame:
+    """Draw one pane per window (design 0003 §A.2, plan 0012 D5).
+
+    The frame is N stacked windows (each with its own modeline) plus one
+    shared echo row. Window heights are distributed evenly (remainder to the
+    bottom window, Emacs-style). The cursor lives in the focused window at
+    its window-point; while the minibuffer is open it sits at the end of the
+    prompt on the shared echo row. A single window renders byte-identically
+    to :func:`render` of the focused window's buffer observation.
+    """
+    if height == 0:
+        return Frame(rows=(), cursor=(0, 0), width=width, height=height)
+
+    window_count = len(observation.windows)
+    # A session always has ≥1 window; the fallback only guards a hand-built
+    # observation, so exclude the whole branch from the coverage ratchet.
+    if window_count == 0:  # pragma: no cover — defensive fallback
+        return Frame(rows=(), cursor=(0, 0), width=width, height=height)
+
+    body_height = height - 1  # shared echo row
+    # Each window needs at least its modeline; body rows distribute evenly.
+    heights = _window_heights(body_height, window_count)
+
+    if observation.minibuffer is not None:
+        prompt = observation.minibuffer_prompt or ""
+        echo_row = _clip(prompt + observation.minibuffer, width)
+        cursor_row, cursor_col = (
+            height - 1,
+            min(len(_sanitize(prompt + observation.minibuffer)), max(width - 1, 0)),
+        )
+    else:
+        echo_row = _clip(echo, width)
+        cursor_row, cursor_col = (0, 0)
+
+    rows: list[str] = []
+    row_offset = 0
+    for index, (window, pane_height) in enumerate(
+        zip(observation.windows, heights, strict=True)
+    ):
+        pane_body = pane_height - 1  # one modeline per window
+        body_rows = _render_body(window.buffer.text, width, pane_body)
+        modeline = _clip(_modeline(window.buffer), width)
+        rows.extend(body_rows)
+        rows.append(modeline)
+        if index == observation.focused and observation.minibuffer is None:
+            cursor_row, cursor_col = _cursor_position(
+                window.buffer, width, pane_body, point=window.point
+            )
+            cursor_row += row_offset
+        row_offset += pane_height
+
+    rows.append(echo_row)
+    # The Frame contract caps rows at `height`: with more windows than rows
+    # (only possible via a hand-built observation — the session's split gate
+    # prevents it when the frame size is known), drop lower panes.
+    rows = rows[:height]
+    cursor_row = min(cursor_row, max(len(rows) - 1, 0))
+    return Frame(
+        rows=tuple(rows), cursor=(cursor_row, cursor_col), width=width, height=height
+    )
+
+
+def _window_heights(body_height: int, window_count: int) -> tuple[int, ...]:
+    """Stacked window heights (each ≥1: the modeline row), remainder to the
+    bottom window. Never returns a zero-height pane."""
+    if window_count <= 0:  # pragma: no cover — guarded by the caller
+        return ()
+    base = max(body_height // window_count, 1)
+    heights = [base] * window_count
+    # Give any leftover rows to the bottom window (Emacs rounds down to the
+    # last window when the frame doesn't divide evenly).
+    heights[-1] += body_height - base * window_count
+    if heights[-1] < 1:
+        # More windows than body rows: the bottom pane still gets its
+        # modeline row (the caller caps the total rows at the frame height).
+        heights[-1] = 1
+    return tuple(heights)
 
 
 def _modeline(observation: BufferObservation) -> str:
@@ -99,12 +183,14 @@ def _cursor_position(
     observation: BufferObservation,
     width: int,
     body_height: int,
+    point: int | None = None,
 ) -> tuple[int, int]:
     if body_height <= 0 or width == 0:
         return (0, 0)
 
+    at = observation.point if point is None else point
     lines = observation.text.split("\n")
-    remaining = observation.point
+    remaining = at
     for row, line in enumerate(lines):
         line_len = len(line)
         if remaining <= line_len:

@@ -15,7 +15,7 @@ Run the commands in `AGENTS.md`. The pre-commit stage stays fast (Ruff); pre-pus
 ## External evidence tools
 
 - **TermVerify** is a dev dependency (`termverify` on PyPI). The shipped executable cooperates with the verification protocol: it emits the OSC 7791 readiness marker after startup and after each processed input (`drei.terminal.READINESS_MARKER`), so scenarios detect quiescence without sleeps. Scenarios live in `tests/termverify/` and run through the ConPTY adapter on Windows (skipped elsewhere in TermVerify 0.1.x). Run them with the default suite: `uv --no-config run pytest tests/termverify -q`.
-- **GNU Emacs** differential scenarios are pinned to a known version via a pinned CI runner image (`ubuntu-24.04` + `emacs-nox`, GNU Emacs 29.x) or an equivalent container locally; they never rely on an arbitrary host installation. Locally without Emacs, differential tests skip rather than fail. Run the differential tier explicitly with:
+- **GNU Emacs** differential scenarios are pinned to a known version via a pinned CI runner image (`ubuntu-24.04` + `emacs-nox`, GNU Emacs 29.x) or an equivalent container locally; they never rely on an arbitrary host installation. Locally the scenarios run against a derived image (`drei-parity-emacs:24.04`) with the pinned `emacs-nox` baked in — built automatically on first use so the per-scenario apt install (~2 min each) happens once, not per invocation; force a rebuild with `DREI_PARITY_REFRESH=1`. The `GNU Emacs 29.` version assert still pins the series regardless of image age. Locally without Emacs or Docker, differential tests skip rather than fail. Run the differential tier explicitly with:
 
 ```bash
 DREI_PARITY=1 uv --no-config run pytest tests/differential -q

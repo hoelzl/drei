@@ -453,13 +453,16 @@ def test_process_deliveries_never_perturb_editor_folds(history: list[object]) ->
     session = _process_session()
     for command in history:
         before = session.buffer.current
-        undo_before = (len(session._undo_history), len(session._undo_redo))
+        undo_before = (len(session._state.undo_history), len(session._state.undo_redo))
         ring_before = session.kill_ring
         outcome = session.dispatch(command)  # type: ignore[arg-type]
         if isinstance(command, DeliverProcessOutput):
             # Buffer, undo stacks, and kill ring are all untouched.
             assert session.buffer.current == before
-            assert (len(session._undo_history), len(session._undo_redo)) == undo_before
+            assert (
+                len(session._state.undo_history),
+                len(session._state.undo_redo),
+            ) == undo_before
             assert session.kill_ring == ring_before
             # Exactly one delivery event per command — even with the
             # minibuffer open: external deliveries bypass the gate (parity
@@ -530,12 +533,15 @@ def test_agent_deliveries_never_create_undo_groups(history: list[object]) -> Non
     undo group, no kill-ring change, buffer modified-flag untouched."""
     session = _session()
     for command in history:
-        undo_before = (len(session._undo_history), len(session._undo_redo))
+        undo_before = (len(session._state.undo_history), len(session._state.undo_redo))
         ring_before = session.kill_ring
         modified_before = session.buffer.current.modified
         outcome = session.dispatch(command)  # type: ignore[arg-type]
         if isinstance(command, (InsertAgentText, DeliverSessionEffects)):
-            assert (len(session._undo_history), len(session._undo_redo)) == undo_before
+            assert (
+                len(session._state.undo_history),
+                len(session._state.undo_redo),
+            ) == undo_before
             assert session.kill_ring == ring_before
             assert session.buffer.current.modified == modified_before
             # Every outcome event is an agent-delivery event, never a user-edit
