@@ -142,6 +142,28 @@ def test_focus_switch_to_window_over_another_buffer_selects_it() -> None:
     assert session.buffer.buffer_id == BufferId("beta")
 
 
+def test_focus_switch_to_window_over_a_buffer_missing_from_the_mru() -> None:
+    """The window's buffer can be absent from the MRU (e.g. the session's
+    buffer set was replaced while a window still shows an old name). Focus
+    still lands on it; the MRU insert is unconditional."""
+    session = _session()
+    session._create_buffer("ghost", BufferValue(text="g", point=0), [])
+    session._select_buffer(BufferId("ghost"), [])  # focused window: ghost
+    session.dispatch(SplitWindow())
+    session._select_buffer(BufferId("alpha"), [])  # focused (top): alpha
+    # Replace the buffer set: 'ghost' is no longer a session buffer, so the
+    # MRU entry 'ghost' is stale — but the bottom window still shows it.
+    session._buffers = {
+        BufferId("alpha"): session._buffers[BufferId("alpha")],
+        BufferId("ghost"): Buffer(BufferId("ghost"), BufferValue(text="g", point=0)),
+    }
+    session._mru = ["alpha"]  # ghost dropped from the MRU
+    outcome = session.dispatch(OtherWindow())  # bottom: ghost
+    assert WindowFocusChanged(1, "ghost") in outcome.events
+    assert session.buffer.buffer_id == BufferId("ghost")
+    assert session._mru[0] == "ghost"  # inserted (was absent)
+
+
 def test_window_value_is_frozen() -> None:
     import dataclasses
 

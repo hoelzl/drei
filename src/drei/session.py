@@ -4,7 +4,13 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from drei.acp.machine import SessionEffect
+    from drei.acp.machine import (
+        AcpMachine,
+        PermissionDecision,
+        PermissionRequested,
+        SessionEffect,
+    )
+    from drei.acp.messages import JsonValue, Message, RequestId
 
 from drei.commands import (
     AgentTextInserted,
@@ -39,8 +45,10 @@ from drei.commands import (
     MinibufferOpened,
     OpenFailed,
     OtherWindow,
+    PermissionDecided,
     PointMoved,
     ProcessOutputRecorded,
+    PromptPermission,
     RegionCopied,
     RegionKilled,
     SaveBuffer,
@@ -89,6 +97,7 @@ Command = (
     | DeliverProcessOutput
     | DeliverSessionEffects
     | InsertAgentText
+    | PromptPermission
     | FindFile
     | SwitchBuffer
     | SplitWindow
@@ -117,6 +126,7 @@ Event = (
     | ProcessOutputRecorded
     | MinibufferOpened
     | MinibufferAborted
+    | PermissionDecided
     | BufferOpened
     | BufferCreated
     | BufferSelected
@@ -366,6 +376,17 @@ class EditorSession:
             WindowValue(buffer.buffer_id, buffer.current.point, buffer.current.mark),
         )
         self._focused = 0
+        # Choice-minibuffer state (B.8): when a permission prompt is open,
+        # _choice holds the in-flight PermissionRequested and the minibuffer
+        # is in choice mode (MinibufferInput maps a key to an option rather
+        # than appending text). None in text mode / when inactive.
+        self._choice: PermissionRequested | None = None
+        # Permission requests that arrived while a prompt was open, in order.
+        # Grows only while a prompt is open and drains on resolution; in
+        # practice bounded by the agent's concurrent in-flight requests (a
+        # hostile agent can flood it — accepted: each request is already in the
+        # machine's in_flight_incoming, so this adds no new resource class).
+        self._permission_queue: list[PermissionRequested] = []
         # Agent-transcript fold cache (design 0003 §B.7): a derived,
         # reconstructible cache of the AgentTranscriptUpdated event stream —
         # the same discipline as _process_log. The transcript remains
@@ -409,6 +430,10 @@ class EditorSession:
         """Prompt label while the minibuffer is active; None otherwise."""
         return self._minibuffer_prompt if self._minibuffer is not None else None
 
+    def pending_permission_count(self) -> int:
+        """Permission requests queued behind an open prompt (B.8)."""
+        return len(self._permission_queue)
+
     @property
     def transcript(self) -> tuple[Event, ...]:
         return tuple(self._transcript)
@@ -440,6 +465,8 @@ class EditorSession:
         # plus external deliveries, which are not user input and must not be
         # swallowed while a prompt is open (a dropped delivery would desync
         # the agent-buffer fold from the transcript; parity registry row).
+        # PromptPermission is delivery-class too: a swallowed permission
+        # request would hang the agent (the same row, extended in B.8).
         if self._minibuffer is not None and not isinstance(
             command,
             MinibufferInput
@@ -448,7 +475,8 @@ class EditorSession:
             | MinibufferAbort
             | DeliverProcessOutput
             | DeliverSessionEffects
-            | InsertAgentText,
+            | InsertAgentText
+            | PromptPermission,
         ):
             return CommandOutcome((), self._observation(current))
 
@@ -561,24 +589,53 @@ class EditorSession:
                 events.append(MinibufferOpened(self._minibuffer_prompt))
                 new_value = current
             case MinibufferInput(char=char):
-                if self._minibuffer is not None:
+                if self._choice is not None:
+                    # Choice mode: map a key to an option kind, resolve, close.
+                    decision = self._choice_key_to_decision(self._choice, char)
+                    if decision is not None:
+                        request_id = self._choice.request_id
+                        events.append(PermissionDecided(request_id, decision))
+                        self._close_choice(events)
+                elif self._minibuffer is not None:
                     self._minibuffer += char
                 new_value = current
             case MinibufferBackspace():
-                if self._minibuffer:
+                if self._choice is not None:
+                    pass  # no text to delete in choice mode
+                elif self._minibuffer:
                     self._minibuffer = self._minibuffer[:-1]
                 new_value = current
             case MinibufferAbort():
                 # Never emits KeyboardQuitEvent (the terminal exits on that
                 # event); the main buffer's mark survives the abort.
-                if self._minibuffer is not None:
+                if self._choice is not None:
+                    # Aborting a permission prompt denies the request.
+                    request_id = self._choice.request_id
+                    from drei.acp.machine import Cancelled
+
+                    events.append(PermissionDecided(request_id, Cancelled()))
+                    self._close_choice(events)
+                elif self._minibuffer is not None:
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
                     self._minibuffer_kind = None
                     events.append(MinibufferAborted())
+                    # Draining here too: a queued permission request must not
+                    # wait forever behind an aborted text prompt.
+                    if self._permission_queue:
+                        nxt = self._permission_queue.pop(0)
+                        self._open_choice(nxt, events)
                 new_value = current
             case MinibufferAccept():
-                if self._minibuffer is not None:
+                if self._choice is not None:
+                    # Accept in choice mode resolves the highlighted (first)
+                    # allow option; without one, denies.
+                    decision = self._choice_accept_decision(self._choice)
+                    request_id = self._choice.request_id
+                    events.append(PermissionDecided(request_id, decision))
+                    self._close_choice(events)
+                    new_value = current
+                elif self._minibuffer is not None:
                     text = self._minibuffer
                     kind = self._minibuffer_kind
                     self._minibuffer = None
@@ -611,7 +668,21 @@ class EditorSession:
                     else:
                         # empty input: silent no-op close
                         new_value = current
+                    # A permission request queued behind this text prompt is
+                    # presented next — otherwise it would wait forever and
+                    # hang the agent.
+                    if self._permission_queue:
+                        nxt = self._permission_queue.pop(0)
+                        self._open_choice(nxt, events)
                 else:
+                    new_value = current
+            case PromptPermission(request=request):
+                if self._minibuffer is not None:
+                    # A prompt is already open: queue, never swallow.
+                    self._permission_queue.append(request)
+                    new_value = current
+                else:
+                    self._open_choice(request, events)
                     new_value = current
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
@@ -671,6 +742,117 @@ class EditorSession:
 
         self._transcript.extend(events)
         return CommandOutcome(tuple(events), self._observation(new_value))
+
+    # ------------------------------------------------------------------
+    # B.8 choice-minibuffer helpers
+    # ------------------------------------------------------------------
+
+    def _open_choice(self, request: PermissionRequested, events: list[Event]) -> None:
+        self._choice = request
+        self._minibuffer = ""  # choice mode: no text, but minibuffer active
+        self._minibuffer_prompt = self._choice_prompt(request)
+        events.append(MinibufferOpened(self._minibuffer_prompt))
+
+    def _close_choice(self, events: list[Event]) -> None:
+        """Close the resolved choice prompt and present the next queued
+        permission request, if any (queue drains FIFO)."""
+        self._choice = None
+        self._minibuffer = None
+        self._minibuffer_prompt = ""
+        if self._permission_queue:
+            nxt = self._permission_queue.pop(0)
+            self._open_choice(nxt, events)
+
+    @staticmethod
+    def _choice_options(request: PermissionRequested) -> list[dict[str, JsonValue]]:
+        params = request.params
+        if isinstance(params, dict):
+            options = params.get("options")
+            if isinstance(options, list):
+                return [o for o in options if isinstance(o, dict)]
+        return []
+
+    @classmethod
+    def _choice_prompt(cls, request: PermissionRequested) -> str:
+        title = "permission"
+        params = request.params
+        if isinstance(params, dict):
+            tool_call = params.get("toolCall")
+            if isinstance(tool_call, dict):
+                t = tool_call.get("title") or tool_call.get("toolCallId")
+                if isinstance(t, str) and t:
+                    title = t
+        keys = {"allow_once": "y", "allow_session": "s", "allow_always": "a"}
+        parts = []
+        for option in cls._choice_options(request):
+            kind = option.get("kind")
+            name = option.get("name")
+            key = keys.get(kind, "n") if isinstance(kind, str) else "n"
+            label = name if isinstance(name, str) and name else str(kind)
+            parts.append(f"[{key}]{label}")
+        return f"Allow {title}? " + " ".join(parts) + " [n]o "
+
+    @classmethod
+    def _choice_key_to_decision(
+        cls, request: PermissionRequested, char: str
+    ) -> PermissionDecision | None:
+        from drei.acp.machine import _REJECT_KINDS, Cancelled, Selected
+
+        key_to_kind = {
+            "y": "allow_once",
+            "s": "allow_session",
+            "a": "allow_always",
+            "n": "reject",
+        }
+        kind = key_to_kind.get(char)
+        if kind is None:
+            return None
+        options = cls._choice_options(request)
+        if kind == "reject":
+            # First enum reject option; absent any, a deny is a cancel. Match
+            # by membership, not startswith ("reject_evil" is not a deny).
+            for option in options:
+                if option.get("kind") in _REJECT_KINDS:
+                    oid = option.get("optionId")
+                    if oid is not None:
+                        return Selected(str(oid))
+            return Cancelled()
+        for option in options:
+            if option.get("kind") == kind:
+                oid = option.get("optionId")
+                if oid is not None:
+                    return Selected(str(oid))
+        return None
+
+    @classmethod
+    def _choice_accept_decision(
+        cls, request: PermissionRequested
+    ) -> PermissionDecision:
+        from drei.acp.machine import _ALLOW_KINDS, Cancelled, Selected
+
+        # Accept takes the first enum allow option; absent any, fail-closed to
+        # a cancel (never auto-approve an invented "allow_*" kind).
+        for option in cls._choice_options(request):
+            if option.get("kind") in _ALLOW_KINDS:
+                oid = option.get("optionId")
+                if oid is not None:
+                    return Selected(str(oid))
+        return Cancelled()
+
+    def apply_permission_decision(
+        self,
+        machine: AcpMachine,
+        request_id: RequestId,
+        decision: PermissionDecision,
+    ) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
+        """Feed a human decision back to the ACP machine (B.8 seam), mirroring
+        ``apply_session_effects``. The session owns no machine (the §C pump
+        does); this takes and returns it so the pure ``resolve_permission``
+        maps the decision onto the exact 0.9.0 response. The returned
+        ``Response`` is what the pump sends; nothing is sent here."""
+        from drei.acp.machine import resolve_permission
+
+        return resolve_permission(machine, request_id, decision)
 
     def _observation(self, value: BufferValue) -> BufferObservation:
         return BufferObservation(

@@ -103,3 +103,26 @@ def test_render_session_minibuffer_uses_the_shared_echo_row() -> None:
     # frame width, as in the legacy render).
     assert frame.cursor[0] == len(frame.rows) - 1
     assert frame.cursor[1] == min(len("Find file: "), 10 - 1)
+
+
+def test_render_session_minibuffer_without_prompt_uses_empty_prompt() -> None:
+    """minibuffer_prompt=None (a minibuffer opened without a prompt string)
+    falls back to an empty prompt in the session renderer."""
+    session = _session()
+    obs = session.session_observation()
+    # Synthesize the prompt-less observation shape (the session always sets a
+    # prompt today; the renderer's None fallback is a contract).
+    from dataclasses import replace as dc_replace
+
+    obs = dc_replace(obs, minibuffer="x", minibuffer_prompt=None)
+    frame = render_session(obs, width=10, height=4)
+    assert frame.rows[-1] == "x         "
+    assert frame.cursor == (3, 1)
+
+
+def test_render_session_height_zero_is_an_empty_frame() -> None:
+    session = _session()
+    frame = render_session(session.session_observation(), width=10, height=0)
+    assert frame.rows == ()
+    assert frame.cursor == (0, 0)
+    assert frame.height == 0

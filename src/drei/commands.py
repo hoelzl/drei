@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING, ClassVar
 from drei.process import ProcessResult
 
 if TYPE_CHECKING:
-    from drei.acp.machine import SessionEffect
+    from drei.acp.machine import (
+        PermissionDecision,
+        PermissionRequested,
+        SessionEffect,
+    )
+    from drei.acp.messages import RequestId
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +172,21 @@ class InsertAgentText:
     """
 
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class PromptPermission:
+    """Open the choice minibuffer for a ``session/request_permission`` (B.8).
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: a
+    request arriving while another prompt is open must queue rather than be
+    swallowed — a dropped permission prompt would hang the agent (the B.7
+    delivery-bypass parity row, extended). The prompt presents the request's
+    ``PermissionOption``\\ s and resolves to one ``PermissionDecision`` (or
+    ``Cancelled`` on abort), recorded as ``PermissionDecided``.
+    """
+
+    request: PermissionRequested
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +357,15 @@ class MinibufferAborted:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionDecided:
+    """The human resolved a permission prompt (B.8). Carries the decision the
+    machine's ``resolve_permission`` maps onto the 0.9.0 response."""
+
+    request_id: RequestId
+    decision: PermissionDecision
+
+
+@dataclass(frozen=True, slots=True)
 class AgentTranscriptUpdated:
     """One session-effects delivery, recorded for the transcript oracle.
 
@@ -488,6 +517,7 @@ class CommandOutcome:
         | ProcessOutputRecorded
         | MinibufferOpened
         | MinibufferAborted
+        | PermissionDecided
         | BufferOpened
         | BufferCreated
         | BufferSelected

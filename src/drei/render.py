@@ -69,7 +69,9 @@ def render_session(
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
 
     window_count = len(observation.windows)
-    if window_count == 0:  # pragma: no cover — a session always has ≥1 window
+    # A session always has ≥1 window; the fallback only guards a hand-built
+    # observation, so exclude the whole branch from the coverage ratchet.
+    if window_count == 0:  # pragma: no cover — defensive fallback
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
 
     body_height = height - 1  # shared echo row

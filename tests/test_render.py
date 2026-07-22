@@ -123,3 +123,37 @@ def test_echo_area_reflects_quit() -> None:
         "Drei: scra",
         "Quit      ",
     )
+
+
+def test_minibuffer_open_occupies_the_echo_row_with_cursor_at_prompt_end() -> None:
+    """An open minibuffer replaces the echo row (legacy single-window path —
+    the B.8 choice prompt renders through this in the terminal)."""
+    frame = render(
+        BufferObservation(
+            buffer_id="scratch",
+            text="hello",
+            point=0,
+            minibuffer="abc",
+            minibuffer_prompt="Find file: ",
+        ),
+        width=10,
+        height=4,
+    )
+    assert frame.rows == (
+        "hello     ",
+        "          ",
+        "Drei: scra",
+        "Find file:",
+    )
+    # Cursor on the echo row at the end of prompt+input (clamped to width).
+    assert frame.cursor == (3, 9)
+
+
+def test_minibuffer_prompt_defaults_to_empty_when_unset() -> None:
+    frame = render(
+        BufferObservation(buffer_id="scratch", text="", point=0, minibuffer="x"),
+        width=10,
+        height=4,
+    )
+    assert frame.rows[-1] == "x         "
+    assert frame.cursor == (3, 1)
