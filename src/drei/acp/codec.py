@@ -44,25 +44,31 @@ class JsonRpcDecoder:
     §C streaming pump feeds whatever the pipe delivered). ``feed`` buffers;
     ``messages`` drains and returns each complete parsed frame in order. A
     malformed line raises :class:`AcpDecodeError`; the offending line is
-    consumed so the decoder stays usable for later frames.
+    consumed, and frames already parsed from the same drain are retained and
+    returned by the next ``messages()`` call — no valid frame is ever lost
+    (a dropped initialize response would wedge the machine; a dropped
+    permission request would hang the agent).
     """
 
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._parsed: list[JsonValue] = []
 
     def feed(self, data: bytes) -> None:
         self._buffer.extend(data)
 
     def messages(self) -> list[JsonValue]:
         """Drain and parse every complete ``\\n``-terminated frame buffered so far."""
-        out: list[JsonValue] = []
         while (idx := self._buffer.find(b"\n")) != -1:
             line = bytes(self._buffer[:idx])
             del self._buffer[: idx + 1]
             if not line.strip():
                 continue  # tolerate blank lines between frames
             try:
-                out.append(json.loads(line))
+                self._parsed.append(json.loads(line))
             except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                # Parsed frames stay parked on the instance for the next call.
                 raise AcpDecodeError(line, error) from error
+        out = self._parsed
+        self._parsed = []
         return out

@@ -139,6 +139,18 @@ def test_decoder_recovers_after_malformed_line() -> None:
     assert decoder.messages() == [{"ok": True}]
 
 
+def test_decoder_preserves_frames_parsed_before_malformed_line() -> None:
+    # Review 0001 finding 8: frames parsed before a malformed line in the same
+    # drain must survive the error — a lost initialize response would wedge
+    # the machine; a lost permission request would hang the agent.
+    decoder = JsonRpcDecoder()
+    decoder.feed(encode({"a": 1}) + b"notjson\n" + encode({"b": 2}))
+    with pytest.raises(AcpDecodeError):
+        decoder.messages()
+    # The bad line is consumed; every valid frame is still delivered, in order.
+    assert decoder.messages() == [{"a": 1}, {"b": 2}]
+
+
 def test_decoder_blank_lines_ignored() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(b"\n" + encode({"x": 1}) + b"\n\n")

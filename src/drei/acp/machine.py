@@ -135,6 +135,19 @@ _REJECT_KINDS = frozenset({"reject_once", "reject_always"})
 # Kinds that populate the session-scoped auto-approval cache.
 _CACHEABLE_KINDS = frozenset({"allow_session", "allow_always"})
 
+# The modelled session/update kinds — turn output, only legal while a prompt
+# is in flight. Unmodelled kinds (available_commands_update, …) may arrive at
+# any time and are ignored.
+_TURN_UPDATE_KINDS = frozenset(
+    {
+        "agent_message_chunk",
+        "agent_thought_chunk",
+        "tool_call",
+        "tool_call_update",
+        "plan",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PermissionResolved:
@@ -413,6 +426,23 @@ def handle(
 def _handle_response(
     machine: AcpMachine, message: Response | ResponseError
 ) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
+    if message.id is None:
+        # A null id is only legal on the JSON-RPC parse-error response: the
+        # agent could not determine which of our frames it is answering, so
+        # there is no in-flight entry to clear.
+        assert isinstance(message, ResponseError)  # parse_message guarantees it
+        return (
+            machine,
+            [],
+            [
+                ProtocolError(
+                    detail=(
+                        "agent reported an unattributable error: "
+                        f"{message.code} {message.message}"
+                    )
+                )
+            ],
+        )
     method = machine.in_flight_outgoing.get(message.id)
     if method is None:
         return (
@@ -521,6 +551,21 @@ def _handle_notification(
             [ProtocolError(detail="session/update missing update object")],
         )
     kind = update.get("sessionUpdate")
+    # Modelled kinds are turn output: outside PROMPT_IN_FLIGHT there is no
+    # turn to attribute them to, so folding them into the transcript would
+    # fabricate agent output nobody prompted for. Unmodelled kinds may arrive
+    # at any time per ACP and stay ignored below. (Review 0001 finding 27.)
+    if kind in _TURN_UPDATE_KINDS and machine.phase != "PROMPT_IN_FLIGHT":
+        return (
+            machine,
+            [],
+            [
+                ProtocolError(
+                    detail=f"session/update {kind!r} outside a prompt turn "
+                    f"(phase {machine.phase})"
+                )
+            ],
+        )
     content = update.get("content")
     text = content.get("text", "") if isinstance(content, dict) else ""
     if kind == "agent_message_chunk":
@@ -557,6 +602,15 @@ def _handle_inbound_request(
                         )
                     )
                 ],
+            )
+        # A replayed id must not overwrite the in-flight slot or surface a
+        # second prompt (one slot, two prompts: resolving the second would
+        # raise in the driver). Mirrors the outbound duplicate-id guard.
+        if message.id in machine.in_flight_incoming:
+            return (
+                machine,
+                [],
+                [ProtocolError(detail=f"duplicate inbound request id {message.id!r}")],
             )
         identity = _permission_identity(message.params)
         if identity in machine.auto_approvals:

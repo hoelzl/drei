@@ -350,6 +350,45 @@ class TestPromptLifecycle:
         assert machine.phase == "SESSION_ACTIVE"
         assert effects == [PromptCompleted(stop_reason="end_turn")]
 
+    def test_modelled_update_outside_turn_is_protocol_error(self) -> None:
+        # Review 0001 finding 27: modelled update kinds (chunks, tool calls,
+        # plan) are turn output; arriving after PromptCompleted — outside any
+        # turn — they must not fold into the transcript.
+        machine, _ = _drive_handshake()
+        machine, req = prompt(machine, "hi")
+        machine, _, _ = handle(
+            machine, Response(id=req.id, result={"stopReason": "end_turn"})
+        )
+        assert machine.phase == "SESSION_ACTIVE"
+        update = Notification(
+            method=SESSION_UPDATE,
+            params={
+                "sessionId": "sess-1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "stray"},
+                },
+            },
+        )
+        machine, out, effects = handle(machine, update)
+        assert out == []
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+
+    def test_unmodelled_update_outside_turn_still_ignored(self) -> None:
+        # Unmodelled kinds (e.g. available_commands_update) may arrive at any
+        # time per ACP; they stay ignored, not errors, in any phase.
+        machine, _ = _drive_handshake()
+        assert machine.phase == "SESSION_ACTIVE"
+        update = Notification(
+            method=SESSION_UPDATE,
+            params={
+                "sessionId": "sess-1",
+                "update": {"sessionUpdate": "available_commands_update"},
+            },
+        )
+        _, out, effects = handle(machine, update)
+        assert out == [] and effects == []
+
     def test_wrong_session_update_yields_protocol_error_not_crash(self) -> None:
         machine, _ = _drive_handshake()
         machine, _ = prompt(machine, "hi")
@@ -401,6 +440,23 @@ class TestPromptLifecycle:
         assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
 
 
+class TestNullIdErrorResponse:
+    def test_null_id_error_response_is_protocol_error_and_machine_unchanged(
+        self,
+    ) -> None:
+        # The one legal null-id envelope (a parse-error response) matches no
+        # in-flight request: surface a ProtocolError, clear nothing.
+        machine, _ = _drive_handshake()
+        machine, req = prompt(machine, "hi")
+        before = machine.in_flight_outgoing
+        machine, out, effects = handle(
+            machine, ResponseError(id=None, code=-32700, message="parse")
+        )
+        assert out == []
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.in_flight_outgoing == before
+
+
 class TestInboundAgentRequests:
     def _active(self) -> AcpMachine:
         machine, _ = _drive_handshake()
@@ -422,6 +478,28 @@ class TestInboundAgentRequests:
         assert out == []  # B.6 does not answer; B.8 bridges approval
         assert any(isinstance(e, PermissionRequested) for e in effects)
         assert "perm-1" in machine.in_flight_incoming
+
+    def test_duplicate_permission_request_id_is_protocol_error(self) -> None:
+        # Review 0001 finding 7: a replayed session/request_permission id must
+        # not overwrite the in-flight slot or surface a second prompt — one
+        # slot, two prompts means resolving the second raises AcpStateError in
+        # the driver. A duplicate id is a protocol violation, never a crash.
+        machine = self._active()
+        req = Request(
+            id="perm-1",
+            method=SESSION_REQUEST_PERMISSION,
+            params={
+                "sessionId": "sess-1",
+                "toolCall": {"toolCallId": "tc-1", "title": "run ls"},
+                "options": [],
+            },
+        )
+        machine, _, _ = handle(machine, req)
+        before = machine.in_flight_incoming
+        machine, out, effects = handle(machine, req)
+        assert out == []
+        assert len(effects) == 1 and isinstance(effects[0], ProtocolError)
+        assert machine.in_flight_incoming == before  # no overwrite
 
     def test_fs_read_capability_gated(self) -> None:
         # Default clientCapabilities advertise no fs support, so an fs/read

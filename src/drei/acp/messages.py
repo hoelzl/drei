@@ -70,9 +70,13 @@ class Response:
 
 @dataclass(frozen=True, slots=True)
 class ResponseError:
-    """An error result to a request (matched by ``id``)."""
+    """An error result to a request (matched by ``id``).
 
-    id: RequestId
+    ``id`` is ``None`` only for the JSON-RPC parse-error case: an error
+    response to a frame whose request id the peer could not determine.
+    """
+
+    id: RequestId | None
     code: int
     message: str
     data: JsonValue = None
@@ -133,6 +137,11 @@ def parse_message(payload: JsonValue) -> Message:
 
     if has_id and not _valid_id(payload["id"]):
         raise AcpProtocolError(f"id must be str/int/null, got {payload['id']!r}")
+
+    # JSON-RPC 2.0 reserves a null id for error responses whose request id
+    # could not be determined; on a request or success response it is invalid.
+    if has_id and payload["id"] is None and not (has_error and not has_method):
+        raise AcpProtocolError("null id is only legal on an error response")
 
     if has_method:
         method = payload["method"]

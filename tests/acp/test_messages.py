@@ -195,11 +195,30 @@ def test_parse_rejects_invalid_id_type() -> None:
         parse_message({"jsonrpc": "2.0", "id": [1], "method": "x"})
 
 
-def test_parse_id_null_is_a_request() -> None:
-    # JSON-RPC discourages null ids; we treat {"id": null, "method": ...} as a
-    # Request (has_id is presence-based). Pin that classification.
-    message = parse_message({"jsonrpc": "2.0", "id": None, "method": "foo"})
-    assert isinstance(message, Request)
+def test_parse_rejects_null_id_on_request() -> None:
+    # Review 0001 finding 24: JSON-RPC reserves a null id for error responses
+    # whose request id could not be determined. A *request* with id null must
+    # be rejected — Request(id=None) would flow into in_flight_incoming
+    # despite RequestId = int | str. (Supersedes the earlier pin that
+    # classified {"id": null, "method": ...} as a Request.)
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": None, "method": "foo"})
+
+
+def test_parse_rejects_null_id_on_success_response() -> None:
+    # A success response answers a specific request; its id can never be null.
+    with pytest.raises(AcpProtocolError):
+        parse_message({"jsonrpc": "2.0", "id": None, "result": {}})
+
+
+def test_parse_null_id_legal_on_error_response() -> None:
+    # The one place JSON-RPC allows a null id: an error response to a frame
+    # whose id the peer could not determine (e.g. a parse error on our side
+    # of the wire, code -32700).
+    message = parse_message(
+        {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse"}}
+    )
+    assert isinstance(message, ResponseError)
     assert message.id is None
 
 

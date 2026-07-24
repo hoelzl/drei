@@ -1,6 +1,8 @@
 # Adversarial review 0001 — full project (2026-07-24)
 
-**Status:** findings triaged, remediation planned, **no fixes implemented yet**.
+**Status:** Cluster C (findings 8, 7, 24, 27) **implemented and gated**
+2026-07-24, uncommitted at time of writing; clusters D, A, B, E and the
+deferred-item bookkeeping still pending.
 **Baseline:** commit `cabb31a` (A.2 multiple buffers/windows), working tree clean,
 full suite green (508 passed, 17 skipped).
 **Method:** three independent adversarial reviewers — (1) implementation audit
@@ -322,12 +324,20 @@ for the same operation; violates the normalized-token rule
 Strict TDD per fix: focused failing test → observed failure → minimal fix →
 focused pass; full gates (`AGENTS.md` §Validation) at the end.
 
-1. **Cluster C — ACP wire robustness (8, 7, 24, 27).**
+1. **Cluster C — ACP wire robustness (8, 7, 24, 27). DONE 2026-07-24.**
    Decoder parks parsed frames on the instance and survives a malformed line
    without losing them; duplicate inbound id → `ProtocolError`, no overwrite
-   (mirror `machine.py:416` guard); `parse_message` rejects null id on
-   requests; modelled `session/update` kinds outside `PROMPT_IN_FLIGHT` →
-   `ProtocolError`.
+   (mirror of the outbound guard); `parse_message` rejects null id on
+   requests and success responses (legal only on error responses —
+   `ResponseError.id` widened to `RequestId | None`, and a null-id error
+   response is a `ProtocolError` that clears nothing); modelled
+   `session/update` kinds outside `PROMPT_IN_FLIGHT` → `ProtocolError`
+   (unmodelled kinds stay ignored in any phase). Strict TDD throughout: each
+   fix's test observed failing first; the pre-existing pin
+   `test_parse_id_null_is_a_request` was superseded by
+   `test_parse_rejects_null_id_on_request`. Full gates green (515 passed /
+   17 skipped with coverage ratchet, ruff, mypy, pre-commit, pre-push
+   hooks, build).
 2. **Cluster D — approval semantics (6, 9, 25, 10, 26).**
    `_permission_identity` strips top-level `sessionId` + `toolCall.toolCallId`
    before canonicalization (new test: fresh toolCallId + same args →
