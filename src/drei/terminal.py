@@ -10,6 +10,8 @@ from __future__ import annotations
 import abc
 import os
 import sys
+from dataclasses import dataclass
+from typing import Literal
 
 from drei.commands import KeyboardQuitEvent
 from drei.files import FilePort
@@ -28,7 +30,12 @@ class TerminalPort(abc.ABC):
 
     @abc.abstractmethod
     def read_key(self) -> str:
-        """Read one symbolic key. Control bytes map to ``C-x`` names."""
+        """Read one input unit for :class:`KeyAssembler`.
+
+        Either a raw character (control bytes and escape sequences are
+        decoded by the assembler) or, for a platform key event with no byte
+        form, its symbolic name (Windows extended keys → ``<up>``, …).
+        """
 
     @abc.abstractmethod
     def write(self, text: str) -> None:
@@ -66,22 +73,66 @@ def decode_key(char: str) -> str:
     return control.get(char, char)
 
 
-def assemble_meta(pending_esc: bool, char: str) -> tuple[bool, str | None]:
-    """Byte-level ESC lookbehind for meta chords (ESC + letter → "M-<letter>").
+_ARROW_FINALS = {"A": "<up>", "B": "<down>", "C": "<right>", "D": "<left>"}
 
-    Returns ``(new_pending_esc, key_or_none)``: ``None`` means the byte was
-    consumed as the start of a potential chord (bare ESC so far); a key
-    string means dispatch it. ESC + non-letter yields the unresolved ESC
-    marker and reprocesses the byte on the next call with no pending state.
+# msvcrt scan codes for the navigation keys, mapped to the same symbolic
+# names the POSIX escape-sequence path produces.
+_WINDOWS_EXTENDED = {"H": "<up>", "P": "<down>", "M": "<right>", "K": "<left>"}
+
+
+@dataclass(frozen=True, slots=True)
+class KeyAssembler:
+    """Pure incremental assembler from input characters to symbolic keys.
+
+    Recognizes three escape shapes: ESC + letter → ``M-<letter>``; a CSI
+    sequence (``ESC [``) and an SS3 sequence (``ESC O``) collected through
+    their final byte (0x40-0x7E) → one symbolic key. Navigation keys
+    therefore arrive as a single unresolved key instead of their raw bytes
+    (``ESC [ A`` used to insert "[" and "A" into the buffer).
+
+    ``feed`` returns the next state plus the keys the character completed:
+    zero while a sequence is still being assembled, one for the common
+    case, two when the character proves the sequence was not one after all
+    (the abandoned prefix, then the character resolved from scratch).
     """
-    if pending_esc:
-        if char.isalpha():
-            return False, f"M-{char}"
-        # ESC + non-letter: report the bare ESC; the caller reprocesses char.
-        return False, "\x1b"
-    if char == "\x1b":
-        return True, None
-    return False, decode_key(char)
+
+    state: Literal["", "esc", "csi", "ss3"] = ""
+    params: str = ""
+
+    def feed(self, char: str) -> tuple[KeyAssembler, tuple[str, ...]]:
+        if self.state == "":
+            if char == "\x1b":
+                return KeyAssembler("esc"), ()
+            return self, (decode_key(char),)
+        if self.state == "esc":
+            if char == "[":
+                return KeyAssembler("csi"), ()
+            if char == "O":
+                # Application-cursor mode prefix; costs the M-O chord, which
+                # a terminal cannot distinguish from it either (see the
+                # parity registry).
+                return KeyAssembler("ss3"), ()
+            if len(char) == 1 and char.isalpha():
+                return KeyAssembler(), (f"M-{char}",)
+            # ESC + anything else: the bare ESC is its own (unresolved) key
+            # and the character starts over from the empty state.
+            return _restart(char, "\x1b")
+        if len(char) == 1 and "\x20" <= char <= "\x3f":
+            # Parameter and intermediate bytes: keep collecting.
+            return KeyAssembler(self.state, self.params + char), ()
+        if len(char) == 1 and "\x40" <= char <= "\x7e":
+            if not self.params and char in _ARROW_FINALS:
+                return KeyAssembler(), (_ARROW_FINALS[char],)
+            return KeyAssembler(), (f"<{self.state}:{self.params}{char}>",)
+        # Not a legal sequence byte: abandon the partial sequence as one
+        # unresolved key rather than replaying its bytes into the buffer.
+        return _restart(char, f"<{self.state}:unterminated>")
+
+
+def _restart(char: str, *emitted: str) -> tuple[KeyAssembler, tuple[str, ...]]:
+    """Emit ``emitted``, then reprocess ``char`` from the empty state."""
+    assembler, keys = KeyAssembler().feed(char)
+    return assembler, (*emitted, *keys)
 
 
 # TermVerify subject-cooperation readiness marker (OSC 7791;ready ST). The
@@ -112,42 +163,30 @@ def run_editor(
             initial_text=initial_text,
         )
         _write_frame(port, harness)
-        pending_esc = False
-        pending_byte: str | None = None
+        assembler = KeyAssembler()
         while True:
-            char = pending_byte if pending_byte is not None else port.read_key()
-            pending_byte = None
-            pending_esc, key = assemble_meta(pending_esc, char)
-            if key == "\x1b":
-                # ESC + non-letter: the bare ESC is unresolved (no state
-                # change) — mark quiescence for it, then reprocess the byte
-                # that followed with no pending state (its own iteration
-                # marks quiescence again).
-                harness.send(key)
-                port.write(READINESS_MARKER)
-                port.flush()
-                pending_byte = char
-                continue
-            if key is None:
-                # Bare ESC consumed as a potential chord start: the subject
-                # is mid-chord, not quiescent — no marker until the next
-                # byte resolves the chord.
-                continue
-            outcome = harness.send(key)
-            quit_requested = outcome is not None and any(
-                isinstance(e, KeyboardQuitEvent) for e in outcome.events
-            )
-            if outcome is None:
-                # Unresolved key: state did not change, so skip the frame
-                # rewrite but still mark quiescence for this input.
-                port.write(READINESS_MARKER)
-                port.flush()
-                continue
-            # On quit the run ends: quiescence is the process exit itself, so
-            # the final frame carries no readiness marker.
-            _write_frame(port, harness, mark_ready=not quit_requested)
-            if quit_requested:
-                return
+            assembler, keys = assembler.feed(port.read_key())
+            # No keys: the character was consumed mid-sequence, so the
+            # subject is mid-chord and not quiescent — no marker until the
+            # sequence resolves. Two keys: an abandoned escape prefix plus
+            # the character that broke it, each marking quiescence of its
+            # own (symmetric with the C-x prefix path).
+            for key in keys:
+                outcome = harness.send(key)
+                quit_requested = outcome is not None and any(
+                    isinstance(e, KeyboardQuitEvent) for e in outcome.events
+                )
+                if outcome is None:
+                    # Unresolved key: state did not change, so skip the frame
+                    # rewrite but still mark quiescence for this input.
+                    port.write(READINESS_MARKER)
+                    port.flush()
+                    continue
+                # On quit the run ends: quiescence is the process exit itself,
+                # so the final frame carries no readiness marker.
+                _write_frame(port, harness, mark_ready=not quit_requested)
+                if quit_requested:
+                    return
     finally:
         port.restore()
 
@@ -219,12 +258,15 @@ class SystemTerminalPort(TerminalPort):
             char = msvcrt.getwch()
             if char in ("\x00", "\xe0"):
                 # Extended key prefix (arrows, function keys, ...): the scan
-                # code follows in the next read. Consume the pair and yield
-                # an unresolved marker — no extended keys are bound yet.
-                # This also means C-@ (NUL) is undeliverable through msvcrt
-                # on the Windows console (recorded in the parity registry).
-                msvcrt.getwch()
-                return "\x00"
+                # code follows in the next read. The pair becomes ONE
+                # symbolic key — the same names the POSIX escape-sequence
+                # path produces — never the raw NUL, which decode_key would
+                # turn into C-@ → SetMark. No extended key is bound yet, so
+                # the key is unresolved in the keymap by design.
+                # C-@ (NUL) stays undeliverable through msvcrt on the
+                # Windows console (recorded in the parity registry).
+                scan = msvcrt.getwch()
+                return _WINDOWS_EXTENDED.get(scan, f"<ext:{scan}>")
             return char
 
     def write(self, text: str) -> None:

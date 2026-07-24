@@ -211,6 +211,58 @@ def test_editor_find_file_through_byte_loop(tmp_path: Path) -> None:
     assert rows[-1][0].startswith("from disk")
 
 
+def test_editor_arrow_keys_leave_the_buffer_untouched() -> None:
+    """Finding 4: arrow keys used to insert "[", "A", … into the buffer.
+
+    Command-level effect, not byte identity: every frame the loop writes
+    still shows the original text, and no navigation byte reaches the
+    buffer as printable input.
+    """
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (40, 10)
+
+    # Up, Down, Right, Left, Home (ESC [ H), Delete (ESC [ 3 ~), then quit.
+    port = TallPort(list("\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[3~") + ["\x07"])
+    run_editor(port, initial_text="hi")
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    rows = [f.split("\r\n")[0] for f in frames[1:]]
+    assert rows, frames
+    assert all(row.startswith("hi") for row in rows), rows
+
+
+def test_editor_arrow_key_does_not_rewrite_the_frame() -> None:
+    """An arrow is one unresolved key: one readiness marker, no frame."""
+    port = FakePort(list("\x1b[A") + ["\x07"])
+    run_editor(port)
+    written = "".join(port.outputs)
+    # Markers: initial frame + the arrow (unresolved). The quit frame has none.
+    assert written.count("\x1b]7791;ready\x1b\\") == 2
+    # Frames: the initial one and the final quit frame only.
+    assert written.count("\x1b[2J\x1b[H") == 2
+
+
+def test_editor_arrow_keys_do_not_reach_the_minibuffer() -> None:
+    """C-x C-f then an arrow: the prompt text stays empty (no "[" echoed)."""
+
+    class TallPort(FakePort):
+        def get_size(self) -> tuple[int, int]:
+            return (60, 10)
+
+    port = TallPort(["\x18", "\x06", *list("\x1b[A"), "\x07", "\x07"])
+    run_editor(port)
+    frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
+    prompts = [
+        line.split("\x1b")[0]  # the echo row is last: trailing writes ride along
+        for frame in frames
+        for line in frame.split("\r\n")
+        if line.startswith("Find file:")
+    ]
+    assert prompts, frames
+    assert all(line.rstrip() == "Find file:" for line in prompts), prompts
+
+
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.
@@ -390,49 +442,66 @@ def test_decode_key_maps_region_bytes() -> None:
     assert decode_key("\x7f") == "DEL"  # backspace
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
-def test_windows_extended_key_pair_is_consumed() -> None:
-    """getwch NUL/E0 prefix + scan code: the pair is consumed, unresolved.
+class _FakeMsvcrt:
+    def __init__(self, chars: list[str]) -> None:
+        self._chars = chars
 
-    Pins the msvcrt extended-key handling (the reason C-@ is
-    undeliverable on the Windows console). Only runs where the class has
-    the Windows method (win32); elsewhere the method doesn't exist.
-    """
+    def getwch(self) -> str:
+        return self._chars.pop(0)
+
+
+def _windows_read(chars: list[str], count: int = 1) -> list[str]:
+    """Drive ``_read_key_windows`` over a scripted getwch stream."""
     from drei.terminal import SystemTerminalPort
-
-    class _FakeMsvcrt:
-        def __init__(self, chars: list[str]) -> None:
-            self._chars = chars
-
-        def getwch(self) -> str:
-            return self._chars.pop(0)
 
     # getattr: the method only exists on win32 (class-body platform guard);
     # direct attribute access fails mypy --platform linux in CI.
     read = getattr(SystemTerminalPort, "_read_key_windows")  # noqa: B009
-    fake = _FakeMsvcrt(["\x00", "H", "a"])  # prefix, scan, then plain 'a'
-    with patch.dict(sys.modules, {"msvcrt": fake}):
-        assert read(None) == "\x00"  # pair consumed
-        assert fake._chars == ["a"]  # scan code was eaten
-        assert read(None) == "a"  # plain char passes through
+    with patch.dict(sys.modules, {"msvcrt": _FakeMsvcrt(chars)}):
+        return [read(None) for _ in range(count)]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
+def test_windows_extended_key_pair_yields_a_symbolic_key() -> None:
+    """getwch NUL/E0 prefix + scan code → one symbolic navigation key.
+
+    The pair used to collapse to ``"\\x00"``, which ``decode_key`` maps to
+    C-@ → SetMark: every arrow press silently moved the mark (finding 4).
+    Only runs where the class has the Windows method (win32).
+    """
+    assert _windows_read(["\x00", "H", "a"], 2) == ["<up>", "a"]
+    assert _windows_read(["\xe0", "P"]) == ["<down>"]
+    assert _windows_read(["\xe0", "M"]) == ["<right>"]
+    assert _windows_read(["\xe0", "K"]) == ["<left>"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
+def test_windows_unmapped_extended_key_yields_a_generic_key() -> None:
+    assert _windows_read(["\xe0", "S"]) == ["<ext:S>"]  # Delete
+    assert _windows_read(["\x00", ";"]) == ["<ext:;>"]  # F1
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
 def test_windows_plain_key_passes_through() -> None:
-    from drei.terminal import SystemTerminalPort
+    assert _windows_read(["\x06"]) == ["\x06"]  # control byte untouched
+    assert _windows_read(["z"]) == ["z"]
 
-    class _FakeMsvcrt:
-        def __init__(self, chars: list[str]) -> None:
-            self._chars = chars
 
-        def getwch(self) -> str:
-            return self._chars.pop(0)
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows console input path")
+def test_windows_extended_key_resolves_to_no_command() -> None:
+    """Command-level effect, not byte identity: an extended key is inert.
 
-    read = getattr(SystemTerminalPort, "_read_key_windows")  # noqa: B009
-    fake = _FakeMsvcrt(["\xe0", "S", "\x06"])
-    with patch.dict(sys.modules, {"msvcrt": fake}):
-        assert read(None) == "\x00"  # E0 pair also consumed
-        assert read(None) == "\x06"  # control byte untouched
+    Before the fix this exact chain ran SetMark, so a later C-w killed
+    point↔stale-mark. The whole delivery path is exercised: msvcrt pair →
+    assembler → keymap.
+    """
+    from drei.keys import UnresolvedKey, resolve
+    from drei.terminal import KeyAssembler
+
+    (key,) = _windows_read(["\x00", "H"])
+    _, keys = KeyAssembler().feed(key)
+    assert keys == ("<up>",)
+    assert resolve(None, keys[0]) == UnresolvedKey("<up>")
 
 
 def test_decode_key_maps_kill_and_yank() -> None:
@@ -442,38 +511,86 @@ def test_decode_key_maps_kill_and_yank() -> None:
     assert decode_key("\x19") == "C-y"
 
 
-def test_assemble_meta_esc_letter_yields_meta_chord() -> None:
-    from drei.terminal import assemble_meta
+def _feed(chars: str) -> tuple[str, ...]:
+    """Feed characters through a fresh assembler; return every key emitted."""
+    from drei.terminal import KeyAssembler
 
-    pending, key = assemble_meta(False, "\x1b")
-    assert pending and key is None
-    pending, key = assemble_meta(pending, "y")
-    assert not pending
-    assert key == "M-y"
-
-
-def test_assemble_meta_esc_non_letter_reports_bare_esc() -> None:
-    from drei.terminal import assemble_meta
-
-    pending, key = assemble_meta(True, "1")
-    assert not pending
-    assert key == "\x1b"  # caller reprocesses the "1" with no pending state
+    assembler = KeyAssembler()
+    keys: list[str] = []
+    for char in chars:
+        assembler, emitted = assembler.feed(char)
+        keys.extend(emitted)
+    return tuple(keys)
 
 
-def test_assemble_meta_esc_control_byte_reports_bare_esc() -> None:
-    from drei.terminal import assemble_meta
+def test_assembler_esc_letter_yields_meta_chord() -> None:
+    from drei.terminal import KeyAssembler
 
-    pending, key = assemble_meta(True, "\x07")  # ESC C-g: bare ESC, C-g reprocessed
-    assert not pending
-    assert key == "\x1b"
+    assembler, keys = KeyAssembler().feed("\x1b")
+    assert keys == ()  # mid-chord: nothing to dispatch yet
+    assembler, keys = assembler.feed("y")
+    assert keys == ("M-y",)
+    assert assembler == KeyAssembler()  # back to the empty state
 
 
-def test_assemble_meta_plain_byte_decodes_normally() -> None:
-    from drei.terminal import assemble_meta
+def test_assembler_esc_non_letter_emits_bare_esc_then_the_key() -> None:
+    # ESC then "1": the bare ESC is unresolved, the "1" resolves on its own.
+    assert _feed("\x1b1") == ("\x1b", "1")
 
-    pending, key = assemble_meta(False, "\x0b")
-    assert not pending
-    assert key == "C-k"
+
+def test_assembler_esc_control_byte_emits_bare_esc_then_the_key() -> None:
+    assert _feed("\x1b\x07") == ("\x1b", "C-g")  # ESC C-g: C-g still quits
+
+
+def test_assembler_esc_esc_emits_one_bare_esc_and_stays_pending() -> None:
+    from drei.terminal import KeyAssembler
+
+    assembler, keys = KeyAssembler().feed("\x1b")
+    assembler, keys = assembler.feed("\x1b")
+    assert keys == ("\x1b",)  # the first ESC; the second starts a new chord
+    assembler, keys = assembler.feed("y")
+    assert keys == ("M-y",)
+
+
+def test_assembler_plain_byte_decodes_normally() -> None:
+    assert _feed("\x0b") == ("C-k",)
+
+
+def test_assembler_csi_arrows_yield_one_symbolic_key_each() -> None:
+    # The whole ESC [ X sequence collapses to a single key: no "[" or letter
+    # ever reaches the editor (finding 4 — arrows used to type garbage).
+    assert _feed("\x1b[A") == ("<up>",)
+    assert _feed("\x1b[B") == ("<down>",)
+    assert _feed("\x1b[C") == ("<right>",)
+    assert _feed("\x1b[D") == ("<left>",)
+
+
+def test_assembler_ss3_arrows_yield_the_same_symbolic_keys() -> None:
+    # Application-cursor mode sends ESC O A rather than ESC [ A.
+    assert _feed("\x1bOA") == ("<up>",)
+    assert _feed("\x1bOD") == ("<left>",)
+
+
+def test_assembler_csi_with_parameters_yields_a_generic_key() -> None:
+    assert _feed("\x1b[3~") == ("<csi:3~>",)  # Delete
+    assert _feed("\x1b[1;5A") == ("<csi:1;5A>",)  # C-<up>
+    assert _feed("\x1b[H") == ("<csi:H>",)  # Home (no parameters, not an arrow)
+
+
+def test_assembler_ss3_non_arrow_yields_a_generic_key() -> None:
+    assert _feed("\x1bOP") == ("<ss3:P>",)  # F1
+
+
+def test_assembler_multiple_sequences_in_a_row() -> None:
+    assert _feed("\x1b[A\x1b[Ba") == ("<up>", "<down>", "a")
+
+
+def test_assembler_unterminated_sequence_emits_a_marker_then_restarts() -> None:
+    # A byte that cannot appear in a CSI sequence abandons it: one unresolved
+    # key for the partial sequence, then the byte resolves from scratch.
+    assert _feed("\x1b[\x07") == ("<csi:unterminated>", "C-g")
+    assert _feed("\x1bO\x07") == ("<ss3:unterminated>", "C-g")
+    assert _feed("\x1b[1\x1b[A") == ("<csi:unterminated>", "<up>")
 
 
 def test_system_port_write_and_flush(capsys: pytest.CaptureFixture[str]) -> None:

@@ -386,14 +386,41 @@ focused pass; full gates (`AGENTS.md` §Validation) at the end.
    a deliberate platform-independence deviation). Full gates green (542
    passed / 17 skipped, coverage 100%, ruff, mypy, pre-commit, pre-push,
    build).
-4. **Cluster B — terminal input (4).**
-   Replace `pending_esc` boolean with a pure key-assembler state machine:
-   ESC+letter → `M-x` (unchanged); `ESC [`/`ESC O` consumed through final byte
-   0x40-0x7E → one symbolic key (`<up>`/`<down>`/`<right>`/`<left>` for
-   A/B/C/D, generic `<csi:…>` otherwise), unresolved in the keymap (registered
-   deviation). Windows `_read_key_windows` reads the scan code → same symbolic
-   names (H/P/M/K) or `<ext:…>`, never `"\x00"`. Upgrade tests from byte
-   identity to command-level effect.
+4. **Cluster B — terminal input (4). DONE 2026-07-25.**
+   `assemble_meta`/`pending_esc` replaced by `KeyAssembler`, a frozen
+   two-field state machine (`state`, `params`) whose `feed(char)` returns the
+   next state plus the keys that character completed — zero mid-sequence, one
+   normally, two when the character proves the escape prefix was not a
+   sequence (abandoned prefix, then the character resolved from scratch). The
+   `run_editor` loop lost its `pending_byte` reprocessing hatch: it feeds each
+   character and dispatches whatever comes back, so quiescence marking stayed
+   as it was (no marker mid-sequence, one per dispatched key). ESC+letter →
+   `M-<letter>` unchanged; `ESC [` / `ESC O` collect parameter and
+   intermediate bytes (0x20-0x3F) through a final byte (0x40-0x7E) into one
+   symbolic key: `<up>`/`<down>`/`<right>`/`<left>` for a bare A/B/C/D, else
+   `<csi:1;5A>` / `<ss3:P>` (the plan said "generic `<csi:…>`"; the two
+   prefixes get distinct tags so an unresolved key names its own origin). A
+   byte that cannot appear in a sequence emits `<csi:unterminated>` /
+   `<ss3:unterminated>` rather than replaying the buffered bytes as input, and
+   the offending byte restarts from the empty state. Windows
+   `_read_key_windows` maps the scan code (H/P/M/K → the same arrow names,
+   else `<ext:…>`) and never returns `"\x00"`; C-@ stays undeliverable there.
+   Every navigation key is unresolved in the keymap by design (registry
+   deviation — `next-line`/`previous-line` do not exist yet).
+   Tests moved from byte identity to command-level effect: the arrow keys are
+   proven inert through the `run_editor` byte loop (buffer text and minibuffer
+   input), through the keymap (`resolve("<up>") == UnresolvedKey`), and — new
+   TermVerify scenario `test_shipped_editor_navigation_keys_are_inert` — in
+   the shipped editor over ConPTY, whose second arm (arrow, `C-b C-b`, `C-w`)
+   exists because a stale mark is invisible in a frame; it was observed
+   failing against the pre-fix shim (the shipped editor killed "hi"). The old
+   pins `test_windows_extended_key_pair_is_consumed` (asserted `== "\x00"`)
+   and the four `assemble_meta` tests were superseded. Registry gained
+   "Navigation and function keys", "`M-O` (ESC O)" and "Bare `ESC`
+   disambiguation" rows (no `escape-time`: the input path stays clock-free)
+   and the Windows-console row records the fixed mechanism. Full gates green
+   (556 passed / 17 skipped, coverage 100%, ruff, mypy, pre-commit, pre-push,
+   build).
 5. **Cluster E — docs/process (12-17, 30, 28).**
    Plan statuses 0008-0013 → merged + PR numbers; plan 0013 D2 amendment to
    the shipped fail-closed key; README caught up (thirteen slices + ACP
@@ -401,7 +428,8 @@ focused pass; full gates (`AGENTS.md` §Validation) at the end.
    emacs-parity.md repairs (rows 94-95, A.2 scenarios, new rows from clusters
    A/B/D, docker prose); sync-check fails loudly (exit 1) without usable `gh`
    (env override for offline); verdict docstring on first differential test;
-   snapshot/ratchet prose; fold-advance comment (28).
+   snapshot/ratchet prose; fold-advance comment (28); plans 0004/0005 still
+   point at `assemble_meta` (replaced by `KeyAssembler` in cluster B).
 6. **Deferred bookkeeping.** Create `docs/technical-debt.md` (entries for 5,
    11, 18-23, 29 with date, location, deferral reason, suggested approach) +
    `TODO: [tech-debt]` comments at each code location.

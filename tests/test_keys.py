@@ -91,3 +91,14 @@ def test_pending_does_not_leak_into_normal_resolution() -> None:
     # completed prefix behaves like a fresh resolve.
     resolve("C-x", "C-s")
     assert resolve(None, "a") == InsertText("a")
+
+
+def test_navigation_keys_are_unresolved_not_self_inserting() -> None:
+    """Arrows and other escape-sequence keys must never insert text.
+
+    Registered deviation from Emacs (which binds them): Drei leaves them
+    unbound for now — but they must resolve as unresolved keys rather than
+    falling through to InsertText (finding 4).
+    """
+    for key in ("<up>", "<down>", "<right>", "<left>", "<csi:3~>", "<ext:S>"):
+        assert resolve(None, key) == UnresolvedKey(key)

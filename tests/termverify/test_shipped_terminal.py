@@ -424,6 +424,51 @@ def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_navigation_keys_are_inert(tmp_path: Path) -> None:
+    """Arrow keys must not touch the buffer in the shipped editor.
+
+    Regression evidence for adversarial-review finding 4: the arrow keys
+    used to reach the editor as their raw bytes ("[", "A", ... on POSIX;
+    NUL -> C-@ -> set-mark on the Windows console) and typed garbage into
+    the buffer. They are deliberately unbound for now (registry
+    deviation), so the frame must be identical before and after.
+    """
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-navigation-keys", _configuration())
+        assert type(started) is Started, started
+
+        typed_lines: tuple[str, ...] = ()
+        for char in "hi":
+            typed = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(typed) is EpochCompleted, typed
+            assert typed.observation is not None
+            typed_lines = _frame_lines(typed.observation)
+        assert any(line.startswith("hi") for line in typed_lines), typed_lines
+
+        for base in ("ArrowUp", "ArrowDown", "ArrowRight", "ArrowLeft", "Home"):
+            pressed = adapter.dispatch(KeyInput(ManualTime(0), (base,)))
+            assert type(pressed) is EpochCompleted, pressed
+            assert pressed.observation is not None
+            assert _frame_lines(pressed.observation) == typed_lines, base
+
+        # The mark is untouched too — the Windows console arm is invisible in
+        # the frame otherwise (a stale mark renders nothing). Pre-fix the
+        # arrows ran set-mark at point 2, so C-b C-b C-w killed "hi"; with no
+        # mark, kill-region is a silent no-op and the text survives.
+        for chord in (("Control", "b"), ("Control", "b"), ("Control", "w")):
+            stepped = adapter.dispatch(KeyInput(ManualTime(0), chord))
+            assert type(stepped) is EpochCompleted, stepped
+        assert stepped.observation is not None
+        survived_lines = _frame_lines(stepped.observation)
+        assert any(line.startswith("hi") for line in survived_lines), survived_lines
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_stop_is_clean(tmp_path: Path) -> None:
     """A TermVerify stop after readiness also terminates the run cleanly."""
     adapter = _adapter(tmp_path)
