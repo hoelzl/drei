@@ -12,11 +12,50 @@ from typing import Protocol
 
 
 class FilePort(Protocol):
-    """Effect port for file reads (startup) and writes (save)."""
+    """Effect port for file reads (startup) and writes (save).
+
+    The port translates nothing: ``read`` returns the file's characters as
+    stored (CRLF stays CRLF) and ``write`` stores exactly the characters it
+    is given. Line-ending policy belongs to the session, which decides what
+    a buffer holds and what a save writes back.
+    """
 
     def read(self, path: str) -> str: ...
 
     def write(self, path: str, text: str) -> None: ...
+
+
+LF = "\n"
+CRLF = "\r\n"
+
+
+def detect_line_ending(text: str) -> str:
+    """The line ending a save should write back for this file text.
+
+    ``CRLF`` only when *every* line separator in the text is CRLF; ``LF``
+    otherwise — including for text with mixed endings, where there is no
+    single convention to preserve and the CRs stay literal buffer characters
+    (Emacs shows them as ``^M``), and for a lone CR, which is not treated as
+    a line ending here.
+    """
+    if CRLF not in text:
+        return LF
+    rest = text.replace(CRLF, "")
+    return LF if "\r" in rest or "\n" in rest else CRLF
+
+
+def to_buffer_text(file_text: str, eol: str) -> str:
+    """File text as the buffer holds it: LF-separated when the file is
+    uniformly CRLF, untouched otherwise."""
+    return file_text.replace(CRLF, LF) if eol == CRLF else file_text
+
+
+def to_file_text(buffer_text: str, eol: str) -> str:
+    """Buffer text as it is written back, restoring the file's endings."""
+    if eol != CRLF:
+        return buffer_text
+    # Collapse first so a CR the user typed before a newline cannot double up.
+    return buffer_text.replace(CRLF, LF).replace(LF, CRLF)
 
 
 def normalize_os_error(error: OSError) -> str:
@@ -34,12 +73,19 @@ def normalize_os_error(error: OSError) -> str:
 
 
 class SystemFilePort:
-    """Production file port using the real filesystem (utf-8, as-is)."""
+    """Production file port using the real filesystem (utf-8, as-is).
+
+    ``newline=""`` on both sides makes "as-is" true: without it the read
+    applies universal-newline translation and the write turns every ``\\n``
+    into ``os.linesep``, so saving an unedited file rewrote its line endings
+    (review 0001 finding 1). Line-ending *policy* is the session's — the port
+    only moves bytes.
+    """
 
     def read(self, path: str) -> str:  # pragma: no cover - exercised via CLI/TermVerify
-        with open(path, encoding="utf-8") as handle:
+        with open(path, encoding="utf-8", newline="") as handle:
             return handle.read()
 
     def write(self, path: str, text: str) -> None:  # pragma: no cover
-        with open(path, "w", encoding="utf-8") as handle:
+        with open(path, "w", encoding="utf-8", newline="") as handle:
             handle.write(text)

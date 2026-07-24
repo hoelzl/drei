@@ -1,9 +1,9 @@
 # Adversarial review 0001 — full project (2026-07-24)
 
-**Status:** Clusters C (findings 8, 7, 24, 27) and D (findings 6, 9, 25, 10,
-26) **implemented and gated** 2026-07-24 (C committed as `5d1b105`; D
-uncommitted at time of writing); clusters A, B, E and the deferred-item
-bookkeeping still pending.
+**Status:** Clusters C (findings 8, 7, 24, 27), D (findings 6, 9, 25, 10, 26)
+and A (findings 2, 3, 1) **implemented and gated** — C as `5d1b105`, D as
+`7bf0a68`, A on 2026-07-25; clusters B, E and the deferred-item bookkeeping
+still pending.
 **Baseline:** commit `cabb31a` (A.2 multiple buffers/windows), working tree clean,
 full suite green (508 passed, 17 skipped).
 **Method:** three independent adversarial reviewers — (1) implementation audit
@@ -357,14 +357,35 @@ focused pass; full gates (`AGENTS.md` §Validation) at the end.
    "no-file")` (the old event hardcoded the name "scratch" besides the
    misleading token). Strict TDD throughout; full gates green (524 passed /
    17 skipped, ruff, mypy, pre-commit, pre-push, build).
-3. **Cluster A — editor data integrity (2, 3, 1).**
-   `session.py:718` sets `undo_descending` only when the Undo emitted events;
-   per-buffer `saved_text` (set at open/creation and on `BufferSaved`) and
-   after undo/redo `modified = text != saved_text`; EOL preservation —
-   `SystemFilePort` `newline=""` both directions, session detects uniform-CRLF
-   at open, stores per-buffer EOL, normalizes buffer to LF, `_save` translates
-   back; mixed-EOL passes through untouched (Emacs `^M` behavior); new
-   registry rows. Risk: `FilePort` contract change touches CLI + fakes.
+3. **Cluster A — editor data integrity (2, 3, 1). DONE 2026-07-25.**
+   An `Undo` sets `undo_descending` only when it emitted events, so an
+   exhausted history keeps no-opping instead of flipping into redo (new pin
+   `test_exhausted_undo_does_not_flip_into_redo`). `_UndoGroup` lost its
+   `modified_before`/`modified_after` fields (`modified_after` was always
+   `True`): undo/redo now DERIVE the flag from a per-buffer `saved_text`
+   recorded at visit and on `BufferSaved` — clean exactly when the resulting
+   text equals the last-saved text, and unknown (`None` → always modified)
+   for a buffer handed to the session already modified. The old pin
+   `test_undo_restores_modified_from_group` was superseded by four focused
+   tests plus the property `test_clean_buffer_always_matches_disk`
+   (modified=False ⇒ buffer text == what the port holds; at the file's
+   50-example profile the pre-fix code passes it, so the test raises
+   `max_examples` to 300 — verified failing against a simulated pre-fix
+   `_save`). EOL: `SystemFilePort` uses `newline=""` in both directions and
+   the `FilePort` protocol documents "translates nothing"; one `_visit`
+   helper serves both entry points (startup buffer and find-file), detecting
+   uniform CRLF, storing it per buffer, and holding LF in the buffer, with
+   point/mark shifted for the collapsed pairs; `_save` translates back.
+   Mixed endings and lone CRs pass through verbatim and render as `^M`
+   (`tests/test_line_endings.py`, 13 tests including real-filesystem
+   round-trips). `BufferOpened.text_len` now counts buffer characters, not
+   file characters. Parity registry updated where this change falsified it:
+   the modified-flag paragraph, "Undo restoring mark/modified", "Nothing to
+   undo", plus a new "File line endings" row (parity on visited files by
+   design, not yet differential-pinned; new files are LF on every platform —
+   a deliberate platform-independence deviation). Full gates green (542
+   passed / 17 skipped, coverage 100%, ruff, mypy, pre-commit, pre-push,
+   build).
 4. **Cluster B — terminal input (4).**
    Replace `pending_esc` boolean with a pure key-assembler state machine:
    ESC+letter → `M-x` (unchanged); `ESC [`/`ESC O` consumed through final byte

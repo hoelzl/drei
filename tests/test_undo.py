@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from conftest import FakeFilePort
+
 from drei.commands import (
     BackwardChar,
     ForwardChar,
     InsertText,
     KillLine,
     KillRegion,
+    SaveBuffer,
     SetMark,
     TextUndone,
     Undo,
     Yank,
 )
+from drei.files import FilePort
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
 
@@ -148,6 +152,20 @@ def test_noop_command_does_not_break_descent() -> None:
     assert session2.buffer.current.text == ""
 
 
+def test_exhausted_undo_does_not_flip_into_redo() -> None:
+    """Review 0001 finding 2: an Undo that emitted nothing is a silent no-op
+    and must not break the descent. Before the fix a held C-/ oscillated the
+    buffer with period 3 (undo → no-op → redo → …) forever."""
+    session = _session()
+    session.dispatch(InsertText("a"))
+    session.dispatch(Undo())  # removes "a" — the only group
+    assert session.buffer.current.text == ""
+    for _ in range(6):
+        outcome = session.dispatch(Undo())
+        assert outcome.events == ()
+        assert session.buffer.current.text == ""
+
+
 def test_undo_stack_capacity() -> None:
     session = _session()
     for i in range(110):
@@ -159,25 +177,69 @@ def test_undo_stack_capacity() -> None:
     assert len(session.buffer.current.text) == 10  # first 10 remain
 
 
-def test_undo_restores_modified_from_group() -> None:
-    from conftest import FakeFilePort
+def _file_session(text: str = "hello", port: FilePort | None = None) -> EditorSession:
+    return EditorSession(
+        Buffer(
+            BufferId("u.txt"),
+            BufferValue(text=text, point=len(text), file_path="/tmp/u.txt"),
+        ),
+        file_port=port if port is not None else FakeFilePort(),
+    )
 
-    from drei.commands import SaveBuffer
 
+def _current(session: EditorSession) -> BufferValue:
+    """Read the live value through a call: repeated asserts on the same
+    attribute chain would otherwise narrow it to a literal for mypy."""
+    return session.buffer.current
+
+
+def test_undo_to_the_saved_text_clears_modified() -> None:
+    session = _file_session()
+    session.dispatch(InsertText("!"))
+    assert _current(session).modified
+    session.dispatch(SaveBuffer())
+    assert not _current(session).modified
+    session.dispatch(InsertText("?"))
+    assert _current(session).modified
+    session.dispatch(Undo())  # undo "?" → back to the SAVED state
+    assert _current(session).text == "hello!"
+    assert not _current(session).modified  # matches what was written
+
+
+def test_undo_past_the_save_keeps_the_buffer_modified() -> None:
+    """Review 0001 finding 3: undoing *past* a save leaves the buffer
+    different from what is on disk, so the modeline must not report clean."""
+    port = FakeFilePort()
+    session = _file_session(port=port)
+    session.dispatch(InsertText("!"))
+    session.dispatch(SaveBuffer())
+    assert port.files["/tmp/u.txt"] == "hello!"
+    session.dispatch(Undo())  # back past the save point
+    assert _current(session).text == "hello"  # disk still holds "hello!"
+    assert _current(session).modified
+
+
+def test_redo_forward_to_the_saved_text_clears_modified() -> None:
+    session = _file_session()
+    session.dispatch(InsertText("!"))
+    session.dispatch(SaveBuffer())
+    session.dispatch(Undo())  # "hello", modified
+    session.dispatch(BackwardChar())  # breaks the descent → next Undo redoes
+    session.dispatch(Undo())
+    assert _current(session).text == "hello!"
+    assert not _current(session).modified
+
+
+def test_undo_in_a_never_saved_buffer_cannot_report_clean() -> None:
+    """A buffer that arrived already modified has no known on-disk text, so
+    no undo can prove it matches the file — it stays modified until a save."""
     session = EditorSession(
         Buffer(
-            BufferId("scratch"),
-            BufferValue(text="hello", point=5, file_path="/tmp/u.txt"),
-        ),
-        file_port=FakeFilePort(),
+            BufferId("u.txt"),
+            BufferValue(text="hi", point=2, file_path="/tmp/u.txt", modified=True),
+        )
     )
     session.dispatch(InsertText("!"))
-    assert session.buffer.current.modified
-    session.dispatch(SaveBuffer())
-    saved_state = session.buffer.current
-    assert not saved_state.modified
-    session.dispatch(InsertText("?"))
-    assert session.buffer.current.modified
-    session.dispatch(Undo())  # undo "?" → back to the SAVED state
-    assert session.buffer.current.text == "hello!"
-    assert not session.buffer.current.modified  # restored from the group
+    session.dispatch(Undo())
+    assert _current(session).text == "hi"
+    assert _current(session).modified

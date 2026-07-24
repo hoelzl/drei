@@ -39,9 +39,13 @@ intentional, and every normalization is explicit.
 Drei's modified-flag rule is deliberately narrower than Emacs's: any
 text-changing event (`TextInserted`, `TextKilled`, `TextYanked`,
 `TextYankPopped`, `RegionKilled`) sets modified; a successful save
-clears it; `TextUndone`/`TextRedone` RESTORE the flag from their undo
-group (undoing back to a saved state clears modified, matching Emacs's
-`(t . 0)` undo entries). `SetMark`, `RegionCopied`, and `MarkExchanged`
+clears it; `TextUndone`/`TextRedone` DERIVE the flag by comparing the
+resulting text with the buffer's last-saved text (undoing back to a
+saved state clears modified — Emacs reaches the same result through its
+`(t . TIMESTAMP)` undo entries — and undoing *past* a save reports
+modified, because the buffer no longer matches the file). A buffer whose
+file text was never observed stays modified until a save.
+`SetMark`, `RegionCopied`, and `MarkExchanged`
 never set it (probed: `set-mark` and `copy-region-as-kill` leave
 `buffer-modified-p` nil on a clean buffer). Emacs also sets the flag on
 some non-text operations; if a future scenario observes drift there,
@@ -63,12 +67,13 @@ record it as an intentional deviation with rationale.
 | Mark ring (`C-u C-@`) | absent (single mark, re-set replaces) | ring of 16 marks per buffer | deferred; single mark covers the region commands |
 | `C-@`/`C-SPC` on the Windows console | undeliverable — msvcrt treats NUL as an extended-key prefix and swallows the following byte (verified live: NUL+`Z` consumes `Z`); commands reachable via harness/POSIX | real Windows Emacs uses different input plumbing (w32 events) | platform console-API constraint, not semantics; TermVerify scenario is a documented skip, byte-loop proof is in-process |
 | Undo grouping | one group per command | groups are command-loop driven; batch `undo` amalgamates across explicit `undo-boundary` calls (probed) | batch-unverifiable; one-group-per-command is the interactive equivalent |
-| Nothing to undo | silent no-op, no event | signals "No further undo information" (probed in batch) | same no-echo-error rationale as the empty kill |
+| Nothing to undo | silent no-op, no event — and the descent direction is left untouched, so a held `C-/` on an exhausted history keeps no-opping (review 0001 finding 2: clearing the direction here sent the next `C-/` down the redo branch and oscillated the buffer forever) | signals "No further undo information" (probed in batch); the failed command does not turn the next undo into a redo | same no-echo-error rationale as the empty kill; parity on the direction |
 | Fresh edit after undo | truncates the redo tail (later undos cannot resurrect) | keeps redo reachable — the fresh edit flips direction and the next undo REDOES the buried undo (probed: insert, undo, insert, undo → text restored, MOD t) | deliberate simplification; stock redo reachability is a follow-up slice |
 | Descent gating | any event-emitting non-undo command breaks the descent; silent no-ops (empty-ring yank, no-mark kill-region) do not | any command flips direction (`last-command` gating), including silent no-ops | batch-unverifiable interactive behavior; event-emitting gating keeps the walk derivable from the transcript |
 | Undo capacity | fixed 100 groups, oldest dropped silently | `undo-limit`/`undo-strong-limit` (80k/120k bytes) | configuration is deferred; mid-descent eviction shortens the deepest history only |
 | Undo of the kill ring | ring untouched by undo | ring untouched (global, not buffer state) | parity — no deviation |
-| Undo restoring mark/modified | restored from the group | markers and `(t . 0)` modified-flag entries are restored (probed: undo to clean state → MOD nil) | parity |
+| Undo restoring mark/modified | mark is restored from the group; modified is DERIVED — clean exactly when the resulting text equals the buffer's last-saved text (pinned by `test_undo_to_the_saved_text_clears_modified`, `test_undo_past_the_save_keeps_the_buffer_modified`, `test_redo_forward_to_the_saved_text_clears_modified`) | markers and `(t . TIMESTAMP)` modified-flag entries are restored (probed: undo to clean state → MOD nil); Emacs counts undo-list position, not text | parity on the observable in every save-boundary case; deviation in mechanism: a buffer edited back to the saved text by ordinary commands and then undone reads clean in Drei where Emacs still reports modified. Text comparison was chosen because it makes "modified nil" mean "matches the file" (review 0001 finding 3: replaying the flag from the group reported a clean buffer after undoing past a save) |
+| File line endings | detected per buffer at visit: a uniformly-CRLF file is held LF-separated in the buffer and written back as CRLF; anything else (LF, mixed, lone CR) is held and written verbatim, with stray CRs displayed as `^M`; a buffer with no file text to imitate writes LF on every platform (pinned by `tests/test_line_endings.py`) | `undecided` EOL detection: uniform CRLF decodes as `-dos` and re-encodes as CRLF; a lone LF anywhere decodes as `-unix`, leaving CRs in the buffer as `^M`; new files follow `buffer-file-coding-system`, which is host-dependent | parity on visited files, by design rather than by probe — not differential-pinned yet (scenario deferred). Deviation on new files: Drei is platform-independent by rule (AGENTS.md), Emacs is not. The port itself translates nothing (review 0001 finding 1: text-mode newline handling rewrote every saved file's endings) |
 | find-file on a missing file or missing directory | empty unmodified buffer, point at start, `BufferOpened` — no error | `New file` in the echo area; empty buffer, MOD nil, no error (probed) | parity on buffer state; the echo message differs (Drei has no echo-error/message mechanism yet) |
 | find-file on a directory path | `OpenFailed` (read fails with an OS error) | opens dired | dired is out of scope; recorded until a directory mode exists |
 | find-file with an already-open file | selects the existing buffer (create-or-select on `file_path`, no `<2>` duplicate) — **resolved by A.2** (differential `test_emacs_differential_find_file_reuses_buffer_name`) | revisits the same buffer | parity |

@@ -301,6 +301,59 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
         assert session.buffer.current.modified is expect_modified
 
 
+@st.composite
+def _single_buffer_history(draw: st.DrawFn) -> list[object]:
+    """Editing commands only: no minibuffer, so one buffer visits one file
+    for the whole run and "what is on disk" stays well defined."""
+    size = draw(st.integers(min_value=0, max_value=20))
+    return [
+        draw(
+            st.one_of(
+                st.builds(InsertText, st.text(min_size=0, max_size=5)),
+                st.just(ForwardChar()),
+                st.just(BackwardChar()),
+                st.just(SaveBuffer()),
+                st.just(KillLine()),
+                st.just(Yank()),
+                st.just(YankPop()),
+                st.just(SetMark()),
+                st.just(KillRegion()),
+                st.just(CopyRegionAsKill()),
+                st.just(ExchangePointAndMark()),
+                st.just(Undo()),
+            )
+        )
+        for _ in range(size)
+    ]
+
+
+@settings(max_examples=300)
+@given(_single_buffer_history())
+def test_clean_buffer_always_matches_disk(history: list[object]) -> None:
+    """Review 0001 finding 3: a buffer reporting unmodified must equal what
+    the file holds — the invariant the old undo path broke by replaying the
+    flag from the undo group (undoing past a save reported clean).
+
+    The file's content before the first save is the text the session opened
+    with (``""``). Agent deliveries are deliberately outside this history:
+    ``InsertAgentText`` appends without setting the flag, a known hazard
+    deferred with finding 5.
+
+    ``max_examples`` is raised above the file profile because the defect
+    needs a three-command coincidence (edit, save, undo): at 50 examples the
+    pre-fix code passes this property, at 1000 it falls in well under a
+    second.
+    """
+    port = FakeFilePort()
+    session = _session(port)
+    for command in history:
+        session.dispatch(command)  # type: ignore[arg-type]
+        current = session.buffer.current
+        if not current.modified:
+            assert current.file_path is not None
+            assert port.files.get(current.file_path, "") == current.text
+
+
 @given(command_history())
 def test_save_writes_current_text(history: list[object]) -> None:
     port = FakeFilePort()

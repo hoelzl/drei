@@ -72,7 +72,15 @@ from drei.commands import (
     Yank,
     YankPop,
 )
-from drei.files import FilePort, normalize_os_error
+from drei.files import (
+    CRLF,
+    LF,
+    FilePort,
+    detect_line_ending,
+    normalize_os_error,
+    to_buffer_text,
+    to_file_text,
+)
 from drei.model import Buffer, BufferId, BufferValue
 from drei.process import (
     ProcessPort,
@@ -160,8 +168,6 @@ def _make_group(
                     before + len(text),
                     current.mark,
                     _adjust_mark_insert(current.mark, before, len(text)),
-                    current.modified,
-                    True,
                 )
             case TextKilled(text=killed, before=before, after=after):
                 return _UndoGroup(
@@ -172,8 +178,6 @@ def _make_group(
                     current.point,
                     current.mark,
                     _adjust_mark_delete(current.mark, before, after),
-                    current.modified,
-                    True,
                 )
             case RegionKilled(text=killed, before=lo):
                 return _UndoGroup(
@@ -184,8 +188,6 @@ def _make_group(
                     lo,
                     current.mark,
                     None,
-                    current.modified,
-                    True,
                 )
             case TextYanked(text=text, before=before):
                 return _UndoGroup(
@@ -196,8 +198,6 @@ def _make_group(
                     before + len(text),
                     current.mark,
                     _adjust_mark_insert(current.mark, before, len(text)),
-                    current.modified,
-                    True,
                 )
             case TextYankPopped(old_text=old, new_text=new, before=start, after=after):
                 return _UndoGroup(
@@ -212,8 +212,6 @@ def _make_group(
                         start,
                         len(new),
                     ),
-                    current.modified,
-                    True,
                 )
             case _:
                 continue
@@ -248,6 +246,32 @@ def _adjust_mark_delete(mark: int | None, start: int, end: int) -> int | None:
     return mark
 
 
+def _shift_index(file_text: str, index: int) -> int:
+    """Map an index in CRLF file text onto the LF-normalized buffer text."""
+    return index - file_text.count(CRLF, 0, index)
+
+
+def _visit(value: BufferValue) -> tuple[BufferValue, _BufferState]:
+    """Prepare a buffer value that carries file text, and its state.
+
+    One place decides what visiting a file means, for both entry points (the
+    startup buffer and find-file): remember the file's line ending, hold the
+    text LF-separated in the buffer, and record the text as the clean point
+    unless the value arrived already modified — nothing then proves what the
+    file holds (review 0001 findings 1 and 3).
+    """
+    eol = detect_line_ending(value.text)
+    text = to_buffer_text(value.text, eol)
+    if text != value.text:
+        value = replace(
+            value,
+            text=text,
+            point=_shift_index(value.text, value.point),
+            mark=None if value.mark is None else _shift_index(value.text, value.mark),
+        )
+    return value, _BufferState(None if value.modified else value.text, eol)
+
+
 KILL_RING_CAPACITY = 60
 UNDO_CAPACITY = 100
 # A window needs a modeline row plus at least two text rows (plan 0012 D4).
@@ -266,8 +290,6 @@ class _UndoGroup:
     point_after: int
     mark_before: int | None
     mark_after: int | None
-    modified_before: bool
-    modified_after: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,10 +332,11 @@ class _BufferState:
     """Per-buffer editing state (design 0003 §A.2, plan 0012 D2).
 
     Everything Emacs scopes per buffer lives here: undo history/redo/descent,
-    yank-pop chaining, and the kill-append chain flag. Session-global state
-    (kill ring, transcript, process log, minibuffer, ports) stays on the
-    session — the ring is global in Emacs (kill in one buffer, yank in
-    another), pinned since slice 7.
+    yank-pop chaining, the kill-append chain flag, and the file-facing facts
+    (last-saved text, line ending). Session-global state (kill ring,
+    transcript, process log, minibuffer, ports) stays on the session — the
+    ring is global in Emacs (kill in one buffer, yank in another), pinned
+    since slice 7.
     """
 
     __slots__ = (
@@ -324,9 +347,18 @@ class _BufferState:
         "yank_cursor",
         "yank_bounds",
         "last_was_kill",
+        "saved_text",
+        "eol",
     )
 
-    def __init__(self) -> None:
+    def __init__(self, saved_text: str | None = None, eol: str = LF) -> None:
+        # Buffer text as last read from or written to the file, or None when
+        # that is unknown (a buffer handed to the session already modified).
+        # The undo path derives the modified flag from it (finding 3).
+        self.saved_text = saved_text
+        # Line ending this buffer's file uses; the save writes it back
+        # (finding 1). LF for buffers with no file text to imitate.
+        self.eol = eol
         self.undo_history: list[_UndoGroup] = []  # applied groups, newest last
         self.undo_redo: list[_UndoGroup] = []  # undone groups, newest last
         self.undo_descending = False  # last command was an undo
@@ -354,9 +386,13 @@ class EditorSession:
         process_port: ProcessPort | None = None,
         frame_size: tuple[int, int] | None = None,
     ) -> None:
+        # The startup buffer arrives holding raw file text (the CLI reads it
+        # through the port); visiting it is the same operation as find-file.
+        initial, initial_state = _visit(buffer.current)
+        buffer.replace(initial)
         self._buffers: dict[BufferId, Buffer] = {buffer.buffer_id: buffer}
         self._current_id: BufferId = buffer.buffer_id
-        self._states: dict[BufferId, _BufferState] = {buffer.buffer_id: _BufferState()}
+        self._states: dict[BufferId, _BufferState] = {buffer.buffer_id: initial_state}
         self._frame_size = frame_size
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
         self._processes: ProcessPort = (
@@ -730,7 +766,13 @@ class EditorSession:
         # breaks the descent (matches Emacs's last-command gating); a
         # silent no-op intervenes in nothing.
         if isinstance(command, Undo):
-            self._state.undo_descending = bool(events)
+            if events:
+                # Only an Undo that actually moved the buffer sets the
+                # direction. An exhausted Undo emits nothing, and a silent
+                # no-op intervenes in nothing — clearing the flag here would
+                # send the *next* Undo down the redo branch, so a held C-/
+                # oscillated the buffer forever (review 0001 finding 2).
+                self._state.undo_descending = True
         else:
             group = _make_group(command, current, events)
             if group is not None:
@@ -1047,9 +1089,10 @@ class EditorSession:
             candidate = f"{name}<{suffix}>"
             suffix += 1
         buffer_id = BufferId(candidate)
-        self._buffers[buffer_id] = Buffer(buffer_id, value)
-        self._states[buffer_id] = _BufferState()
-        events.append(BufferCreated(buffer_id.value, value.file_path))
+        visited, state = _visit(value)
+        self._buffers[buffer_id] = Buffer(buffer_id, visited)
+        self._states[buffer_id] = state
+        events.append(BufferCreated(buffer_id.value, visited.file_path))
         return buffer_id
 
     def _open_file(
@@ -1085,7 +1128,9 @@ class EditorSession:
             BufferValue(text=text, point=0, file_path=path, modified=False, mark=None),
             events,
         )
-        events.append(BufferOpened(path, len(text)))
+        # The length is the buffer's, not the file's: CRLF pairs are one
+        # newline in the buffer, and the transcript describes buffer state.
+        events.append(BufferOpened(path, len(self._buffers[buffer_id].current.text)))
         self._select_buffer(buffer_id, events)
         return current
 
@@ -1145,6 +1190,25 @@ class EditorSession:
             return self.dispatch(DeliverProcessOutput(argv, None, token))
         return self.dispatch(DeliverProcessOutput(argv, result, None))
 
+    def _modified_after_undo(self, text: str) -> bool:
+        """Whether the buffer differs from its file after an undo or redo.
+
+        The flag is a fact about the text, not a replay of the flag the
+        undone command happened to carry: undoing *past* a save leaves the
+        buffer different from disk and must report modified, and undoing or
+        redoing back *to* the saved text reports clean (review 0001 finding
+        3; Emacs tracks the same boundary through the undo list). A buffer
+        whose file contents were never observed stays modified.
+
+        Registered deviation from Emacs (`docs/knowledge/emacs-parity.md`,
+        "Undo restoring mark/modified"): Drei compares text, so a buffer
+        edited back to the saved text by ordinary commands and then undone
+        reads clean where Emacs — which counts undo-list position — would
+        still report modified.
+        """
+        saved = self._state.saved_text
+        return saved is None or text != saved
+
     def _undo(self, current: BufferValue, events: list[Event]) -> BufferValue:
         """Apply the newest group's inverse (descending) or, after any
         intervening event-emitting command, redo the newest undone group
@@ -1165,16 +1229,17 @@ class EditorSession:
                     group.mark_before,
                 )
             )
+            undone_text = (
+                current.text[: group.start]
+                + group.removed_text
+                + current.text[group.start + len(group.inserted_text) :]
+            )
             return replace(
                 current,
-                text=(
-                    current.text[: group.start]
-                    + group.removed_text
-                    + current.text[group.start + len(group.inserted_text) :]
-                ),
+                text=undone_text,
                 point=group.point_before,
                 mark=group.mark_before,
-                modified=group.modified_before,
+                modified=self._modified_after_undo(undone_text),
             )
         group = self._state.undo_redo.pop()
         self._state.undo_history.append(group)
@@ -1189,16 +1254,17 @@ class EditorSession:
                 group.mark_after,
             )
         )
+        redone_text = (
+            current.text[: group.start]
+            + group.inserted_text
+            + current.text[group.start + len(group.removed_text) :]
+        )
         return replace(
             current,
-            text=(
-                current.text[: group.start]
-                + group.inserted_text
-                + current.text[group.start + len(group.removed_text) :]
-            ),
+            text=redone_text,
             point=group.point_after,
             mark=group.mark_after,
-            modified=group.modified_after,
+            modified=self._modified_after_undo(redone_text),
         )
 
     def _save(self, current: BufferValue, events: list[Event]) -> BufferValue:
@@ -1211,11 +1277,14 @@ class EditorSession:
             events.append(SaveFailed(self._current_id.value, "no-file"))
             return current
         try:
-            self._files.write(path, current.text)
+            self._files.write(path, to_file_text(current.text, self._state.eol))
         except OSError as error:
             events.append(SaveFailed(path, normalize_os_error(error)))
             return current
         events.append(BufferSaved(path))
+        # The save moves the clean point: undoing past it must now report the
+        # buffer modified (review 0001 finding 3).
+        self._state.saved_text = current.text
         return replace(current, modified=False)
 
     def _kill_line(self, current: BufferValue, events: list[Event]) -> BufferValue:
