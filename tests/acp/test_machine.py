@@ -13,8 +13,10 @@ from drei.acp.machine import (
     AcpMachine,
     AcpStateError,
     AgentTextChunk,
+    Cancelled,
     Initialized,
     PermissionRequested,
+    PermissionResolved,
     PlanUpdated,
     PromptCompleted,
     ProtocolError,
@@ -409,7 +411,8 @@ class TestPromptLifecycle:
     def test_cancel_emits_notification_and_cancels(self) -> None:
         machine, _ = _drive_handshake()
         machine, _ = prompt(machine, "hi")
-        machine, notif = cancel(machine)
+        machine, out, _ = cancel(machine)
+        notif = out[0]
         assert isinstance(notif, Notification)
         assert notif.method == SESSION_CANCEL
         assert notif.params == {"sessionId": "sess-1"}
@@ -418,6 +421,40 @@ class TestPromptLifecycle:
             machine, Response(id=2, result={"stopReason": "cancelled"})
         )
         assert effects == [PromptCompleted(stop_reason="cancelled")]
+
+    def test_cancel_sweeps_pending_permission_requests(self) -> None:
+        # Review 0001 finding 10 / ACP 0.9.0: cancelling the turn answers
+        # every pending session/request_permission with the cancelled
+        # outcome — a request left pending would hang the agent, and a
+        # queued prompt must never be presented for a dead turn.
+        machine, _ = _drive_handshake()
+        machine, _ = prompt(machine, "hi")
+        for rid in ("p-1", "p-2"):
+            machine, _, _ = handle(
+                machine,
+                Request(
+                    id=rid,
+                    method=SESSION_REQUEST_PERMISSION,
+                    params={"sessionId": "sess-1", "options": []},
+                ),
+            )
+        machine, out, effects = cancel(machine)
+        assert isinstance(out[0], Notification) and out[0].method == SESSION_CANCEL
+        responses = [m for m in out[1:] if isinstance(m, Response)]
+        assert [r.id for r in responses] == ["p-1", "p-2"]
+        assert all(r.result == {"outcome": {"outcome": "cancelled"}} for r in responses)
+        resolved = [e for e in effects if isinstance(e, PermissionResolved)]
+        assert [e.request_id for e in resolved] == ["p-1", "p-2"]
+        assert all(e.decision == Cancelled() and not e.granted for e in resolved)
+        assert machine.in_flight_incoming == {}
+        assert machine.request_params == {}
+
+    def test_cancel_with_no_pending_permissions_sweeps_nothing(self) -> None:
+        machine, _ = _drive_handshake()
+        machine, _ = prompt(machine, "hi")
+        machine, out, effects = cancel(machine)
+        assert len(out) == 1 and isinstance(out[0], Notification)
+        assert effects == []
 
     def test_cancel_without_prompt_in_flight_raises(self) -> None:
         machine, _ = _drive_handshake()
@@ -602,7 +639,8 @@ class TestScriptedTrace:
         outbound += out
         machine, prompt_req = prompt(machine, "do it")
         outbound.append(prompt_req)
-        machine, cancel_notif = cancel(machine)
+        machine, cancel_out, _ = cancel(machine)
+        cancel_notif = cancel_out[0]
         outbound.append(cancel_notif)
         machine, out, eff = handle(
             machine, Response(id=prompt_req.id, result={"stopReason": "cancelled"})

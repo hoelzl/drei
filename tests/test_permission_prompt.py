@@ -22,8 +22,10 @@ from drei.acp.machine import (
     Selected,
 )
 from drei.commands import (
+    AbortPendingPermissions,
     FindFile,
     MinibufferAbort,
+    MinibufferAborted,
     MinibufferAccept,
     MinibufferBackspace,
     MinibufferInput,
@@ -179,6 +181,43 @@ class TestChoiceKeymap:
         assert session.minibuffer is not None  # still open
 
 
+class TestAbortPendingPermissions:
+    """Review 0001 finding 10, session side: on turn cancel the machine has
+    already answered every pending request ``cancelled``, so the session
+    sweep only clears presentation state — emitting a ``PermissionDecided``
+    here would double-answer a request the agent no longer awaits."""
+
+    def test_sweep_closes_choice_prompt_and_drains_queue_without_deciding(
+        self,
+    ) -> None:
+        session = make_session()
+        session.dispatch(PromptPermission(_permission(1)))
+        session.dispatch(PromptPermission(_permission(2)))  # queued
+        assert session.pending_permission_count() == 1
+        outcome = session.dispatch(AbortPendingPermissions())
+        assert not any(isinstance(e, PermissionDecided) for e in outcome.events)
+        assert any(isinstance(e, MinibufferAborted) for e in outcome.events)
+        assert session.minibuffer is None  # choice prompt closed
+        assert session.pending_permission_count() == 0  # queue drained
+
+    def test_sweep_leaves_text_prompt_open(self) -> None:
+        # A user's find-file prompt is not turn state: the sweep drains the
+        # queue behind it but leaves the text prompt (and its input) alone.
+        session = make_session()
+        session.dispatch(FindFile())
+        session.dispatch(MinibufferInput("x"))
+        session.dispatch(PromptPermission(_permission(1)))  # queued behind text
+        outcome = session.dispatch(AbortPendingPermissions())
+        assert session.minibuffer == "x"  # text prompt untouched
+        assert session.pending_permission_count() == 0
+        assert not any(isinstance(e, MinibufferAborted) for e in outcome.events)
+
+    def test_sweep_with_nothing_pending_is_a_silent_no_op(self) -> None:
+        session = make_session()
+        outcome = session.dispatch(AbortPendingPermissions())
+        assert outcome.events == ()
+
+
 class TestChoiceHelperTotality:
     """Malformed payloads exercise the total helper branches directly."""
 
@@ -214,8 +253,26 @@ class TestChoiceHelperTotality:
         )
         assert EditorSession._choice_accept_decision(request) == Cancelled()
 
-    def test_accept_returns_first_valid_allow_option(self) -> None:
-        # An allow option with no id is skipped; the next valid allow wins.
+    def test_accept_selects_allow_once_even_when_listed_last(self) -> None:
+        # Review 0001 finding 9: RET maps to allow_once specifically. The
+        # option order is agent-controlled; listing broader scopes first must
+        # not turn a habitual RET into a session/always grant.
+        request = PermissionRequested(
+            request_id=1,
+            params={
+                "options": [
+                    {"kind": "allow_always", "optionId": "o-always"},
+                    {"kind": "allow_session", "optionId": "o-sess"},
+                    {"kind": "allow_once", "optionId": "o-once"},
+                ]
+            },
+        )
+        assert EditorSession._choice_accept_decision(request) == Selected("o-once")
+
+    def test_accept_never_grants_broader_scope(self) -> None:
+        # (Supersedes the earlier "first valid allow option" pin.) Without a
+        # usable allow_once option, accept is a cancel — session/always scopes
+        # require their explicit keys (s / a), never the low-effort RET.
         request = PermissionRequested(
             request_id=1,
             params={
@@ -225,7 +282,25 @@ class TestChoiceHelperTotality:
                 ]
             },
         )
-        assert EditorSession._choice_accept_decision(request) == Selected("o-always")
+        assert EditorSession._choice_accept_decision(request) == Cancelled()
+
+    def test_non_string_option_id_is_not_selectable(self) -> None:
+        # Review 0001 finding 25: ACP optionIds are strings. A non-string id
+        # must not be str()-coerced into a value the agent never sent (a
+        # strict peer would match no option) — the option is unusable and the
+        # decision falls through fail-closed.
+        request = PermissionRequested(
+            request_id=1,
+            params={
+                "options": [
+                    {"kind": "allow_once", "optionId": 1},
+                    {"kind": "reject_once", "optionId": 2},
+                ]
+            },
+        )
+        assert EditorSession._choice_key_to_decision(request, "y") is None
+        assert EditorSession._choice_key_to_decision(request, "n") == Cancelled()
+        assert EditorSession._choice_accept_decision(request) == Cancelled()
 
     def test_choice_options_total_over_malformed(self) -> None:
         # Non-dict params, non-list options, non-dict entries all total to [].

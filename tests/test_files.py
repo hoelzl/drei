@@ -67,6 +67,16 @@ def test_save_without_file_path_is_failure_event_not_crash() -> None:
     assert session.buffer.current.modified is True
 
 
+def test_save_without_file_path_names_buffer_with_no_file_token() -> None:
+    # Review 0001 finding 26: a pathless buffer's save failure carries the
+    # buffer name and the honest "no-file" token — not a fake path with
+    # "not-found" (the buffer isn't a missing file; it has no file at all).
+    session = _session()  # buffer id "scratch", no file
+    outcome = session.dispatch(SaveBuffer())
+    failures = [e for e in outcome.events if isinstance(e, SaveFailed)]
+    assert failures == [SaveFailed("scratch", "no-file")]
+
+
 def test_save_failure_is_atomic_and_normalized() -> None:
     port = FakeFilePort(fail="Permission denied")
     session = _session(file_path="/root/x.txt", port=port)

@@ -1,8 +1,9 @@
 # Adversarial review 0001 — full project (2026-07-24)
 
-**Status:** Cluster C (findings 8, 7, 24, 27) **implemented and gated**
-2026-07-24, uncommitted at time of writing; clusters D, A, B, E and the
-deferred-item bookkeeping still pending.
+**Status:** Clusters C (findings 8, 7, 24, 27) and D (findings 6, 9, 25, 10,
+26) **implemented and gated** 2026-07-24 (C committed as `5d1b105`; D
+uncommitted at time of writing); clusters A, B, E and the deferred-item
+bookkeeping still pending.
 **Baseline:** commit `cabb31a` (A.2 multiple buffers/windows), working tree clean,
 full suite green (508 passed, 17 skipped).
 **Method:** three independent adversarial reviewers — (1) implementation audit
@@ -338,16 +339,24 @@ focused pass; full gates (`AGENTS.md` §Validation) at the end.
    `test_parse_rejects_null_id_on_request`. Full gates green (515 passed /
    17 skipped with coverage ratchet, ruff, mypy, pre-commit, pre-push
    hooks, build).
-2. **Cluster D — approval semantics (6, 9, 25, 10, 26).**
+2. **Cluster D — approval semantics (6, 9, 25, 10, 26). DONE 2026-07-24.**
    `_permission_identity` strips top-level `sessionId` + `toolCall.toolCallId`
-   before canonicalization (new test: fresh toolCallId + same args →
-   auto-approved; rewrite `test_different_arguments_re_prompts` to vary a real
-   argument); RET → first `allow_once` only, else `Cancelled` (update pin at
-   `test_permission_prompt.py:217`); only `isinstance(optionId, str)` options
-   selectable; `cancel()` sweeps `in_flight_incoming` with `cancelled`
-   responses + `PermissionResolved(granted=False)` and session gains
-   `abort_pending_permissions()` (drains queue, closes open choice prompt);
-   pathless save → `SaveFailed(buffer_name, "no-file")`.
+   before canonicalization; new pin `test_fresh_tool_call_id_same_arguments_auto_approves`
+   supersedes `test_different_arguments_re_prompts`'s old toolCallId-only
+   variant (rewritten to vary `toolCall.rawInput`). RET → first usable
+   `allow_once` only, else `Cancelled` (supersedes the "first valid allow
+   option" pin). Non-string optionIds are unusable at all three selection
+   sites (session key/accept paths and `_select_auto_option`) — skipped, never
+   `str()`-coerced. `cancel()` now returns `(machine, [notification,
+   *responses], effects)`: it answers every pending permission request with
+   the `cancelled` outcome via `resolve_permission` (TODO removed), and the
+   session gained a delivery-class `AbortPendingPermissions` command that
+   closes an open *choice* prompt (`MinibufferAborted`, no `PermissionDecided`
+   — the machine already answered) and drains the queue, leaving *text*
+   prompts untouched. Pathless save emits `SaveFailed(buffer_name,
+   "no-file")` (the old event hardcoded the name "scratch" besides the
+   misleading token). Strict TDD throughout; full gates green (524 passed /
+   17 skipped, ruff, mypy, pre-commit, pre-push, build).
 3. **Cluster A — editor data integrity (2, 3, 1).**
    `session.py:718` sets `undo_descending` only when the Undo emitted events;
    per-buffer `saved_text` (set at open/creation and on `BufferSaved`) and

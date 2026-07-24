@@ -272,22 +272,34 @@ def prompt(machine: AcpMachine, text: str) -> tuple[AcpMachine, Request]:
     return machine, request
 
 
-def cancel(machine: AcpMachine) -> tuple[AcpMachine, Notification]:
-    """Emit the ``session/cancel`` notification (prompt must be in flight).
+def cancel(
+    machine: AcpMachine,
+) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
+    """Emit ``session/cancel`` and answer every pending permission request.
 
-    TODO(§C): ACP 0.9.0 also requires the client to answer every pending
-    ``session/request_permission`` with ``cancelled`` when the turn is
-    cancelled. This slice ships no cancellation/pump path, so ``cancel()`` does
-    not sweep ``in_flight_incoming`` here; the §C slice that wires cancellation
-    must answer all pending permissions ``cancelled`` (plan 0013, deferred).
+    ACP 0.9.0 requires the client to answer every pending
+    ``session/request_permission`` with the ``cancelled`` outcome when the
+    turn is cancelled — a request left pending would hang the agent, and a
+    queued prompt must never be presented for a dead turn (review 0001
+    finding 10; previously a §C TODO). The sweep reuses
+    ``resolve_permission``, so each answer clears its tracking entries and is
+    recorded as ``PermissionResolved(granted=False)``. Only permission
+    requests are ever tracked in ``in_flight_incoming`` (fs/terminal requests
+    are refused immediately), so the sweep answers every entry.
     """
     if machine.phase != "PROMPT_IN_FLIGHT":
         raise AcpStateError(f"cancel() requires PROMPT_IN_FLIGHT, got {machine.phase}")
-    notification = Notification(
-        method=SESSION_CANCEL,
-        params={"sessionId": machine.session_id},
-    )
-    return machine, notification
+    out: list[Message] = [
+        Notification(method=SESSION_CANCEL, params={"sessionId": machine.session_id})
+    ]
+    effects: list[SessionEffect] = []
+    for request_id in list(machine.in_flight_incoming):
+        machine, responses, resolved = resolve_permission(
+            machine, request_id, Cancelled()
+        )
+        out.extend(responses)
+        effects.extend(resolved)
+    return machine, out, effects
 
 
 # ---------------------------------------------------------------------------
@@ -301,24 +313,33 @@ def _permission_identity(params: JsonValue) -> str:
     The key is the tool **identity plus arguments**, not the per-call
     ``toolCallId``: ACP agents mint a fresh ``toolCallId`` per invocation, so
     keying on it would (a) almost never hit the cache and (b) fail *open* if
-    an agent reused an id with different arguments. We therefore prefer a
-    tool discriminator (``toolCall.kind``/``title`` when present) combined
-    with the canonical-JSON of the full params — a request whose arguments
-    changed yields a different key and re-prompts (fail-closed). Total: any
-    payload yields a stable key (malformed payloads are already a protocol
-    violation; totality avoids a crash, it does not promise precision).
+    an agent reused an id with different arguments. The volatile per-call
+    fields — top-level ``sessionId`` and ``toolCall.toolCallId`` — are
+    therefore stripped before canonicalization (review 0001 finding 6: with
+    them included the cache could never hit for a conforming agent). The key
+    is a tool discriminator (``toolCall.kind``/``title`` when present)
+    combined with the canonical-JSON of the stripped params — a request whose
+    arguments changed yields a different key and re-prompts (fail-closed).
+    Total: any payload yields a stable key (malformed payloads are already a
+    protocol violation; totality avoids a crash, it does not promise
+    precision).
     """
     discriminator = ""
+    stripped = params
     if isinstance(params, dict):
-        tool_call = params.get("toolCall")
+        stripped = {k: v for k, v in params.items() if k != "sessionId"}
+        tool_call = stripped.get("toolCall")
         if isinstance(tool_call, dict):
+            stripped["toolCall"] = {
+                k: v for k, v in tool_call.items() if k != "toolCallId"
+            }
             for field in ("kind", "title"):
                 value = tool_call.get(field)
                 if isinstance(value, str) and value:
                     discriminator = f"{field}:{value}"
                     break
     try:
-        canonical = json.dumps(params, sort_keys=True, default=str)
+        canonical = json.dumps(stripped, sort_keys=True, default=str)
     except (TypeError, ValueError):
         canonical = "?"
     return f"{discriminator}|params:{canonical}"
@@ -335,10 +356,12 @@ def _select_auto_option(options: list[dict[str, JsonValue]]) -> str | None:
     """
 
     def _id_of(kinds: frozenset[str]) -> str | None:
+        # optionIds are strings per ACP; a non-string id is unusable, never
+        # str()-coerced into a value the agent never sent.
         for o in options:
             oid = o.get("optionId")
-            if o.get("kind") in kinds and oid is not None:
-                return str(oid)
+            if o.get("kind") in kinds and isinstance(oid, str):
+                return oid
         return None
 
     return _id_of(_CACHEABLE_KINDS) or _id_of(frozenset({"allow_once"}))

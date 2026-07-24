@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from drei.acp.messages import JsonValue, Message, RequestId
 
 from drei.commands import (
+    AbortPendingPermissions,
     AgentTextInserted,
     AgentTranscriptUpdated,
     BackwardChar,
@@ -98,6 +99,7 @@ Command = (
     | DeliverSessionEffects
     | InsertAgentText
     | PromptPermission
+    | AbortPendingPermissions
     | FindFile
     | SwitchBuffer
     | SplitWindow
@@ -476,7 +478,8 @@ class EditorSession:
             | DeliverProcessOutput
             | DeliverSessionEffects
             | InsertAgentText
-            | PromptPermission,
+            | PromptPermission
+            | AbortPendingPermissions,
         ):
             return CommandOutcome((), self._observation(current))
 
@@ -684,6 +687,18 @@ class EditorSession:
                 else:
                     self._open_choice(request, events)
                     new_value = current
+            case AbortPendingPermissions():
+                # Turn cancelled: the machine's cancel() already answered
+                # every pending request, so no PermissionDecided here — only
+                # presentation state is cleared. A text prompt (find-file,
+                # switch-buffer) is user state and stays open.
+                self._permission_queue.clear()
+                if self._choice is not None:
+                    self._choice = None
+                    self._minibuffer = None
+                    self._minibuffer_prompt = ""
+                    events.append(MinibufferAborted())
+                new_value = current
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
 
@@ -811,32 +826,38 @@ class EditorSession:
         if kind == "reject":
             # First enum reject option; absent any, a deny is a cancel. Match
             # by membership, not startswith ("reject_evil" is not a deny).
+            # optionIds are strings per ACP; a non-string id is unusable,
+            # never str()-coerced into a value the agent never sent.
             for option in options:
                 if option.get("kind") in _REJECT_KINDS:
                     oid = option.get("optionId")
-                    if oid is not None:
-                        return Selected(str(oid))
+                    if isinstance(oid, str):
+                        return Selected(oid)
             return Cancelled()
         for option in options:
             if option.get("kind") == kind:
                 oid = option.get("optionId")
-                if oid is not None:
-                    return Selected(str(oid))
+                if isinstance(oid, str):
+                    return Selected(oid)
         return None
 
     @classmethod
     def _choice_accept_decision(
         cls, request: PermissionRequested
     ) -> PermissionDecision:
-        from drei.acp.machine import _ALLOW_KINDS, Cancelled, Selected
+        from drei.acp.machine import Cancelled, Selected
 
-        # Accept takes the first enum allow option; absent any, fail-closed to
-        # a cancel (never auto-approve an invented "allow_*" kind).
+        # Accept maps to allow_once only (review 0001 finding 9): the option
+        # order is agent-controlled, so "first allow option" would let an
+        # agent turn a habitual RET into a session/always grant. Broader
+        # scopes require their explicit keys (s / a). Absent a usable
+        # allow_once, fail-closed to a cancel (never auto-approve an invented
+        # "allow_*" kind).
         for option in cls._choice_options(request):
-            if option.get("kind") in _ALLOW_KINDS:
+            if option.get("kind") == "allow_once":
                 oid = option.get("optionId")
-                if oid is not None:
-                    return Selected(str(oid))
+                if isinstance(oid, str):
+                    return Selected(oid)
         return Cancelled()
 
     def apply_permission_decision(
@@ -1183,7 +1204,11 @@ class EditorSession:
     def _save(self, current: BufferValue, events: list[Event]) -> BufferValue:
         path = current.file_path
         if path is None:
-            events.append(SaveFailed("scratch", "not-found"))
+            # No file to write: name the buffer and say so honestly — a fake
+            # path with "not-found" would read as a missing file (review 0001
+            # finding 26). Echoes as "<buffer>: no-file" until a write-file
+            # (path-prompting) slice exists.
+            events.append(SaveFailed(self._current_id.value, "no-file"))
             return current
         try:
             self._files.write(path, current.text)

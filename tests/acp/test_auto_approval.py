@@ -40,13 +40,17 @@ def _request(
     tool_call_id: str = "tc-1",
     title: str = "run tests",
     options: list[dict[str, str]] | None = None,
+    raw_input: dict[str, object] | None = None,
 ) -> Request:
+    tool_call: dict[str, object] = {"toolCallId": tool_call_id, "title": title}
+    if raw_input is not None:
+        tool_call["rawInput"] = raw_input
     return Request(
         id=request_id,
         method="session/request_permission",
         params={
             "sessionId": "s1",
-            "toolCall": {"toolCallId": tool_call_id, "title": title},
+            "toolCall": tool_call,
             "options": options
             or [
                 {"kind": "allow_once", "name": "Once", "optionId": "o-once"},
@@ -96,15 +100,32 @@ class TestAutoApprovalCache:
         machine, _, effects = handle(machine, _request(2))
         assert any(isinstance(e, PermissionRequested) for e in effects)
 
-    def test_different_arguments_re_prompts(self) -> None:
-        # Fail-closed (review HIGH): identity is kind/title + canonical params,
-        # NOT the per-call toolCallId. Same tool title but a different
-        # toolCallId (→ different params) is a different operation and must
-        # re-prompt — an agent cannot inherit a grant across changed arguments.
+    def test_fresh_tool_call_id_same_arguments_auto_approves(self) -> None:
+        # Review 0001 finding 6: conforming agents mint a fresh toolCallId per
+        # invocation, so the identity key must exclude it — otherwise an
+        # allow_session/allow_always grant NEVER suppresses a re-prompt and
+        # the cache is dead code. Same tool, same arguments, new id → hit.
+        # (Supersedes the earlier pin that treated a changed toolCallId alone
+        # as "different arguments".)
         machine = _handshake()
         machine, _, _ = handle(machine, _request(1, tool_call_id="tc-A"))
         machine, _, _ = resolve_permission(machine, 1, Selected("o-sess"))
-        machine, _, effects = handle(machine, _request(2, tool_call_id="tc-B"))
+        machine, out2, effects = handle(machine, _request(2, tool_call_id="tc-B"))
+        assert not any(isinstance(e, PermissionRequested) for e in effects)
+        assert out2 and isinstance(out2[0], Response) and out2[0].id == 2
+
+    def test_different_arguments_re_prompts(self) -> None:
+        # Fail-closed: identity includes the tool's actual arguments
+        # (toolCall.rawInput). A grant for one argument set must not leak to
+        # a call with different arguments, whatever the toolCallId does.
+        machine = _handshake()
+        machine, _, _ = handle(
+            machine, _request(1, tool_call_id="tc-A", raw_input={"cmd": "ls"})
+        )
+        machine, _, _ = resolve_permission(machine, 1, Selected("o-sess"))
+        machine, _, effects = handle(
+            machine, _request(2, tool_call_id="tc-B", raw_input={"cmd": "rm -rf /"})
+        )
         assert any(isinstance(e, PermissionRequested) for e in effects)
 
     def test_different_title_re_prompts(self) -> None:
@@ -230,6 +251,9 @@ class TestAutoApprovalCache:
         assert (
             _select_auto_option([{"kind": "reject_once", "optionId": "o-no"}]) is None
         )
+        # Review 0001 finding 25: a non-string optionId is unusable, never
+        # str()-coerced into a value the agent never sent.
+        assert _select_auto_option([{"kind": "allow_session", "optionId": 7}]) is None
 
     def test_duplicate_option_id_last_match_wins_no_cache_poison(self) -> None:
         # Review HIGH: a hostile agent orders a duplicate allow_always BEFORE

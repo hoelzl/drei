@@ -190,6 +190,21 @@ class PromptPermission:
 
 
 @dataclass(frozen=True, slots=True)
+class AbortPendingPermissions:
+    """Clear pending permission presentation state on turn cancel (review
+    0001 finding 10).
+
+    Delivery-class (turn-initiated), exempt from the minibuffer gate. The
+    machine's ``cancel()`` has already answered every pending request with
+    the ``cancelled`` outcome, so this emits no ``PermissionDecided`` (that
+    would double-answer a request the agent no longer awaits): it closes an
+    open *choice* prompt (recorded as ``MinibufferAborted``) and drains the
+    queue so no prompt is ever presented for a dead turn. An open *text*
+    prompt is user state, not turn state, and is left untouched.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class TextInserted:
     text: str
     before: int
@@ -278,11 +293,12 @@ class BufferSaved:
 
 @dataclass(frozen=True, slots=True)
 class SaveFailed:
-    """A save that failed at the file port.
+    """A save that failed at the file port (or never reached it).
 
     ``error`` is a normalized, Drei-owned token (``not-found``,
-    ``permission-denied``, ``io-error``), never raw exception text, so
-    replay outcomes and echo text are platform-independent.
+    ``permission-denied``, ``io-error``, or ``no-file`` for a buffer with no
+    file path — then ``path`` carries the buffer name), never raw exception
+    text, so replay outcomes and echo text are platform-independent.
     """
 
     path: str
