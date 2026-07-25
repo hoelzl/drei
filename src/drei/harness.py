@@ -107,6 +107,36 @@ class EditorHarness:
         self._frame = self._render_frame()
         return outcome
 
+    def apply(self, command: Command) -> CommandOutcome:
+        """Dispatch a command that did not come from a key (design 0005 D3).
+
+        The pump's seam. Deliberately *not* routed through :meth:`send`, for
+        the same reason :meth:`resize` is not: the minibuffer gate routes
+        keys, and an agent delivery is not one — the session's own gate
+        already exempts delivery-class commands, and a second gate here would
+        swallow them before it saw them.
+
+        The echo message is left alone. Agent output arriving is not a user
+        action, so it must not wipe a message the user has not read yet; the
+        same rule a resize follows.
+        """
+        outcome = self._session.dispatch(command)
+        self._outcomes.append(outcome)
+        self._frame = self._render_frame()
+        return outcome
+
+    def agent_buffer_id(self, acp_session_id: str) -> BufferId | None:
+        """The buffer bound to an ACP session (design 0004 D1).
+
+        Exposed rather than reached for: the binding is the session's, and
+        nothing else may guess an agent buffer's identity.
+        """
+        return self._session.agent_buffer_id(acp_session_id)
+
+    def generated_buffer_id(self, name: str) -> BufferId | None:
+        """The buffer ``CreateGeneratedBuffer(name)`` minted (design 0005 D6)."""
+        return self._session.generated_buffer_id(name)
+
     @staticmethod
     def _minibuffer_command(key: str) -> Command | None:
         """Map a symbolic key to a minibuffer command; None = ignored."""

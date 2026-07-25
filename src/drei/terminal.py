@@ -23,7 +23,16 @@ from typing import Literal
 from drei.commands import KeyboardQuitEvent
 from drei.files import FilePort
 from drei.harness import EditorHarness
-from drei.input import EventQueue, Key, Resize
+from drei.input import (
+    AgentBytes,
+    AgentExited,
+    AgentStderr,
+    EventQueue,
+    Key,
+    Resize,
+)
+from drei.pump import DEFAULT_AGENT_ARGV, AgentPump, AgentReaders
+from drei.streaming import StreamingProcessPort, SystemStreamingProcessPort
 
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 _CURSOR_HOME = "\x1b[H"
@@ -66,6 +75,9 @@ def decode_key(char: str) -> str:
     """Convert a raw input character to a symbolic key name."""
     control = {
         "\x00": "C-@",
+        # ETX. Raw mode has cleared ISIG (POSIX) and ENABLE_PROCESSED_INPUT
+        # (Windows), so this arrives as a byte rather than as an interrupt.
+        "\x03": "C-c",
         "\x06": "C-f",
         "\x02": "C-b",
         "\x07": "C-g",
@@ -248,6 +260,9 @@ def run_editor(
     file_port: FilePort | None = None,
     file_path: str | None = None,
     initial_text: str = "",
+    agent_port: StreamingProcessPort | None = None,
+    agent_argv: tuple[str, ...] = DEFAULT_AGENT_ARGV,
+    agent_cwd: str | None = None,
 ) -> None:
     """Run the editor loop over an explicit terminal port.
 
@@ -258,13 +273,27 @@ def run_editor(
     :class:`TerminalReaders` over the same port, so the shipped editor notices
     a resize within one poll interval rather than not at all. Tests pass a
     pre-scripted queue and start no thread at all.
+
+    ``agent_argv``/``agent_cwd`` configure the child the pump will spawn on the
+    first ``C-c a`` — and only then (design 0005 D6), so a machine with no
+    agent installed pays nothing for one.
     """
+    # Built before raw mode: it touches nothing, and having it exist
+    # unconditionally is what lets the `finally` below terminate a child
+    # without asking whether there is one.
+    stream = events if events is not None else EventQueue()
+    pump = AgentPump(
+        agent_port if agent_port is not None else SystemStreamingProcessPort(),
+        stream,
+        argv=agent_argv,
+        cwd=agent_cwd,
+        start_readers=AgentReaders,
+    )
     port.write("DREI:READY\n")
     port.flush()
     port.enter_raw()
     # The readers are started inside the try: starting threads can fail, and a
     # failure there must still restore the terminal rather than leave it raw.
-    stream = events if events is not None else EventQueue()
     readers: TerminalReaders | None = None
     try:
         if events is None:
@@ -283,47 +312,75 @@ def run_editor(
         assembler = KeyAssembler()
         while True:
             event = stream.next_event()
+            # An if/elif chain rather than a `match`, for one reason: the union
+            # is closed and mypy proves the final `else` is a `Key`, so there is
+            # no unreachable no-match arm for the coverage floor to be satisfied
+            # about by a pragma.
             if isinstance(event, Resize):
                 harness.resize(event.width, event.height)
                 # Marked, like any other consumed input. A resize is an input
                 # epoch under the cooperation protocol itself: TermVerify
                 # dispatches it on the same ordered input stream as a key and
-                # reads until exactly one marker. Leaving it unmarked would
-                # not make the epoch quiet — it would make this epoch consume
-                # the *next* input's marker and shift every epoch after it.
+                # reads until exactly one marker. Leaving it unmarked would not
+                # make the epoch quiet — it would make this epoch consume the
+                # *next* input's marker and shift every epoch after it.
                 #
-                # The marker follows an *observed size change*, not a
-                # dispatched resize: the watcher emits nothing when the polled
-                # size is unchanged, so resizing a terminal to the dimensions
-                # it already has produces no event and no marker here. A
-                # TermVerify scenario must therefore change the geometry, or
-                # its epoch waits for a marker that is never coming. See the
-                # parity registry row and design 0005's evidence note.
+                # The marker follows an *observed size change*, not a dispatched
+                # resize: the watcher emits nothing when the polled size is
+                # unchanged, so resizing a terminal to the dimensions it already
+                # has produces no event and no marker here. A TermVerify
+                # scenario must therefore change the geometry, or its epoch
+                # waits for a marker that is never coming. See the parity
+                # registry row and design 0005's evidence note.
                 _write_frame(port, harness)
-                continue
-            assembler, resolved = assembler.feed(event.char)
-            # No keys: the character was consumed mid-sequence, so the
-            # subject is mid-chord and not quiescent — no marker until the
-            # sequence resolves. Two keys: an abandoned escape prefix plus
-            # the character that broke it, each marking quiescence of its
-            # own (symmetric with the C-x prefix path).
-            for key in resolved:
-                outcome = harness.send(key)
-                quit_requested = outcome is not None and any(
-                    isinstance(e, KeyboardQuitEvent) for e in outcome.events
-                )
-                if outcome is None:
-                    # Unresolved key: state did not change, so skip the frame
-                    # rewrite but still mark quiescence for this input.
-                    port.write(READINESS_MARKER)
-                    port.flush()
-                    continue
-                # On quit the run ends: quiescence is the process exit itself,
-                # so the final frame carries no readiness marker.
-                _write_frame(port, harness, mark_ready=not quit_requested)
-                if quit_requested:
-                    return
+            elif isinstance(event, AgentBytes):
+                # Unmarked, and this is the one place that is deliberate: an
+                # agent delivery is a redraw the verifier did not dispatch, so
+                # it belongs to no input epoch, and a marker here would be
+                # counted against the *next* keystroke. The cost is recorded in
+                # design 0005 — an end-to-end agent scenario must wait on frame
+                # content, not on quiescence.
+                pump.receive(event.data, harness)
+                _write_frame(port, harness, mark_ready=False)
+            elif isinstance(event, AgentStderr):
+                pump.diagnostics(event.data, harness)
+                _write_frame(port, harness, mark_ready=False)
+            elif isinstance(event, AgentExited):
+                pump.exited(event.status, harness)
+                _write_frame(port, harness, mark_ready=False)
+            else:
+                assembler, resolved = assembler.feed(event.char)
+                # No keys: the character was consumed mid-sequence, so the
+                # subject is mid-chord and not quiescent — no marker until the
+                # sequence resolves. Two keys: an abandoned escape prefix plus
+                # the character that broke it, each marking quiescence of its
+                # own (symmetric with the C-x prefix path).
+                for key in resolved:
+                    outcome = harness.send(key)
+                    if outcome is None:
+                        # Unresolved key: state did not change, so skip the
+                        # frame rewrite but still mark quiescence for this
+                        # input.
+                        port.write(READINESS_MARKER)
+                        port.flush()
+                        continue
+                    quit_requested = any(
+                        isinstance(e, KeyboardQuitEvent) for e in outcome.events
+                    )
+                    # Before the frame: the command may owe the agent an answer
+                    # (a permission response) or a prompt, and both can change
+                    # what the frame should show.
+                    pump.after_command(outcome, harness)
+                    # On quit the run ends: quiescence is the process exit
+                    # itself, so the final frame carries no marker.
+                    _write_frame(port, harness, mark_ready=not quit_requested)
+                    if quit_requested:
+                        return
     finally:
+        # The child goes first: a leaked `hermes acp` holding a pipe outlives a
+        # garbled terminal, and terminating it is what releases the agent
+        # reader threads.
+        pump.close()
         if readers is not None:
             readers.close()
         stream.close()

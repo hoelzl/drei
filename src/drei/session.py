@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 from drei.commands import (
     AbortPendingPermissions,
+    AgentPromptSubmitted,
     AgentTextInserted,
     AgentTranscriptUpdated,
     BackwardChar,
@@ -25,6 +26,7 @@ from drei.commands import (
     CommandOutcome,
     CopyRegionAsKill,
     CreateAgentBuffer,
+    CreateGeneratedBuffer,
     DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
@@ -51,6 +53,7 @@ from drei.commands import (
     PermissionDecided,
     PointMoved,
     ProcessOutputRecorded,
+    PromptAgent,
     PromptPermission,
     RegionCopied,
     RegionKilled,
@@ -110,6 +113,8 @@ Command = (
     | DeliverSessionEffects
     | InsertAgentText
     | CreateAgentBuffer
+    | CreateGeneratedBuffer
+    | PromptAgent
     | PromptPermission
     | AbortPendingPermissions
     | FindFile
@@ -150,6 +155,7 @@ Event = (
     | WindowsCollapsed
     | FrameResized
     | OpenFailed
+    | AgentPromptSubmitted
     | AgentTranscriptUpdated
     | AgentTextInserted
 )
@@ -469,6 +475,12 @@ class EditorSession:
         # ACP session: the binding must be as fine-grained as the transcript
         # being folded, or a second session would append into the first's.
         self._agent_buffers: dict[str, BufferId] = {}
+        # Generated buffers that no ACP session owns, by requested name
+        # (design 0005 D6 — the agent's diagnostics). Recorded rather than
+        # assumed, because the collision rule may have renamed the buffer:
+        # a user with an ordinary buffer of the same name would otherwise
+        # have agent output appended into their own text.
+        self._generated_buffers: dict[str, BufferId] = {}
 
     @property
     def buffer(self) -> Buffer:
@@ -536,6 +548,15 @@ class EditorSession:
         may guess an agent buffer's identity."""
         return self._agent_buffers.get(acp_session_id)
 
+    def generated_buffer_id(self, name: str) -> BufferId | None:
+        """The buffer ``CreateGeneratedBuffer(name)`` minted, or None.
+
+        The requested name is not the answer: the collision rule may have
+        appended a ``<N>`` suffix. A caller that guessed would append agent
+        output into whatever buffer happened to own the name.
+        """
+        return self._generated_buffers.get(name)
+
     def _pinned_target(self, command: Command, events: list[Event]) -> BufferId | None:
         """The buffer a command pins as its target, when it names or mints one.
 
@@ -567,6 +588,18 @@ class EditorSession:
                     raise ValueError(
                         f"delivery target {buffer_id.value!r} is not a generated buffer"
                     )
+                return buffer_id
+            case CreateGeneratedBuffer(name=name):
+                existing = self._generated_buffers.get(name)
+                if existing is not None:
+                    return existing  # idempotent: no second buffer, no event
+                buffer_id = self._create_buffer(
+                    name,
+                    BufferValue(text="", point=0),
+                    events,
+                    kind="generated",
+                )
+                self._generated_buffers[name] = buffer_id
                 return buffer_id
             case CreateAgentBuffer(acp_session_id=acp_session_id):
                 existing = self._agent_buffers.get(acp_session_id)
@@ -606,6 +639,7 @@ class EditorSession:
             | DeliverSessionEffects
             | InsertAgentText
             | CreateAgentBuffer
+            | CreateGeneratedBuffer
             | PromptPermission
             | AbortPendingPermissions,
         ):
@@ -699,7 +733,7 @@ class EditorSession:
                 # Still a command in its own right: appending agent text
                 # without advancing a transcript fold is a real thing to want.
                 new_value = self._append_agent_text(current, text, target, events)
-            case CreateAgentBuffer():
+            case CreateAgentBuffer() | CreateGeneratedBuffer():
                 # The buffer (and its BufferCreated event) came out of target
                 # resolution above; creation edits nothing. `current` is the
                 # new buffer's own value, so the write-back below is a no-op
@@ -728,6 +762,12 @@ class EditorSession:
                 self._minibuffer = ""
                 self._minibuffer_prompt = "Find file: "
                 self._minibuffer_kind = "find-file"
+                events.append(MinibufferOpened(self._minibuffer_prompt))
+                new_value = current
+            case PromptAgent():
+                self._minibuffer = ""
+                self._minibuffer_prompt = "Agent: "
+                self._minibuffer_kind = "agent-prompt"
                 events.append(MinibufferOpened(self._minibuffer_prompt))
                 new_value = current
             case SwitchBuffer():
@@ -789,7 +829,14 @@ class EditorSession:
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
                     self._minibuffer_kind = None
-                    if kind == "switch-buffer":
+                    if kind == "agent-prompt":
+                        # The session says what the user asked for and stops
+                        # there; the pump owns everything after. Empty input
+                        # closes the prompt silently, like the other arms.
+                        if text:
+                            events.append(AgentPromptSubmitted(text))
+                        new_value = current
+                    elif kind == "switch-buffer":
                         # C-x b: empty input takes the MRU default (Emacs
                         # other-buffer); an unknown name creates a new empty
                         # buffer (probed vs pinned 29.3, plan 0012

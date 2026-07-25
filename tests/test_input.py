@@ -12,7 +12,15 @@ import threading
 
 import pytest
 
-from drei.input import EndOfInput, EventQueue, Key, Resize
+from drei.input import (
+    AgentBytes,
+    AgentExited,
+    AgentStderr,
+    EndOfInput,
+    EventQueue,
+    Key,
+    Resize,
+)
 
 
 def test_events_come_out_in_the_order_they_went_in() -> None:
@@ -84,6 +92,57 @@ def test_a_producer_racing_the_shutdown_cannot_reopen_the_queue() -> None:
     events.fail(RuntimeError("late"))
     with pytest.raises(EndOfInput):
         events.next_event()
+
+
+class TestFairness:
+    """Design 0005 D3: keys are never starved."""
+
+    def test_a_key_overtakes_agent_bytes_already_queued(self) -> None:
+        """A human's keystroke must not queue behind a paragraph of streamed
+        text. Agent output is bursty by nature and the human is not, so the
+        asymmetry runs one way only."""
+        events = EventQueue()
+        events.put(AgentBytes(b"a lot of streamed text"))
+        events.put(AgentBytes(b"and more"))
+        events.put(Key("\x07"))
+
+        assert events.next_event() == Key("\x07")
+        assert events.next_event() == AgentBytes(b"a lot of streamed text")
+        assert events.next_event() == AgentBytes(b"and more")
+
+    def test_a_resize_shares_the_priority_lane_with_keys(self) -> None:
+        """The lane is not "keys" — it is the events a *verifier dispatches*,
+        which is the same set that carries a readiness marker. One
+        distinction, two consequences: fairness and evidence.
+        """
+        events = EventQueue()
+        events.put(AgentBytes(b"stream"))
+        events.put(Resize(80, 24))
+
+        assert events.next_event() == Resize(80, 24)
+
+    def test_agent_events_keep_their_order_among_themselves(self) -> None:
+        """The lanes reorder across kinds, never within one: bytes that
+        arrived after an exit would be bytes from a child that is gone."""
+        events = EventQueue()
+        events.put(AgentBytes(b"one"))
+        events.put(AgentStderr(b"warning"))
+        events.put(AgentExited(0))
+
+        assert events.next_event() == AgentBytes(b"one")
+        assert events.next_event() == AgentStderr(b"warning")
+        assert events.next_event() == AgentExited(0)
+
+    def test_a_producer_failure_outranks_queued_agent_output(self) -> None:
+        """The terminal is not optional the way the agent is: if the input
+        producer died, nothing after it can be typed, so there is no reason to
+        deliver the peer's backlog first."""
+        events = EventQueue()
+        events.put(AgentBytes(b"stream"))
+        events.fail(OSError("no tty"))
+
+        with pytest.raises(OSError, match="no tty"):
+            events.next_event()
 
 
 def test_close_wakes_a_consumer_already_blocked_on_an_empty_queue() -> None:

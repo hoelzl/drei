@@ -209,6 +209,42 @@ class TestCreateAgentBuffer:
         assert session.agent_buffer_id(ACP_SESSION) == AGENT
         assert session.buffers.count("*agent*") == 1
 
+    def test_a_generated_buffer_can_exist_without_an_acp_session(self) -> None:
+        """Design 0005 D6's diagnostics buffer. Stderr is a property of the
+        *child process*, not of a session: it arrives before any session
+        exists and must survive the session ending, so it is named rather than
+        bound. Same buffer kind, so the same delivery rules apply."""
+        from drei.commands import CreateGeneratedBuffer
+
+        session = EditorSession(Buffer(FOCUSED, BufferValue(text="", point=0)))
+
+        outcome = session.dispatch(CreateGeneratedBuffer("*agent-log*"))
+
+        assert outcome.events == (BufferCreated("*agent-log*", None),)
+        minted = session.generated_buffer_id("*agent-log*")
+        assert minted is not None
+        assert session._states[minted].kind == "generated"
+
+    def test_a_generated_buffer_is_idempotent_by_name(self) -> None:
+        """The pump caches the id, so this is defence rather than a hot path —
+        but a second dispatch minting ``*agent-log*<2>`` would leave the older
+        buffer as the one every reader still holds and the newer one as the one
+        nothing writes to."""
+        from drei.commands import CreateGeneratedBuffer
+
+        session = EditorSession(Buffer(FOCUSED, BufferValue(text="", point=0)))
+        session.dispatch(CreateGeneratedBuffer("*agent-log*"))
+
+        outcome = session.dispatch(CreateGeneratedBuffer("*agent-log*"))
+
+        assert outcome.events == ()
+        assert session.buffers.count("*agent-log*") == 1
+
+    def test_an_unminted_generated_buffer_has_no_binding(self) -> None:
+        session = EditorSession(Buffer(FOCUSED, BufferValue(text="", point=0)))
+
+        assert session.generated_buffer_id("*agent-log*") is None
+
     def test_a_second_acp_session_gets_its_own_buffer(self) -> None:
         session = _session()
 

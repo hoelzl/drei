@@ -232,6 +232,41 @@ class CreateAgentBuffer:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptAgent:
+    """Open the minibuffer to compose a prompt for the agent (design 0005 D6).
+
+    A user command like ``FindFile``, not a delivery: it opens a text prompt
+    and nothing else. What the accepted text *means* is not the session's
+    business — it emits ``AgentPromptSubmitted`` and the pump decides whether
+    that requires spawning a child, waiting for a session, or holding the
+    prompt behind a turn already in flight. The session holds no
+    ``AcpMachine`` and learns nothing about ACP from this (0005 D7).
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class CreateGeneratedBuffer:
+    """Mint a generated buffer that no ACP session owns (design 0005 D6).
+
+    ``CreateAgentBuffer`` binds one buffer *per ACP session* because a
+    transcript belongs to a session. The agent's diagnostics do not: stderr is
+    a property of the child process, it arrives before any session exists, and
+    it must survive the session ending. So it gets a plain generated buffer,
+    named rather than bound.
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: the
+    first thing a misconfigured agent writes to stderr is why it is about to
+    die, and swallowing that because a prompt happened to be open would hide
+    the one message that explains the failure.
+
+    Not idempotent — the collision rule would produce ``*agent-log*<2>``. The
+    caller creates it once and keeps the id, the same way it keeps the child.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class PromptPermission:
     """Open the choice minibuffer for a ``session/request_permission`` (B.8).
 
@@ -439,6 +474,20 @@ class PermissionDecided:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentPromptSubmitted:
+    """The human accepted an agent prompt (design 0005 D6).
+
+    An event, not a call: the session records what the user asked for and the
+    pump reads it out of the outcome, exactly as it reads
+    ``PermissionDecided``. Both directions across that seam are events, which
+    is what keeps the protocol out of the session and the transcript a
+    complete record of what the user did.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentTranscriptUpdated:
     """One session-effects delivery, recorded for the transcript oracle.
 
@@ -617,6 +666,7 @@ class CommandOutcome:
         | WindowsCollapsed
         | FrameResized
         | OpenFailed
+        | AgentPromptSubmitted
         | AgentTranscriptUpdated
         | AgentTextInserted,
         ...,

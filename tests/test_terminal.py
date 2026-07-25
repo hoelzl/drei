@@ -10,7 +10,16 @@ import pytest
 
 import drei.terminal
 from drei.files import SystemFilePort
-from drei.input import EndOfInput, EventQueue, InputEvent, Key, Resize
+from drei.input import (
+    AgentBytes,
+    AgentExited,
+    AgentStderr,
+    EndOfInput,
+    EventQueue,
+    InputEvent,
+    Key,
+    Resize,
+)
 from drei.terminal import (
     _CLEAR_SCREEN,
     READINESS_MARKER,
@@ -795,6 +804,133 @@ def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
     assert any(row.rstrip() == "Find file: x" for row in prompts), prompts
 
 
+class TestLoopAgentArms:
+    """The loop's half of §C.2: agent events become pump calls and redraws.
+
+    The pump itself is proved in `test_pump.py`; what these pin is the wiring
+    — that each event kind reaches the right entry point, and that an agent
+    redraw carries no readiness marker.
+    """
+
+    @staticmethod
+    def _recording() -> tuple[list[tuple[str, object]], type]:
+        calls: list[tuple[str, object]] = []
+
+        class RecordingPump:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def receive(self, data: bytes, harness: object) -> None:
+                calls.append(("receive", data))
+
+            def diagnostics(self, data: bytes, harness: object) -> None:
+                calls.append(("diagnostics", data))
+
+            def exited(self, status: int | None, harness: object) -> None:
+                calls.append(("exited", status))
+
+            def after_command(self, outcome: object, harness: object) -> None:
+                calls.append(("after_command", None))
+
+            def close(self) -> None:
+                calls.append(("close", None))
+
+        return calls, RecordingPump
+
+    def test_each_agent_event_reaches_its_entry_point(self) -> None:
+        """No quit key in the script: a `Key` sits in the priority lane and
+        would preempt every agent event queued behind it (design 0005 D3), so
+        this run ends by running out of input instead."""
+        calls, recording = self._recording()
+        port = FakePort([])
+        with (
+            patch.object(drei.terminal, "AgentPump", recording),
+            pytest.raises(EndOfInput),
+        ):
+            run_editor(
+                port,
+                events=scripted(
+                    [
+                        AgentBytes(b"{}\n"),
+                        AgentStderr(b"warning\n"),
+                        AgentExited(3),
+                    ]
+                ),
+            )
+        assert calls[:3] == [
+            ("receive", b"{}\n"),
+            ("diagnostics", b"warning\n"),
+            ("exited", 3),
+        ]
+        assert calls[-1] == ("close", None)
+
+    def test_a_key_preempts_agent_output_the_loop_has_not_reached(self) -> None:
+        """The fairness rule, visible from the loop: a `C-g` queued *after* a
+        burst of agent bytes still quits first. A human's keystroke must not
+        wait behind a paragraph of streamed text."""
+        calls, recording = self._recording()
+        port = FakePort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            run_editor(
+                port,
+                events=scripted([AgentBytes(b"a lot of text\n"), Key("\x07")]),
+            )
+
+        assert ("receive", b"a lot of text\n") not in calls
+
+    def test_an_agent_redraw_carries_no_readiness_marker(self) -> None:
+        """The one deliberate gap in the cooperation protocol. An agent
+        delivery is a redraw the verifier did not dispatch, so it belongs to
+        no input epoch — a marker here would be counted against the *next*
+        keystroke and shift every epoch after it. Design 0005 records the cost:
+        an end-to-end agent scenario waits on frame content, not quiescence.
+        """
+        _, recording = self._recording()
+        baseline = FakePort([])
+        streamed = FakePort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            with pytest.raises(EndOfInput):
+                run_editor(baseline, events=scripted([]))
+            with pytest.raises(EndOfInput):
+                run_editor(streamed, events=scripted([AgentBytes(b"{}\n")]))
+
+        written = "".join(streamed.outputs)
+        quiet = "".join(baseline.outputs)
+        # The agent event added a frame...
+        assert written.count(_CLEAR_SCREEN) == quiet.count(_CLEAR_SCREEN) + 1
+        # ...and no marker with it.
+        assert written.count(READINESS_MARKER) == quiet.count(READINESS_MARKER)
+
+    def test_every_key_outcome_is_offered_to_the_pump(self) -> None:
+        """`after_command` is how a permission answer and a submitted prompt
+        get out of the session, so it has to run after every key that produced
+        an outcome — not only the ones that look agent-related."""
+        calls, recording = self._recording()
+        port = FakePort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            run_editor(port, events=scripted(keys("a", "\x07")))
+
+        assert [name for name, _ in calls].count("after_command") == 2
+
+    def test_the_child_is_terminated_before_the_terminal_is_restored(self) -> None:
+        """A leaked `hermes acp` holding a pipe outlives a garbled terminal,
+        and terminating it is what releases the agent reader threads."""
+        calls, recording = self._recording()
+        order: list[str] = []
+
+        class TrackingPort(FakePort):
+            def restore(self) -> None:
+                order.append("restore")
+                super().restore()
+
+        port = TrackingPort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            run_editor(port, events=scripted(keys("\x07")))
+        order.insert(0, "close" if ("close", None) in calls else "missing")
+
+        assert order == ["close", "restore"]
+
+
 class _GatedPort(FakePort):
     """A port whose two inputs are driven independently by the test.
 
@@ -832,10 +968,14 @@ def _next_within(stream: EventQueue, timeout: float = 5.0) -> InputEvent:
     regression from hanging CI forever instead of failing.
     """
     deadline = time.monotonic() + timeout
-    while stream._events.empty() and time.monotonic() < deadline:
+    while _empty(stream) and time.monotonic() < deadline:
         time.sleep(0.005)
-    assert not stream._events.empty(), "no event arrived within the deadline"
+    assert not _empty(stream), "no event arrived within the deadline"
     return stream.next_event()
+
+
+def _empty(stream: EventQueue) -> bool:
+    return not stream._priority and not stream._background
 
 
 def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
@@ -877,7 +1017,7 @@ def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
     readers._keys.join(timeout=5)
     assert not readers._keys.is_alive()
     assert _next_within(stream) == Key("z")
-    assert stream._events.empty()
+    assert _empty(stream)
 
 
 def test_run_editor_starts_the_terminal_readers_by_default() -> None:

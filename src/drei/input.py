@@ -1,12 +1,11 @@
-"""Input events and the source seam (design 0005 D2, plan 0015 D1/D2).
+"""Input events and the queue seam (design 0005 D2, plans 0015/0016).
 
 `run_editor` consumes one totally ordered stream of input events instead of
 blocking in `TerminalPort.read_key`. This module holds the vocabulary — the
-event kinds and the source protocol — and nothing that produces them: the
-terminal-backed sources live in :mod:`drei.terminal`, and the agent-backed
-source of §C.2 will live with the process port. Keeping the vocabulary in its
-own module is what lets both sides depend on it without depending on each
-other.
+event kinds — and the mailbox they meet in, and nothing that produces them:
+the terminal producers live in :mod:`drei.terminal` and the agent producers in
+:mod:`drei.pump`. Keeping this in its own module is what lets both sides
+depend on it without depending on each other.
 
 Nothing here reaches the deterministic core. The core still sees only a
 serialized sequence of commands; an event is what the *adapter* hands the
@@ -15,8 +14,8 @@ loop, one at a time, before the loop decides which command it becomes.
 
 from __future__ import annotations
 
-import queue
 import threading
+from collections import deque
 from dataclasses import dataclass
 
 
@@ -25,7 +24,7 @@ class Key:
     """One raw input unit, exactly as `TerminalPort.read_key` returns it.
 
     Not a symbolic key: `KeyAssembler` still runs in the loop, downstream of
-    the source, so escape-sequence assembly is untouched by the seam (plan
+    the queue, so escape-sequence assembly is untouched by the seam (plan
     0015 D1). `char` is therefore a raw character, or a platform key event's
     symbolic name where no byte form exists (Windows extended keys).
     """
@@ -47,10 +46,47 @@ class Resize:
     height: int
 
 
-# The union grows only when a producer exists (plan 0015 D1):
-# `AgentBytes`/`AgentExited` join in §C.2. A member with no producer would be
-# the speculative framework layer the rules forbid.
-InputEvent = Key | Resize
+@dataclass(frozen=True, slots=True)
+class AgentBytes:
+    """Wire bytes from the agent child, exactly as the pipe delivered them.
+
+    Bytes, not frames: framing is the decoder's job and `JsonRpcDecoder` is
+    chunk-safe by construction, so a producer that tried to split on newlines
+    would be doing the decoder's work worse (a multi-byte character can be
+    split too).
+    """
+
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class AgentStderr:
+    """Diagnostics from the agent child. Never enters the wire decoder."""
+
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class AgentExited:
+    """The agent child is gone.
+
+    ``status`` is ``int | None`` rather than ``int`` because a child that
+    vanished between the read returning ``b""`` and the ``poll()`` can
+    legitimately have no status yet. ``None`` means "gone, status unknown",
+    and it is rendered as such rather than guessed at.
+    """
+
+    status: int | None
+
+
+InputEvent = Key | Resize | AgentBytes | AgentStderr | AgentExited
+
+# The events a *verifier* dispatches, and therefore the events that must not
+# queue behind anything (design 0005 D3) — and, for the same underlying
+# reason, exactly the events that carry a readiness marker. An event in this
+# lane is one somebody is waiting on; an event outside it arrived on the
+# peer's schedule and belongs to no input epoch.
+_PRIORITY = (Key, Resize)
 
 
 class EndOfInput(Exception):
@@ -72,16 +108,13 @@ class _ProducerFailed:
     thread that would have delivered it is the one that died. It rides the
     queue rather than jumping it, so input the producer already delivered is
     still consumed first.
+
+    Only the *terminal* producers use it. An agent reader that fails reports
+    `AgentExited`: a dead child is a peer failure the editor survives, and
+    killing the editor because a pipe broke would be the wrong trade.
     """
 
     error: BaseException
-
-
-class _Closed:
-    """End-of-stream marker. Queued by `close`, never consumed."""
-
-
-_CLOSED = _Closed()
 
 
 class EventQueue:
@@ -99,44 +132,65 @@ class EventQueue:
     its own queue. Adding a second producer showed that was the wrong seam:
     what varies is the producers, and what must be singular is the mailbox —
     "one totally ordered input stream" is only true if there is exactly one
-    queue. So the abstract source is gone and this is the concrete seam.
+    queue.
+
+    **Two lanes, not one** (design 0005 D3). A human's keystroke must not
+    queue behind a paragraph of streamed agent text; agent output is bursty by
+    nature and the human is not. The starvation is deliberately asymmetric:
+    agent events wait only while keys keep arriving, and a human cannot type
+    indefinitely.
     """
 
     def __init__(self) -> None:
-        self._events: queue.Queue[InputEvent | _ProducerFailed | _Closed] = (
-            queue.Queue()
-        )
-        self._closing = threading.Event()
+        self._lock = threading.Lock()
+        self._ready = threading.Condition(self._lock)
+        self._priority: deque[InputEvent | _ProducerFailed] = deque()
+        self._background: deque[InputEvent] = deque()
+        self._closed = False
 
     def put(self, event: InputEvent) -> None:
-        """Enqueue one event. Dropped once the queue is closed."""
-        if not self._closing.is_set():
-            self._events.put(event)
+        """Enqueue one event, in its lane. Dropped once the queue is closed."""
+        with self._ready:
+            if self._closed:
+                return
+            if isinstance(event, _PRIORITY):
+                self._priority.append(event)
+            else:
+                self._background.append(event)
+            self._ready.notify()
 
     def fail(self, error: BaseException) -> None:
         """Report that a producer died; `next_event` re-raises it in turn."""
-        if not self._closing.is_set():
-            self._events.put(_ProducerFailed(error))
+        with self._ready:
+            if self._closed:
+                return
+            self._priority.append(_ProducerFailed(error))
+            self._ready.notify()
 
     def next_event(self) -> InputEvent:
-        event = self._events.get()
-        if isinstance(event, _Closed):
-            # Put it back: the end of input is a state, not a one-shot signal
-            # that the next call would forget.
-            self._events.put(event)
-            raise EndOfInput("the input stream is closed")
-        if isinstance(event, _ProducerFailed):
-            # Re-raised on the loop's thread, which restores the terminal on
-            # the way out — the same end state a synchronous read failure
-            # produced before any thread existed.
-            raise event.error
-        return event
+        with self._ready:
+            while True:
+                if self._priority:
+                    item = self._priority.popleft()
+                    if isinstance(item, _ProducerFailed):
+                        # Re-raised on the loop's thread, which restores the
+                        # terminal on the way out — the same end state a
+                        # synchronous read failure produced before any thread
+                        # existed.
+                        raise item.error
+                    return item
+                if self._background:
+                    return self._background.popleft()
+                if self._closed:
+                    raise EndOfInput("the input stream is closed")
+                self._ready.wait()
 
     def close(self) -> None:
         """Stop accepting events and release a consumer already waiting.
 
-        The marker goes to the *back* of the queue, so whatever a producer
-        already delivered is still consumed before the run ends.
+        Whatever a producer already delivered is still consumed first: the
+        closed flag is checked only once both lanes are empty.
         """
-        self._closing.set()
-        self._events.put(_CLOSED)
+        with self._ready:
+            self._closed = True
+            self._ready.notify_all()
