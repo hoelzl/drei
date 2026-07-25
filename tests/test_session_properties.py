@@ -9,6 +9,7 @@ from drei.commands import (
     BufferOpened,
     BufferSaved,
     CopyRegionAsKill,
+    CreateAgentBuffer,
     DeliverProcessOutput,
     DeliverSessionEffects,
     ExchangePointAndMark,
@@ -46,6 +47,9 @@ from drei.session import EditorSession
 
 settings.register_profile("ci", max_examples=50, derandomize=True, deadline=None)
 settings.load_profile("ci")
+
+AGENT = BufferId("*agent*")
+ACP_SESSION = "acp-1"
 
 
 def _session(port: FakeFilePort | None = None) -> EditorSession:
@@ -145,7 +149,19 @@ def _session_effects(draw: st.DrawFn) -> DeliverSessionEffects:
             max_size=4,
         )
     )
-    return DeliverSessionEffects(tuple(effects), BufferId("scratch"))
+    return DeliverSessionEffects(tuple(effects), AGENT)
+
+
+def _agent_session() -> EditorSession:
+    """A session with an agent buffer, focused on the user's buffer.
+
+    Deliveries name a generated buffer (design 0004 D3), so these histories
+    have one to name — and the shape is the one the pump produces: the human
+    keeps working in `scratch` while the transcript accumulates elsewhere.
+    """
+    session = _session()
+    session.dispatch(CreateAgentBuffer(ACP_SESSION))
+    return session
 
 
 @st.composite
@@ -161,14 +177,10 @@ def agent_history(draw: st.DrawFn) -> list[object]:
                 st.just(Undo()),
                 st.just(SetMark()),
                 _session_effects(),
-                # Target pinned to the session's one buffer: this suite's
-                # sessions have no agent buffer, and generating arbitrary ids
-                # would only exercise the unknown-target error path (plan
-                # 0014 V2), not the delivery semantics under test.
                 st.builds(
                     InsertAgentText,
                     st.text(min_size=0, max_size=5),
-                    st.just(BufferId("scratch")),
+                    st.just(AGENT),
                 ),
             )
         )
@@ -591,20 +603,26 @@ def test_minibuffer_accept_always_closes_with_boundary_event(chars: list[str]) -
 @given(agent_history())
 def test_agent_deliveries_never_create_undo_groups(history: list[object]) -> None:
     """InsertAgentText / DeliverSessionEffects are external deliveries: no
-    undo group, no kill-ring change, buffer modified-flag untouched."""
-    session = _session()
+    undo group, no kill-ring change, buffer modified-flag untouched.
+
+    Checked on the **target**, which is where a delivery's bookkeeping now
+    lands (design 0004 D1): checking the focused buffer would pass whatever
+    the delivery did to the agent buffer's undo stacks.
+    """
+    session = _agent_session()
+    target = session._states[AGENT]
     for command in history:
-        undo_before = (len(session._state.undo_history), len(session._state.undo_redo))
+        undo_before = (len(target.undo_history), len(target.undo_redo))
         ring_before = session.kill_ring
-        modified_before = session.buffer.current.modified
+        modified_before = session._buffers[AGENT].current.modified
         outcome = session.dispatch(command)  # type: ignore[arg-type]
         if isinstance(command, (InsertAgentText, DeliverSessionEffects)):
             assert (
-                len(session._state.undo_history),
-                len(session._state.undo_redo),
+                len(target.undo_history),
+                len(target.undo_redo),
             ) == undo_before
             assert session.kill_ring == ring_before
-            assert session.buffer.current.modified == modified_before
+            assert session._buffers[AGENT].current.modified == modified_before
             # Every outcome event is an agent-delivery event, never a user-edit
             # event (TextInserted/TextKilled/...), so _make_group cannot fire.
             assert all(
@@ -621,25 +639,29 @@ def test_agent_insert_events_match_the_buffer_at_delivery(
     that dispatch: the event's text equals the buffer span it records, at the
     moment it is recorded. (Later user edits/undo may overwrite the span —
     the owned deviation — so the check is delivery-local, not cumulative.)"""
-    session = _session()
+    session = _agent_session()
     for command in history:
         outcome = session.dispatch(command)  # type: ignore[arg-type]
-        text = session.buffer.current.text
         for event in outcome.events:
             if isinstance(event, AgentTextInserted):
+                # The event names the buffer it changed; read that one.
+                text = session._buffers[BufferId(event.buffer_id)].current.text
                 assert event.text == text[event.before : event.after]
                 assert event.after == len(text)  # appended at end-of-buffer
 
 
 @given(agent_history())
 def test_point_in_bounds_with_agent_deliveries(history: list[object]) -> None:
-    session = _session()
+    """Both buffers: the user's, which deliveries must leave alone, and the
+    agent buffer, which they append to."""
+    session = _agent_session()
     for command in history:
         session.dispatch(command)  # type: ignore[arg-type]
-        current = session.buffer.current
-        assert 0 <= current.point <= len(current.text)
-        if current.mark is not None:
-            assert 0 <= current.mark <= len(current.text)
+        for buffer_id in (session.buffer.buffer_id, AGENT):
+            current = session._buffers[buffer_id].current
+            assert 0 <= current.point <= len(current.text)
+            if current.mark is not None:
+                assert 0 <= current.mark <= len(current.text)
 
 
 @given(agent_history())
@@ -650,7 +672,7 @@ def test_fold_cache_coherent_with_transcript_events(history: list[object]) -> No
     test_replay_produces_identical_evidence cannot see.)"""
     from drei.acp.transcript import TranscriptFold, advance
 
-    session = _session()
+    session = _agent_session()
     for command in history:
         session.dispatch(command)  # type: ignore[arg-type]
         fold = TranscriptFold()

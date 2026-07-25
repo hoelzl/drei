@@ -187,6 +187,26 @@ class InsertAgentText:
 
 
 @dataclass(frozen=True, slots=True)
+class CreateAgentBuffer:
+    """Bind an ACP session to a generated ``*agent*`` buffer (design 0004 D1).
+
+    Idempotent: a session already bound keeps its buffer and the command is a
+    silent no-op — a re-fold of ``SessionEstablished`` must not mint a second
+    transcript. Otherwise a generated buffer named ``*agent*`` (``*agent*<2>``
+    … via the existing collision rule) is created, visiting no file, and
+    ``BufferCreated`` is recorded.
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: a
+    swallowed creation would leave every later delivery for this session
+    naming a buffer that does not exist, which is an error since design 0004
+    D3. It does **not** switch focus — the agent buffer appearing must not
+    yank the user out of their work.
+    """
+
+    acp_session_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class PromptPermission:
     """Open the choice minibuffer for a ``session/request_permission`` (B.8).
 

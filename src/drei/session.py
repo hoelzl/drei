@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from drei.acp.machine import (
@@ -24,6 +24,7 @@ from drei.commands import (
     BufferSelected,
     CommandOutcome,
     CopyRegionAsKill,
+    CreateAgentBuffer,
     DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
@@ -106,6 +107,7 @@ Command = (
     | DeliverProcessOutput
     | DeliverSessionEffects
     | InsertAgentText
+    | CreateAgentBuffer
     | PromptPermission
     | AbortPendingPermissions
     | FindFile
@@ -251,6 +253,9 @@ def _shift_index(file_text: str, index: int) -> int:
     return index - file_text.count(CRLF, 0, index)
 
 
+BufferKind = Literal["ordinary", "generated"]
+
+
 def _visit(value: BufferValue) -> tuple[BufferValue, _BufferState]:
     """Prepare a buffer value that carries file text, and its state.
 
@@ -332,11 +337,11 @@ class _BufferState:
     """Per-buffer editing state (design 0003 §A.2, plan 0012 D2).
 
     Everything Emacs scopes per buffer lives here: undo history/redo/descent,
-    yank-pop chaining, the kill-append chain flag, and the file-facing facts
-    (last-saved text, line ending). Session-global state (kill ring,
-    transcript, process log, minibuffer, ports) stays on the session — the
-    ring is global in Emacs (kill in one buffer, yank in another), pinned
-    since slice 7.
+    yank-pop chaining, the kill-append chain flag, the buffer's kind, and the
+    file-facing facts (last-saved text, line ending). Session-global state
+    (kill ring, transcript, process log, minibuffer, ports) stays on the
+    session — the ring is global in Emacs (kill in one buffer, yank in
+    another), pinned since slice 7.
     """
 
     __slots__ = (
@@ -349,9 +354,22 @@ class _BufferState:
         "last_was_kill",
         "saved_text",
         "eol",
+        "kind",
     )
 
-    def __init__(self, saved_text: str | None = None, eol: str = LF) -> None:
+    def __init__(
+        self,
+        saved_text: str | None = None,
+        eol: str = LF,
+        kind: BufferKind = "ordinary",
+    ) -> None:
+        # What produced this buffer (design 0004 D3). "generated" means it was
+        # produced by an effect and visits no file — today only agent buffers,
+        # and only they accept a delivery. It lives here rather than on
+        # BufferValue because it is a per-buffer session fact that never
+        # varies per edit, the same category as saved_text and eol. §A.3's
+        # read-only enforcement is the hook's other user.
+        self.kind: BufferKind = kind
         # Buffer text as last read from or written to the file, or None when
         # that is unknown (a buffer handed to the session already modified).
         # The undo path derives the modified flag from it (finding 3).
@@ -439,6 +457,10 @@ class EditorSession:
         from drei.acp.transcript import TranscriptFold
 
         self._agent_fold = TranscriptFold()
+        # ACP session id → its agent buffer (design 0004 D1). One buffer per
+        # ACP session: the binding must be as fine-grained as the transcript
+        # being folded, or a second session would append into the first's.
+        self._agent_buffers: dict[str, BufferId] = {}
 
     @property
     def buffer(self) -> Buffer:
@@ -500,33 +522,60 @@ class EditorSession:
         """
         return tuple(self._process_log)
 
-    @staticmethod
-    def _target_of(command: Command) -> BufferId | None:
-        """The buffer a command edits, when it names one (design 0004 D2).
+    def agent_buffer_id(self, acp_session_id: str) -> BufferId | None:
+        """The agent buffer bound to an ACP session, or None if unbound
+        (design 0004 D1). A caller reads it to build deliveries; nothing else
+        may guess an agent buffer's identity."""
+        return self._agent_buffers.get(acp_session_id)
+
+    def _pinned_target(self, command: Command, events: list[Event]) -> BufferId | None:
+        """The buffer a command pins as its target, when it names or mints one.
 
         ``None`` means "the focused buffer" — the answer for every command
-        except an agent delivery. Deliveries name their target because a
-        transcript binds to an agent buffer, not to whatever the human
-        happens to be looking at (review 0001 finding 5).
+        except an agent delivery and the creation of an agent buffer.
+        Deliveries name their target because a transcript binds to an agent
+        buffer, not to whatever the human happens to be looking at (review
+        0001 finding 5); ``CreateAgentBuffer`` mints one here, so it too edits
+        no buffer the user is looking at.
+
+        A delivery naming a buffer that does not exist, or one that is not
+        generated, raises ``ValueError`` before anything mutates (design 0004
+        D3): dropping it silently would desync the fold, and appending into a
+        file buffer is the hazard this slice exists to remove. The pump can
+        only pass ids the session itself minted, so a violation is a
+        programming error, not peer input.
         """
         match command:
             case (
                 DeliverSessionEffects(buffer_id=buffer_id)
                 | InsertAgentText(buffer_id=buffer_id)
             ):
+                state = self._states.get(buffer_id)
+                if state is None:
+                    raise ValueError(
+                        f"delivery target: no such buffer {buffer_id.value!r}"
+                    )
+                if state.kind != "generated":
+                    raise ValueError(
+                        f"delivery target {buffer_id.value!r} is not a generated buffer"
+                    )
+                return buffer_id
+            case CreateAgentBuffer(acp_session_id=acp_session_id):
+                existing = self._agent_buffers.get(acp_session_id)
+                if existing is not None:
+                    return existing  # idempotent: no second buffer, no event
+                buffer_id = self._create_buffer(
+                    "*agent*",
+                    BufferValue(text="", point=0),
+                    events,
+                    kind="generated",
+                )
+                self._agent_buffers[acp_session_id] = buffer_id
                 return buffer_id
             case _:
                 return None
 
     def dispatch(self, command: Command) -> CommandOutcome:
-        # A delivery **pins** its target buffer (design 0004 D1); every other
-        # command follows focus. The distinction is not cosmetic: `find-file`
-        # and `C-x b` change the focused buffer *inside* their match arm, and
-        # their new value belongs to the buffer they switched TO. So a pinned
-        # target is resolved once here, while an unpinned one is resolved
-        # again after the arm runs — `_commit_id` below.
-        pinned_id = self._target_of(command)
-        current = self._buffers[pinned_id].current if pinned_id else self.buffer.current
         events: list[Event] = []
         new_value: BufferValue
 
@@ -536,6 +585,9 @@ class EditorSession:
         # the agent-buffer fold from the transcript; parity registry row).
         # PromptPermission is delivery-class too: a swallowed permission
         # request would hang the agent (the same row, extended in B.8).
+        # The gate runs before target resolution because resolution has
+        # effects — CreateAgentBuffer mints a buffer — and a gated command
+        # must leave no trace at all.
         if self._minibuffer is not None and not isinstance(
             command,
             MinibufferInput
@@ -545,10 +597,20 @@ class EditorSession:
             | DeliverProcessOutput
             | DeliverSessionEffects
             | InsertAgentText
+            | CreateAgentBuffer
             | PromptPermission
             | AbortPendingPermissions,
         ):
-            return CommandOutcome((), self._observation(current))
+            return CommandOutcome((), self._observation(self.buffer.current))
+
+        # A delivery **pins** its target buffer (design 0004 D1); every other
+        # command follows focus. The distinction is not cosmetic: `find-file`
+        # and `C-x b` change the focused buffer *inside* their match arm, and
+        # their new value belongs to the buffer they switched TO. So a pinned
+        # target is resolved once here, while an unpinned one is resolved
+        # again after the arm runs — `commit_id` below.
+        pinned_id = self._pinned_target(command, events)
+        current = self._buffers[pinned_id].current if pinned_id else self.buffer.current
 
         match command:
             case InsertText(text=text):
@@ -625,10 +687,9 @@ class EditorSession:
                 rendered = self._render_effects(effects)
                 events.append(AgentTranscriptUpdated(effects, rendered, target.value))
             case InsertAgentText(text=text, buffer_id=target):
-                # TODO: [tech-debt] TD-1 — appends to `target_id`, but the
-                # target is not yet constrained to a generated buffer, and
-                # point still jumps to end-of-buffer rather than following
-                # the tail (design 0004 D3/D6, plan 0014 V2/V4).
+                # TODO: [tech-debt] TD-1 — the target is a generated buffer
+                # since V2, but point still jumps to end-of-buffer rather than
+                # following the tail (design 0004 D6, plan 0014 V4).
                 if text:
                     before = len(current.text)
                     after = before + len(text)
@@ -641,6 +702,13 @@ class EditorSession:
                     events.append(AgentTextInserted(text, before, after, target.value))
                 else:
                     new_value = current
+            case CreateAgentBuffer():
+                # The buffer (and its BufferCreated event) came out of target
+                # resolution above; creation edits nothing. `current` is the
+                # new buffer's own value, so the write-back below is a no-op
+                # and the bookkeeping lands on the new buffer's fresh state
+                # rather than intervening in the focused buffer's chains.
+                new_value = current
             case SplitWindow():
                 new_value = self._split_window(events)
             case OtherWindow():
@@ -1129,13 +1197,21 @@ class EditorSession:
         events.append(BufferSelected(buffer_id.value))
 
     def _create_buffer(
-        self, name: str, value: BufferValue, events: list[Event]
+        self,
+        name: str,
+        value: BufferValue,
+        events: list[Event],
+        kind: BufferKind = "ordinary",
     ) -> BufferId:
         """Add a new buffer to the set with a unique name (plan 0012 D1).
 
         Same-basename collisions get numeric ``<N>`` suffixes — a recorded
         deviation from Emacs 29.3's ``<dirname>`` uniquify suffixes (plan
-        0012 evidence 1; deterministic without directory context).
+        0012 evidence 1; deterministic without directory context). The same
+        rule names the second and later agent buffers (design 0004 D1).
+
+        ``kind`` is the buffer's provenance (design 0004 D3); only a
+        ``"generated"`` buffer accepts an agent delivery.
         """
         candidate = name
         suffix = 2
@@ -1144,6 +1220,7 @@ class EditorSession:
             suffix += 1
         buffer_id = BufferId(candidate)
         visited, state = _visit(value)
+        state.kind = kind
         self._buffers[buffer_id] = Buffer(buffer_id, visited)
         self._states[buffer_id] = state
         events.append(BufferCreated(buffer_id.value, visited.file_path))
@@ -1207,7 +1284,7 @@ class EditorSession:
         return "".join(parts)
 
     def apply_session_effects(
-        self, effects: tuple[SessionEffect, ...], buffer_id: BufferId | None = None
+        self, effects: tuple[SessionEffect, ...], buffer_id: BufferId
     ) -> CommandOutcome:
         """The agent-delivery entry point (design 0003 §B.7), mirroring
         ``run_process``: validate, record the fold as one immutable delivery
@@ -1215,11 +1292,10 @@ class EditorSession:
         ``handle()`` call's effects land as one ``AgentTranscriptUpdated``
         plus at most one ``AgentTextInserted``.
 
-        ``buffer_id`` is the agent buffer this transcript belongs to. It
-        defaults to the focused buffer **only** so that callers predating
-        design 0004 keep working while plan 0014 lands; once the pump exists
-        it always names a buffer, and V2 makes an unnamed non-generated
-        target an error.
+        ``buffer_id`` is the agent buffer this transcript belongs to — the one
+        ``CreateAgentBuffer`` minted for the ACP session these effects came
+        from, readable via ``agent_buffer_id``. It is required and must name a
+        generated buffer; anything else raises (design 0004 D3).
 
         TODO: [tech-debt] TD-2 — design 0003 §consequence-2 calls this
         delivery *atomic*; it is two dispatches with an observable seam. The
@@ -1228,15 +1304,14 @@ class EditorSession:
         unobservable in practice. Design 0005 D4 collapses it to one
         dispatch emitting both events; see docs/technical-debt.md.
         """
-        target = buffer_id or self._current_id
-        delivery = DeliverSessionEffects(tuple(effects), target)
+        delivery = DeliverSessionEffects(tuple(effects), buffer_id)
         outcome = self.dispatch(delivery)
         rendered = next(
             e.rendered for e in outcome.events if isinstance(e, AgentTranscriptUpdated)
         )
         if not rendered:
             return outcome
-        append = self.dispatch(InsertAgentText(rendered, target))
+        append = self.dispatch(InsertAgentText(rendered, buffer_id))
         return CommandOutcome(outcome.events + append.events, append.observation)
 
     def run_process(
