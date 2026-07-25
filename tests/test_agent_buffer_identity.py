@@ -20,7 +20,8 @@ from __future__ import annotations
 import pytest
 from conftest import FakeFilePort
 
-from drei.acp.machine import AgentTextChunk
+from drei.acp.machine import AgentTextChunk, PromptCompleted, ThoughtChunk
+from drei.acp.transcript import TranscriptFold
 from drei.commands import (
     AgentTextInserted,
     AgentTranscriptUpdated,
@@ -306,3 +307,71 @@ class TestOnlyGeneratedBuffersAcceptDeliveries:
 
         with pytest.raises(ValueError, match="not a generated buffer"):
             session.apply_session_effects((AgentTextChunk(text="x"),), FOCUSED)
+
+
+class TestEachAgentBufferFoldsIndependently:
+    """V3 / design 0004 D5: the fold cache is per target buffer.
+
+    The fold is *interpreter* state — whether a turn header has been emitted,
+    whether a thought block is open, how many turns have completed. One shared
+    fold would let two ACP sessions rewrite each other's rendering state: the
+    second session's ``PromptCompleted`` closes the first session's open turn,
+    so the first session's next chunk re-emits the ``── agent ──`` header
+    mid-stream, and the per-buffer oracle stops holding for either buffer.
+    """
+
+    def _two(self) -> tuple[EditorSession, BufferId, BufferId]:
+        session = _session()
+        session.dispatch(CreateAgentBuffer("acp-2"))
+        first = session.agent_buffer_id(ACP_SESSION)
+        second = session.agent_buffer_id("acp-2")
+        assert first is not None and second is not None
+        return session, first, second
+
+    def _text(self, session: EditorSession, buffer_id: BufferId) -> str:
+        return session._buffers[buffer_id].current.text
+
+    def test_a_turn_ending_in_one_buffer_does_not_reopen_anothers_header(
+        self,
+    ) -> None:
+        session, first, second = self._two()
+
+        session.apply_session_effects((AgentTextChunk(text="a"),), first)
+        session.apply_session_effects(
+            (PromptCompleted(stop_reason="end_turn"),), second
+        )
+        session.apply_session_effects((AgentTextChunk(text="c"),), first)
+
+        # The first buffer's turn is still open: "c" continues it. Under a
+        # shared fold the second buffer's end-turn would have closed it and
+        # this would read "...a\n── agent ──\nc".
+        assert self._text(session, first) == "\n── agent ──\nac"
+
+    def test_each_buffers_text_is_its_own_fold(self) -> None:
+        session, first, second = self._two()
+
+        session.apply_session_effects((ThoughtChunk(text="think"),), first)
+        session.apply_session_effects((AgentTextChunk(text="hello"),), second)
+        session.apply_session_effects((AgentTextChunk(text="done"),), first)
+
+        for buffer_id in (first, second):
+            rendered = "".join(
+                e.rendered
+                for e in session.transcript
+                if isinstance(e, AgentTranscriptUpdated)
+                and e.buffer_id == buffer_id.value
+            )
+            assert self._text(session, buffer_id) == rendered
+
+    def test_turn_counters_are_independent(self) -> None:
+        """Turn counting is fold state too: three turns in one transcript must
+        not make the other transcript's next turn its fourth."""
+        session, first, second = self._two()
+
+        for _ in range(3):
+            session.apply_session_effects(
+                (PromptCompleted(stop_reason="end_turn"),), first
+            )
+
+        assert session._agent_folds[first].turns == 3
+        assert session._agent_folds.get(second, TranscriptFold()).turns == 0

@@ -666,10 +666,11 @@ def test_point_in_bounds_with_agent_deliveries(history: list[object]) -> None:
 
 @given(agent_history())
 def test_fold_cache_coherent_with_transcript_events(history: list[object]) -> None:
-    """The _agent_fold cache is reconstructible: refolding every recorded
-    AgentTranscriptUpdated.effects from the initial state yields the cache.
-    (Catches fold corruption invisible to outcome tuples — the class of bug
-    test_replay_produces_identical_evidence cannot see.)"""
+    """Each buffer's fold cache is reconstructible: refolding the recorded
+    AgentTranscriptUpdated.effects **targeting that buffer** from the initial
+    state yields that buffer's cache. (Catches fold corruption invisible to
+    outcome tuples — the class of bug test_replay_produces_identical_evidence
+    cannot see.) Scoped per buffer since design 0004 D5."""
     from drei.acp.transcript import TranscriptFold, advance
 
     session = _agent_session()
@@ -677,7 +678,9 @@ def test_fold_cache_coherent_with_transcript_events(history: list[object]) -> No
         session.dispatch(command)  # type: ignore[arg-type]
         fold = TranscriptFold()
         for event in session.transcript:
-            if isinstance(event, AgentTranscriptUpdated):
+            if isinstance(event, AgentTranscriptUpdated) and event.buffer_id == (
+                AGENT.value
+            ):
                 for effect in event.effects:
                     fold, _ = advance(fold, effect)
-        assert session._agent_fold == fold
+        assert session._agent_folds.get(AGENT, TranscriptFold()) == fold

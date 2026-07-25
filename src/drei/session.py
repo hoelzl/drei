@@ -443,8 +443,11 @@ class EditorSession:
         # hostile agent can flood it — accepted: each request is already in the
         # machine's in_flight_incoming, so this adds no new resource class).
         self._permission_queue: list[PermissionRequested] = []
-        # Agent-transcript fold cache (design 0003 §B.7): a derived,
-        # reconstructible cache of the AgentTranscriptUpdated event stream —
+        # Agent-transcript fold cache, per agent buffer (design 0003 §B.7,
+        # keyed by target since design 0004 D5 — the fold is rendering state,
+        # and one shared fold would let two ACP sessions close each other's
+        # turns): a derived, reconstructible cache of the
+        # AgentTranscriptUpdated event stream —
         # the same discipline as _process_log. The transcript remains
         # authoritative. The fold advances *inside* the dispatch that records
         # the delivery event, not after it (review 0001 finding 28 — this
@@ -456,7 +459,7 @@ class EditorSession:
         # two dispatches (see its docstring and docs/technical-debt.md).
         from drei.acp.transcript import TranscriptFold
 
-        self._agent_fold = TranscriptFold()
+        self._agent_folds: dict[BufferId, TranscriptFold] = {}
         # ACP session id → its agent buffer (design 0004 D1). One buffer per
         # ACP session: the binding must be as fine-grained as the transcript
         # being folded, or a second session would append into the first's.
@@ -684,7 +687,7 @@ class EditorSession:
                 # The fold→append step lives in apply_session_effects (the
                 # atomic delivery seam); a raw dispatch only records the fold.
                 new_value = current
-                rendered = self._render_effects(effects)
+                rendered = self._render_effects(effects, target)
                 events.append(AgentTranscriptUpdated(effects, rendered, target.value))
             case InsertAgentText(text=text, buffer_id=target):
                 # TODO: [tech-debt] TD-1 — the target is a generated buffer
@@ -1269,18 +1272,21 @@ class EditorSession:
         self._select_buffer(buffer_id, events)
         return current
 
-    def _render_effects(self, effects: tuple[SessionEffect, ...]) -> str:
-        """Fold effects through the cached ``TranscriptFold``; return the
-        newly rendered suffix. The fold is interpreter state only — it never
-        touches the buffer."""
-        from drei.acp.transcript import advance
+    def _render_effects(
+        self, effects: tuple[SessionEffect, ...], buffer_id: BufferId
+    ) -> str:
+        """Fold effects through the target buffer's cached ``TranscriptFold``;
+        return the newly rendered suffix. The fold is interpreter state only —
+        it never touches the buffer. One fold per agent buffer (design 0004
+        D5): a buffer with no fold yet starts from a fresh one."""
+        from drei.acp.transcript import TranscriptFold, advance
 
         parts: list[str] = []
-        fold = self._agent_fold
+        fold = self._agent_folds.get(buffer_id, TranscriptFold())
         for effect in effects:
             fold, text = advance(fold, effect)
             parts.append(text)
-        self._agent_fold = fold
+        self._agent_folds[buffer_id] = fold
         return "".join(parts)
 
     def apply_session_effects(
