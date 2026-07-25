@@ -1,9 +1,24 @@
 # Fifteenth slice: input events and resize (§C.1)
 
-**Status:** approved at the plan gate (issue #37). Three decisions were taken
-at that gate and are recorded inline below: the threaded source stays in this
-slice (V4, risk 3), resize stays a command rather than a setter (D3), and a
-shrink never destroys windows (D7). No code written before this point.
+**Status:** implemented (issue #37). Three decisions were taken at the plan
+gate and are recorded inline below: the threaded source stays in this slice
+(V4, risk 3), resize stays a command rather than a setter (D3), and a shrink
+never destroys windows (D7).
+
+Two things this plan got wrong, corrected in place where they appear:
+
+- **Owned deviation 2 (unmarked resize redraw) was withdrawn during V4.** Its
+  premise was false — TermVerify dispatches a resize as an input epoch and
+  requires its marker like any other. Leaving it unmarked would have hung the
+  epoch, not weakened its evidence.
+- **D7's rationale claimed `C-x 1` was unbound.** It is bound, and
+  `WindowsCollapsed` already exists, so the decision rests on reversibility
+  alone, not on implementation cost.
+
+One thing it did not anticipate: shrinking a frame far enough exposed that
+row truncation drops the shared echo row before any window pane, recorded as
+**TD-10** and pinned rather than fixed (rendering priority is its own
+decision). TD-6 is paid and removed; TD-2's atomicity paragraph is gone.
 
 **Architecture gate:** design `0005-acp-pump.md` D2 (the injection point) and
 D4 (atomic delivery). This slice places the boundary and proves it with the
