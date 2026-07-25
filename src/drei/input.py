@@ -32,10 +32,24 @@ class Key:
     char: str
 
 
-# The union grows only when a producer exists (plan 0015 D1). `Resize` joins
-# it in V3 of this slice; `AgentBytes`/`AgentExited` in §C.2. A member with no
-# producer would be the speculative framework layer the rules forbid.
-InputEvent = Key
+@dataclass(frozen=True, slots=True)
+class Resize:
+    """The terminal became `width` x `height` character cells.
+
+    An input event rather than a callback or a setter because frame size is
+    semantic — it gates `C-x 2` — so it has to enter the same totally ordered
+    stream as the keys it interleaves with, and reach the session as a command
+    that the transcript records (plan 0015 D3).
+    """
+
+    width: int
+    height: int
+
+
+# The union grows only when a producer exists (plan 0015 D1):
+# `AgentBytes`/`AgentExited` join in §C.2. A member with no producer would be
+# the speculative framework layer the rules forbid.
+InputEvent = Key | Resize
 
 
 class InputSource(abc.ABC):

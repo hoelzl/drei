@@ -9,6 +9,7 @@ from drei.commands import (
     MinibufferAccept,
     MinibufferBackspace,
     MinibufferInput,
+    ResizeFrame,
     SaveFailed,
 )
 from drei.files import FilePort
@@ -83,6 +84,26 @@ class EditorHarness:
         outcome = self._session.dispatch(resolved)
         self._outcomes.append(outcome)
         self._echo = self._echo_for(outcome)
+        self._frame = self._render_frame()
+        return outcome
+
+    def resize(self, width: int, height: int) -> CommandOutcome:
+        """Apply a new frame size (plan 0015 V3).
+
+        Deliberately *not* routed through :meth:`send`: a resize is not a key,
+        so the minibuffer gate never sees it. Frame size is a property of the
+        terminal rather than of input focus — swallowing it while a prompt is
+        open would leave the frame rendering against a stale size for as long
+        as the prompt stayed open, and the prompt itself lives on the echo row
+        whose position depends on the height.
+
+        The echo message is left alone: a resize is not a user action and must
+        not wipe an outstanding message the way a command does.
+        """
+        outcome = self._session.dispatch(ResizeFrame(width, height))
+        self._outcomes.append(outcome)
+        self._width = width
+        self._height = height
         self._frame = self._render_frame()
         return outcome
 

@@ -7,8 +7,13 @@ from unittest.mock import patch
 import pytest
 
 from drei.files import SystemFilePort
-from drei.input import InputEvent, InputSource, Key
-from drei.terminal import TerminalPort, run_editor
+from drei.input import InputEvent, InputSource, Key, Resize
+from drei.terminal import (
+    _CLEAR_SCREEN,
+    READINESS_MARKER,
+    TerminalPort,
+    run_editor,
+)
 
 
 class FakePort(TerminalPort):
@@ -686,3 +691,74 @@ def test_system_port_restore_resets_saved(
 
     port.restore()
     assert called == [method]
+
+
+def _frame_rows(port: FakePort) -> list[list[str]]:
+    """The rows of each frame written, oldest first."""
+    frames = "".join(port.outputs).split(_CLEAR_SCREEN)[1:]
+    return [frame.split("\r\n") for frame in frames]
+
+
+def test_resize_event_redraws_at_the_new_size() -> None:
+    """V3 wiring: a Resize on the stream reaches the session as a command and
+    every later frame is drawn at the new size. FakePort starts at 10x3."""
+    port = FakePort([])
+    run_editor(port, source=ScriptedSource([Key("a"), Resize(30, 6), Key("\x07")]))
+    frames = _frame_rows(port)
+    # Frames before the resize are 10 wide, after it 30 — and the buffer
+    # content survived the resize.
+    assert len(frames[0][0]) == 10
+    assert len(frames[-1][0]) == 30
+    assert frames[-1][0].startswith("a")
+    assert len(frames[-1]) == 6
+
+
+def test_resize_redraw_carries_no_readiness_marker() -> None:
+    """Plan 0015 deviation 2: markers stay bound to input epochs, so the
+    spontaneous redraw a resize causes is unmarked. A verifier waiting on a
+    keystroke's marker must not have it satisfied by a terminal resize."""
+    keyed = FakePort([])
+    run_editor(keyed, source=ScriptedSource(keys("a", "\x07")))
+
+    resized = FakePort([])
+    run_editor(resized, source=ScriptedSource([Key("a"), Resize(30, 6), Key("\x07")]))
+
+    written = "".join(resized.outputs)
+    baseline = "".join(keyed.outputs)
+    # The resize added a frame...
+    assert written.count(_CLEAR_SCREEN) == baseline.count(_CLEAR_SCREEN) + 1
+    # ...but not a marker.
+    assert written.count(READINESS_MARKER) == baseline.count(READINESS_MARKER)
+
+
+def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
+    """The pinned answer: the minibuffer gate routes keys, and a resize is
+    not a key, so the prompt survives, re-renders at the new width, and keeps
+    receiving input. Two C-g: the first aborts the prompt, the second quits.
+    """
+    port = FakePort([])
+    run_editor(
+        port,
+        source=ScriptedSource(
+            [
+                Key("\x18"),
+                Key("\x06"),  # C-x C-f
+                Resize(30, 6),
+                Key("x"),
+                Key("\x07"),  # abort the prompt
+                Key("\x07"),  # quit
+            ]
+        ),
+    )
+    # The echo row is a frame's last row, so it carries the trailing cursor
+    # escape; measure the cell content in front of it.
+    prompts = [
+        row.split("\x1b")[0]
+        for frame in _frame_rows(port)
+        for row in frame
+        if row.startswith("Find file:")
+    ]
+    # Drawn at the new width after the resize...
+    assert any(len(row) == 30 for row in prompts), prompts
+    # ...and the "x" went into that same prompt rather than the buffer.
+    assert any(row.rstrip() == "Find file: x" for row in prompts), prompts

@@ -22,7 +22,7 @@ from typing import Literal
 from drei.commands import KeyboardQuitEvent
 from drei.files import FilePort
 from drei.harness import EditorHarness
-from drei.input import InputEvent, InputSource, Key
+from drei.input import InputEvent, InputSource, Key, Resize
 
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 _CURSOR_HOME = "\x1b[H"
@@ -207,6 +207,17 @@ def run_editor(
         assembler = KeyAssembler()
         while True:
             event = events.next_event()
+            if isinstance(event, Resize):
+                harness.resize(event.width, event.height)
+                # No readiness marker: markers mark quiescence *after an
+                # input epoch*, and a resize is not one the verifier drove
+                # with a key. Emitting one here would let a verifier waiting
+                # on its keystroke's marker be satisfied by an unrelated
+                # terminal event. Plan 0015 deviation 2 owns the cost — a
+                # TermVerify resize scenario waits on frame content with a
+                # deadline instead.
+                _write_frame(port, harness, mark_ready=False)
+                continue
             assembler, resolved = assembler.feed(event.char)
             # No keys: the character was consumed mid-sequence, so the
             # subject is mid-chord and not quiescent — no marker until the
