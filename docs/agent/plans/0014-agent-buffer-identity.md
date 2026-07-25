@@ -1,6 +1,38 @@
 # Fourteenth slice: agent buffer identity
 
-**Status:** claimed (issue #34), plan under review — no code written yet.
+**Status:** claimed (issue #34); plan merged (PR #35). **V1 landed** on
+`feat/agent-buffer-identity` as `7a0bd3b` — see the D1 amendment below, which
+corrects the plan as drafted. V2–V6 outstanding.
+
+**Resuming here?** Read the D1 amendment first (the drafted rule was wrong),
+then *Where V1 left off*, then continue at V2 in *Implementation order*.
+
+## Where V1 left off
+
+- `dispatch` resolves a target: `pinned_id = self._target_of(command)` at the
+  top, `commit_id = pinned_id or self._current_id` after the match arm. The
+  four bookkeeping blocks and the write-back use `commit_id`; the focused
+  window's `WindowValue` is refreshed only when `commit_id` is the focused
+  buffer. No `self._state` remains in `dispatch`'s own body — that grep is an
+  acceptance check.
+- Both delivery commands carry `buffer_id: BufferId`; both delivery events
+  carry `buffer_id: str`. `apply_session_effects(effects, buffer_id=None)`
+  defaults to the focused buffer so pre-0004 callers still work — V2 is where
+  an unnamed or non-generated target becomes an error.
+- `tests/test_agent_buffer_identity.py` is the new home for this slice's
+  tests: four on targeting, five on the bookkeeping arm.
+- Nothing yet creates an agent buffer, so every production path still targets
+  the focused buffer. Behavior is unchanged; the full suite is the gate.
+
+**Two facts V1 turned up that V2 needs:**
+
+1. An unknown target currently raises `KeyError` from a plain dict lookup
+   (`self._buffers[pinned_id]`). V2's `ValueError` replaces it; until then the
+   property strategy in `test_session_properties.py` pins `buffer_id` to
+   `scratch` rather than generating ids, with a comment saying why.
+2. The *decisions* behind D3 (`kind` on the private `_BufferState`) and D4
+   (`CreateAgentBuffer` as a command, not a plain method) were confirmed by
+   the owner after the plan merged. They are not open questions.
 
 **Architecture gate:** design `0004-agent-buffer-identity.md`, which this slice
 implements in full. No new ports, no I/O, no protocol change, no new
@@ -42,10 +74,28 @@ generated buffer can receive one.
 
 ### D1. Dispatch resolves a target buffer; focus is the default, not the rule
 
-`dispatch` gains one resolution step at the top: the **target** is the focused
-buffer for every command except `DeliverSessionEffects` and `InsertAgentText`,
-which name theirs. `current`, `self._state`, and the write-back all follow the
-target.
+`dispatch` gains one resolution step: the **target** is the focused buffer for
+every command except `DeliverSessionEffects` and `InsertAgentText`, which name
+theirs. `current`, `self._state`, and the write-back all follow the target.
+
+> **Amended during V1 (commit `7a0bd3b`) — resolve *when*, not just *what*.**
+> As drafted this paragraph said the target is resolved "at the top", once,
+> for every command. That is wrong, and the existing suite caught it: a
+> command may change the focused buffer **inside its own match arm**
+> (`find-file` selects the buffer it just created; `C-x b` selects the one it
+> switched to), and its new value belongs to the buffer it ended on. The
+> pre-refactor code got this right by accident, re-resolving `self.buffer` at
+> commit time. Freezing the target up front sent find-file's loaded text into
+> the *previous* buffer — four tests failed, including the shipped ConPTY
+> switch-buffer scenario.
+>
+> The rule is therefore narrower than "resolve once": a delivery **pins** its
+> target at the top (it must not follow a focus change it did not cause);
+> every other command resolves again **after** the arm runs, preserving the
+> existing semantics exactly. In code: `pinned_id = self._target_of(command)`
+> up front, `commit_id = pinned_id or self._current_id` after the match. Any
+> future command that moves focus as part of its own effect stays correct
+> under this rule; it would not under the original wording.
 
 This is the structural core of the slice and it is deliberately a *general*
 mechanism stated in one place, not a special case threaded through two match
