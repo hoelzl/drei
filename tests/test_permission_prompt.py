@@ -20,6 +20,7 @@ from drei.acp.machine import (
     Cancelled,
     PermissionRequested,
     Selected,
+    resolve_permission,
 )
 from drei.commands import (
     AbortPendingPermissions,
@@ -456,14 +457,22 @@ class TestPermissionQueue:
         assert decided == [
             PermissionDecided(request_id="perm-abc", decision=Selected("o-once"))
         ]
-        machine, out, _ = session.apply_permission_decision(
-            machine, "perm-abc", decided[0].decision
-        )
+        machine, out, _ = resolve_permission(machine, "perm-abc", decided[0].decision)
         assert isinstance(out[0], Response)
         assert out[0].id == "perm-abc"
 
 
-class TestApplyPermissionDecision:
+class TestResolvePermission:
+    """The pure decision→response mapping the pump drives (design 0005 D7).
+
+    Until slice 16 the session wrapped this in `apply_permission_decision`, a
+    method whose entire body was "call the pure function", carrying a TODO
+    saying no pump existed to call it. The pump exists now and calls the
+    function — which is what 0005 D7 asks for, since the machine is transport
+    state and giving the session a method that takes one only looked like
+    ownership.
+    """
+
     def _machine_with_in_flight(self) -> AcpMachine:
         from drei.acp.machine import handle, new_session, start
         from drei.acp.messages import Request, Response
@@ -489,11 +498,8 @@ class TestApplyPermissionDecision:
     def test_feeds_decision_to_machine_and_returns_response(self) -> None:
         from drei.acp.messages import Response
 
-        session = make_session()
         machine = self._machine_with_in_flight()
-        machine, out, effects = session.apply_permission_decision(
-            machine, 42, Selected("o-once")
-        )
+        machine, out, effects = resolve_permission(machine, 42, Selected("o-once"))
         assert isinstance(out[0], Response)
         assert out[0].id == 42
         assert out[0].result == {
@@ -501,9 +507,8 @@ class TestApplyPermissionDecision:
         }
 
     def test_unknown_request_raises(self) -> None:
-        session = make_session()
         machine = self._machine_with_in_flight()
         from drei.acp.machine import AcpStateError
 
         with pytest.raises(AcpStateError):
-            session.apply_permission_decision(machine, 999, Selected("x"))
+            resolve_permission(machine, 999, Selected("x"))

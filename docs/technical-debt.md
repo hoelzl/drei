@@ -24,48 +24,39 @@ that review's.
 
 ---
 
-## TD-2 (finding 11) — the ACP subsystem is unreachable from the shipped editor
+## TD-2 (finding 11) — turn cancellation is wired to nothing
 
-**Deferred to:** a design record — **written**, `agent/design/0005-acp-pump.md`.
-The debt now is the slices that implement it.
-**Location:** `src/drei/harness.py` (`EditorHarness.__init__` takes no process
-port), `src/drei/keys.py` (no agent command is bound),
-`src/drei/session.py` (`apply_permission_decision` returns a `Response`
-nobody sends), `src/drei/process.py` (`ProcessPort` is run-to-completion
-only).
-**Severity:** high — five merged slices are unreachable from the shipped
-editor.
+**Deferred to:** the cancellation slice. Design record:
+`agent/design/0005-acp-pump.md` D5.
+**Location:** `src/drei/acp/machine.py` (`cancel`), `src/drei/session.py`
+(`AbortPendingPermissions`), `src/drei/keys.py` (`C-g` is bound to
+`KeyboardQuit`, which exits the editor).
+**Severity:** medium — a turn in flight cannot be stopped except by quitting.
 
-Slices 0008–0011 and 0013 built the port, codec, machine, translation, and
-approval bridge. Nothing wires them: the shipped editor cannot launch or
-speak to a long-lived `hermes acp` child, and the A.1 port is blocking
-run-to-completion by design (plan 0008 deferred the pump deliberately;
-design 0003 §A.1 carried the unamended streaming description until design
-0005 split it).
+**Most of this entry is paid.** Plan 0016 shipped the pump: a
+`StreamingProcessPort` holds a long-lived child, agent bytes arrive as events
+on the loop's ordered input stream, `C-c a` sends a prompt, the streamed
+answer folds into a displayed agent buffer, and a permission request is both
+presented *and answered* — the response that "nobody sends" now goes on the
+wire. Plan 0015 had already paid the injection point and single-dispatch
+delivery. What is left is the fifth item design 0005 lists.
 
-**Why deferred:** the pump is several slices, not a fix. It needed a streaming
-port shape, an event-injection point in a loop that blocked on `read_key()`, a
-serialization rule for deliveries against keystrokes, cancellation wiring (the
-machine's sweep and the session's `AbortPendingPermissions` both exist but
-nothing calls them). Plan 0015 paid two of those: the loop now consumes an
-ordered `InputEvent` stream from an injectable `InputSource` (V1/V4), and the
-delivery is a single dispatch, so the "atomic" claim in
-`apply_session_effects` and design 0003 consequence 2 is true as written
-(V5). What remains unreachable is the agent side: no streaming port, no
-launcher, no bound key. TD-1's buffer binding is no longer among them: plan
-0014 implemented design 0004, so the pump inherits a resolved agent buffer
-per ACP session rather than a decision to make.
+`AcpMachine.cancel()` answers every pending `session/request_permission` with
+the `cancelled` outcome, and the session's `AbortPendingPermissions` closes an
+open choice prompt and drains the queue. The pump calls the second (on child
+exit) but never the first, and nothing at all triggers a turn cancel.
 
-**Suggested approach:** design 0005 decides all five — a `StreamingProcessPort`
-separate from `ProcessPort`, one ordered `InputEvent` queue fed by adapter-side
-reader threads (resize included — the old TD-6, paid by plan 0015 V4), one
-event per loop iteration with keys ahead of agent bytes, a single-dispatch
-delivery (paid by plan 0015 V5), and cancellation calling `cancel()` then
-`AbortPendingPermissions`. Implement it in that order; plan 0015 did the
-first and the fourth, so what is left is the streaming port, the fairness
-rule over two live sources, and cancellation. Note 0005's two open
-blockers before starting the cancellation slice: `C-g` currently exits the
-editor, and readiness markers have no epoch for a spontaneous delivery.
+**Why deferred:** the trigger is a keymap decision, not a wiring one. 0005 D5
+wants `C-g` *while a turn is in flight* to cancel the turn — but `C-g`
+currently **exits the editor**, a slice-1 shortcut Emacs does not share
+(`C-g` is `keyboard-quit`; `C-x C-c` exits). Overloading an exit key with turn
+cancellation by accident is the bad end state 0005 names, and fixing the
+binding falsifies a parity registry row. That is its own change.
+
+**Suggested approach:** decide the `C-g`/`C-x C-c` binding first, with its
+registry row; then have the pump call `cancel()` and dispatch
+`AbortPendingPermissions`, in that order — answer the agent, which is blocked,
+before clearing the UI.
 
 ## TD-3 (finding 18) — trailing-slash find-file creates an unreachable `""` buffer
 

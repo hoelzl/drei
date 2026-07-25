@@ -4,13 +4,16 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    # No `AcpMachine` here, and that is the point of design 0005 D7: the
+    # session presents a permission request and records the human's decision
+    # as an event, and the pump — which owns the machine — turns that into the
+    # wire response. The import disappeared when the pass-through seam did.
     from drei.acp.machine import (
-        AcpMachine,
         PermissionDecision,
         PermissionRequested,
         SessionEffect,
     )
-    from drei.acp.messages import JsonValue, Message, RequestId
+    from drei.acp.messages import JsonValue
 
 from drei.commands import (
     AbortPendingPermissions,
@@ -1079,26 +1082,6 @@ class EditorSession:
                 if isinstance(oid, str):
                     return Selected(oid)
         return Cancelled()
-
-    def apply_permission_decision(
-        self,
-        machine: AcpMachine,
-        request_id: RequestId,
-        decision: PermissionDecision,
-    ) -> tuple[AcpMachine, list[Message], list[SessionEffect]]:
-        """Feed a human decision back to the ACP machine (B.8 seam), mirroring
-        ``apply_session_effects``. The session owns no machine (the §C pump
-        does); this takes and returns it so the pure ``resolve_permission``
-        maps the decision onto the exact 0.9.0 response. The returned
-        ``Response`` is what the pump sends; nothing is sent here.
-
-        TODO: [tech-debt] TD-2 — no pump exists, so no caller ever sends it:
-        a real agent asking permission would still block forever. See
-        docs/technical-debt.md.
-        """
-        from drei.acp.machine import resolve_permission
-
-        return resolve_permission(machine, request_id, decision)
 
     def _observation(self, value: BufferValue) -> BufferObservation:
         return BufferObservation(
