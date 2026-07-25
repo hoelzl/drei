@@ -38,7 +38,13 @@ class ProcessTimedOut(Exception):
 
 
 class ProcessPort(Protocol):
-    """Effect port for launching a child process and capturing its output."""
+    """Effect port for launching a child process and capturing its output.
+
+    TODO: [tech-debt] TD-2 — run-to-completion only (plan 0008's deliberate
+    scoping). It cannot speak to a long-lived ``hermes acp`` child, which is
+    what design 0003 §A.1 describes; the streaming shape is the §C pump's
+    design record. See docs/technical-debt.md.
+    """
 
     def run(
         self,

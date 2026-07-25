@@ -59,6 +59,7 @@ During development run the narrowest relevant test first. Before completion, run
 | Stable workflows | `docs/developer-guide/` |
 | Durable product/architecture/verification knowledge | `docs/knowledge/` |
 | Decisions, reuse assessments, plans, handovers | `docs/agent/` |
+| Deliberately deferred defects and shortcuts | `docs/technical-debt.md` |
 | Proven recurring agent procedures | `.agents/skills/` only after validation |
 
 Keep this file compact. Harness-specific files are thin adapters and must not duplicate project knowledge. Durable facts belong in the repository, not private harness memory. Use isolated external worktrees for parallel writers and keep the primary checkout as integration point.

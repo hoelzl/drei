@@ -7,3 +7,7 @@ Retrieve only the pages relevant to the task:
 - [Verification model](verification-model.md) — TDD, properties, replay, TermVerify, and parity.
 - [GNU Emacs parity policy](emacs-parity.md) — pinned differential reference and divergence governance.
 - [Terminology](terminology.md) — stable project vocabulary.
+
+Outside this directory: [technical debt](../technical-debt.md) — known
+defects and shortcuts that were deliberately deferred, each with a
+`TODO: [tech-debt]` marker at its code location.

@@ -1,6 +1,6 @@
 # Tenth slice: ACP client core (B.6) — pure session state machine
 
-**Status:** ready — architecture gate: builds on the B.5 codec/envelope layer (`drei.acp.codec`, `drei.acp.messages`). Still **pure**: no I/O, no `subprocess`, no `asyncio`, no editor change. The state machine is an immutable value folded over inbound messages, emitting outbound messages — nothing flows across a port yet.
+**Status:** merged (PR #22, commit `92054d4`) — architecture gate: builds on the B.5 codec/envelope layer (`drei.acp.codec`, `drei.acp.messages`). Still **pure**: no I/O, no `subprocess`, no `asyncio`, no editor change. The state machine is an immutable value folded over inbound messages, emitting outbound messages — nothing flows across a port yet.
 
 **Goal:** model the client side of the ACP session lifecycle — `initialize` → `session/new` → `session/prompt` → stream of `session/update` → completion/cancel — as a pure, replayable state machine that is verifiable *without* a real agent, per design 0003 §B.6. This is the heart of the ACP client: the §C launcher will drive it, and B.7/B.8 translate its outputs into editor commands and approval prompts.
 

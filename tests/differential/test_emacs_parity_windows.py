@@ -6,9 +6,10 @@ per-window points — against GNU Emacs 29.3 and against Drei's production
 session, then compares normalized observations.
 
 Pinning strategy per docs/developer-guide/development.md and
-test_emacs_parity.py: the pinned reference is GNU Emacs 29.3 from
-`ubuntu:24.04` (`apt-get install emacs-nox`), locally via Docker or in CI
-on the pinned runner. Opt in via DREI_PARITY=1; skips otherwise.
+test_emacs_parity.py: the pinned reference is GNU Emacs 29.3, reached
+through that module's `_run_pinned_emacs` — locally the derived image
+`drei-parity-emacs:24.04` (or a pinned host `emacs`), in CI the pinned
+runner. Opt in via DREI_PARITY=1; skips otherwise.
 
 Verdicts are stated per scenario; each intentional deviation names its
 pinning tests.

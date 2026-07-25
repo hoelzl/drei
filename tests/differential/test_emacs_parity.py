@@ -371,7 +371,15 @@ def _run_pinned_emacs(eval_form: str = EMACS_EVAL) -> list[str]:
 
 @pytest.mark.integration
 def test_emacs_differential_insert_and_horizontal_movement() -> None:
-    # The pinned-container path installs emacs-nox on every run (~2 min).
+    """Startup, insert, backward-char, forward-char in an empty buffer.
+
+    Verdict: parity required on the resulting text and point. Normalization:
+    Emacs point is 1-based and Drei's is 0-based (`point_emacs - 1 ==
+    point_drei`); nothing else differs, and both sides run the same command
+    sequence — Drei through its production dispatch path.
+    """
+    # The container path builds `drei-parity-emacs:24.04` once (emacs-nox
+    # baked in); the first run pays the apt install, later runs do not.
     # Keep the default local suite fast: opt in via DREI_PARITY=1 (CI sets it
     # in the dedicated parity job).
     if os.environ.get("DREI_PARITY") != "1":

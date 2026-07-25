@@ -27,9 +27,9 @@ DREI_PARITY=1 uv --no-config run pytest tests/differential -q
 - Shipped-terminal evidence: `uv --no-config run pytest tests/termverify -q` (ConPTY, Windows; skipped on other platforms in TermVerify 0.1.x), or run `uv --no-config run drei` in a real TTY (writes `DREI:READY`, emits OSC 7791 readiness markers, exits cleanly on `C-g`).
 - Differential evidence: `DREI_PARITY=1 uv --no-config run pytest tests/differential -q` (requires Docker or a pinned 29.x host `emacs`).
 
-## Coverage ratchet
+## Coverage floor
 
-`fail_under` is the integer floor of reviewed observed combined line-and-branch coverage. `precision = 2` prevents rounding grace. Raise only with durable headroom; lowering, exclusions, or tests written merely to inflate coverage require owner review.
+`fail_under` is the reviewed floor of combined line-and-branch coverage, currently **100**; `precision = 2` prevents rounding grace. At that value it is a hard floor rather than a ratchet — an uncovered line is a new gap, not a regression against a moving baseline. Lowering it, adding exclusions, or writing tests merely to inflate coverage requires owner review.
 
 ## Dependencies and donor code
 

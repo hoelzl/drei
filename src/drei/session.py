@@ -428,8 +428,14 @@ class EditorSession:
         # Agent-transcript fold cache (design 0003 §B.7): a derived,
         # reconstructible cache of the AgentTranscriptUpdated event stream —
         # the same discipline as _process_log. The transcript remains
-        # authoritative; the fold only advances after the delivery event is
-        # recorded, so cache and transcript cannot desync mid-dispatch.
+        # authoritative. The fold advances *inside* the dispatch that records
+        # the delivery event, not after it (review 0001 finding 28 — this
+        # comment used to claim otherwise): _render_effects runs a few lines
+        # before the AgentTranscriptUpdated append. That is safe because the
+        # two are one command — a caller never observes a state between them,
+        # and replaying the event stream reconstructs the same fold. It is
+        # NOT the same as apply_session_effects being atomic; that seam is
+        # two dispatches (see its docstring and docs/technical-debt.md).
         from drei.acp.transcript import TranscriptFold
 
         self._agent_fold = TranscriptFold()
@@ -594,6 +600,13 @@ class EditorSession:
                 rendered = self._render_effects(effects)
                 events.append(AgentTranscriptUpdated(effects, rendered))
             case InsertAgentText(text=text):
+                # TODO: [tech-debt] TD-1 — this appends to the *focused*
+                # buffer, so a C-x b between two deliveries splits one
+                # transcript across two buffers; it also leaves `modified`
+                # untouched (a later C-x C-s writes agent text into the
+                # user's file) and moves point to end-of-buffer. Fix needs
+                # the agent-buffer identity design record; see
+                # docs/technical-debt.md.
                 if text:
                     before = len(current.text)
                     after = before + len(text)
@@ -912,7 +925,12 @@ class EditorSession:
         ``apply_session_effects``. The session owns no machine (the §C pump
         does); this takes and returns it so the pure ``resolve_permission``
         maps the decision onto the exact 0.9.0 response. The returned
-        ``Response`` is what the pump sends; nothing is sent here."""
+        ``Response`` is what the pump sends; nothing is sent here.
+
+        TODO: [tech-debt] TD-2 — no pump exists, so no caller ever sends it:
+        a real agent asking permission would still block forever. See
+        docs/technical-debt.md.
+        """
         from drei.acp.machine import resolve_permission
 
         return resolve_permission(machine, request_id, decision)
@@ -1122,6 +1140,10 @@ class EditorSession:
         except UnicodeDecodeError:
             events.append(OpenFailed(path, "io-error"))
             return current
+        # TODO: [tech-debt] TD-3 — a trailing slash ("notes/") makes this
+        # basename "", and a buffer named "" is unreachable afterwards: C-x b
+        # with empty input takes the MRU default and no typed name matches
+        # it, so edits made there are stranded. See docs/technical-debt.md.
         name = path.replace("\\", "/").rsplit("/", 1)[-1]
         buffer_id = self._create_buffer(
             name,
@@ -1155,8 +1177,13 @@ class EditorSession:
         ``run_process``: validate, record the fold as one immutable delivery
         event, then append the newly rendered text as one buffer edit. One
         ``handle()`` call's effects land as one ``AgentTranscriptUpdated``
-        plus at most one ``AgentTextInserted`` — atomic per design 0003
-        §consequence-2.
+        plus at most one ``AgentTextInserted``.
+
+        TODO: [tech-debt] TD-2 — design 0003 §consequence-2 calls this
+        delivery *atomic*; it is two dispatches with an observable seam. The
+        fold advances in the first whether or not the second runs. Nothing
+        drives it concurrently today (there is no §C pump), so the seam is
+        unobservable in practice; see docs/technical-debt.md.
         """
         delivery = DeliverSessionEffects(tuple(effects))
         outcome = self.dispatch(delivery)
@@ -1212,7 +1239,14 @@ class EditorSession:
     def _undo(self, current: BufferValue, events: list[Event]) -> BufferValue:
         """Apply the newest group's inverse (descending) or, after any
         intervening event-emitting command, redo the newest undone group
-        (Emacs's direction flip on last-command != undo)."""
+        (Emacs's direction flip on last-command != undo).
+
+        TODO: [tech-debt] TD-8 — the undo stacks are mutated below *before*
+        the replacement BufferValue is constructed. Unreachable today (the
+        value's invariants cannot be violated from here), but if
+        __post_init__ ever raised the stacks would be mutated with no event
+        recorded. See docs/technical-debt.md.
+        """
         if self._state.undo_descending or not self._state.undo_redo:
             if not self._state.undo_history:
                 return current  # nothing to undo: silent no-op
@@ -1300,6 +1334,9 @@ class EditorSession:
                 end = len(text)
             killed = text[point:end]
         new_text = text[:point] + text[end:]
+        # TODO: [tech-debt] TD-8 — the ring is mutated before the replacement
+        # BufferValue is constructed; same unreachable-today ordering as
+        # _undo. See docs/technical-debt.md.
         if self._state.last_was_kill and self._kill_ring:
             self._kill_ring[0] += killed
         else:

@@ -154,6 +154,12 @@ def run_editor(
     port.flush()
     port.enter_raw()
     try:
+        # TODO: [tech-debt] TD-6 — read once, never again: there is no
+        # SIGWINCH / WINDOW_BUFFER_SIZE_EVENT path, so after a resize frames
+        # wrap against a stale width and the C-x 2 minimum-height gate tests
+        # a height the terminal no longer has. Wants the same asynchronous
+        # injection point the §C pump needs (TD-2); see
+        # docs/technical-debt.md.
         width, height = port.get_size()
         harness = EditorHarness(
             width=width,

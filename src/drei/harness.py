@@ -33,6 +33,10 @@ class EditorHarness:
         file_path: str | None = None,
         initial_text: str = "",
     ) -> None:
+        # TODO: [tech-debt] TD-2 — no process port is accepted here, and no
+        # key binds an agent command: the whole ACP subsystem (slices
+        # 0008-0011, 0013) is unreachable from the shipped editor until the
+        # §C pump design record lands. See docs/technical-debt.md.
         buffer_id = BufferId(
             file_path.replace("\\", "/").rsplit("/", 1)[-1] if file_path else "scratch"
         )
@@ -96,6 +100,11 @@ class EditorHarness:
 
     @staticmethod
     def _echo_for(outcome: CommandOutcome) -> str:
+        # TODO: [tech-debt] TD-4 — only these three events echo. Every other
+        # failure (notably OpenFailed from a C-x C-f that hit a permission
+        # error) closes the minibuffer with a blank echo row, which reads as
+        # a successful no-op. Needs the echo-message slice; see
+        # docs/technical-debt.md.
         for event in outcome.events:
             if isinstance(event, KeyboardQuitEvent):
                 return "Quit"

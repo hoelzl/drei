@@ -43,6 +43,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"drei: {file_path}: not a utf-8 text file", file=sys.stderr)
             raise SystemExit(2) from None
         except OSError as error:
+            # TODO: [tech-debt] TD-9 — this prints a raw, locale-dependent
+            # strerror and exits 2, while C-x C-f on the same file yields a
+            # normalized OpenFailed token: two vocabularies for one
+            # operation, violating the normalized-token rule in process.py.
+            # Fix is to route startup through the session's visit path. See
+            # docs/technical-debt.md.
             print(f"drei: {file_path}: {error.strerror or error}", file=sys.stderr)
             raise SystemExit(2) from error
 

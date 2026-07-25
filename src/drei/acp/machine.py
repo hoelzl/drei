@@ -187,7 +187,17 @@ SessionEffect = (
 
 @dataclass(frozen=True, slots=True)
 class AcpMachine:
-    """Immutable client-side ACP session state."""
+    """Immutable client-side ACP session state.
+
+    TODO: [tech-debt] TD-7 — "immutable" is shallow: the dict fields below
+    are plain dicts, and inbound payload dicts are aliased across this
+    machine, the session's _choice/_permission_queue, and the transcript
+    effects. One consumer mutating a payload in place would retroactively
+    rewrite both the transcript oracle and the auto-approval identity key
+    (_permission_identity canonicalizes the same dict at match time). No
+    consumer does today; the discipline is convention, not construction.
+    See docs/technical-debt.md.
+    """
 
     phase: Phase = "DISCONNECTED"
     agent_capabilities: JsonValue = None

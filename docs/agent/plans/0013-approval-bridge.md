@@ -1,6 +1,6 @@
 # Thirteenth slice: approval bridge (B.8)
 
-**Status:** ready — architecture gate: design 0003 §B.8 and consequence 5 (approval prompts are a Drei UI responsibility). The answer path crosses the command boundary as a user decision (like a delivery, but human-initiated); the machine stays pure and transport-agnostic; no new port, no I/O.
+**Status:** merged (PR #32, commit `9ee437a`) — architecture gate: design 0003 §B.8 and consequence 5 (approval prompts are a Drei UI responsibility). The answer path crosses the command boundary as a user decision (like a delivery, but human-initiated); the machine stays pure and transport-agnostic; no new port, no I/O.
 
 **Goal:** per design 0003 §B.8 — *"When the agent requests `session/request_permission`, present a minibuffer prompt, return the user's `allow_once` / `allow_session` / `allow_always` / `deny`, and honour session-scoped auto-approval within the ACP session. Verify: each decision maps to the correct protocol response; session-scoped cache resets on new session."* Concretely: (1) the machine gains `resolve_permission(request_id, decision)` — it reads/clears `in_flight_incoming` and emits the exact 0.9.0 `RequestPermissionResponse` (`selected` with `optionId`, or `cancelled`); (2) the session gains a **choice minibuffer** (design 0003 §A.4's choice variant) — a prompt that lists the agent's `PermissionOption`s and resolves to one decision or an abort; (3) an **auto-approval cache** keyed on tool-call identity grants `allow_session`/`allow_always` scopes without re-prompting, reset on new session.
 
@@ -30,8 +30,26 @@ New pure API on `AcpMachine`:
 ### D2. Auto-approval cache (session-scoped, per tool-call identity)
 
 - New frozen value on the machine: `auto_approvals: tuple[str, ...] = ()` — a set of **tool-call identity keys** the user has pre-approved for this session. Two scopes per 0.9.0's `PermissionOptionKind`: `allow_session` and `allow_always` both populate the cache; `allow_once`/`reject_*` do not. (`allow_always` is honoured within the ACP session only — Drei has no cross-session persistence, and design 0003's open question on session persistence is unresolved; recorded as an owned deviation.)
-- Identity key: the permission request's `toolCall.toolCallId` when present (0.9.0 `RequestPermissionRequest.tool_call` is a `ToolCallUpdate`, which carries `toolCallId`); else the request `params` canonical-JSON (total, deterministic — malformed payloads still yield a stable key). Extracted by a pure helper; no new parse layer.
-- When a `session/request_permission` arrives whose key is cached, the machine answers **immediately** (same `resolve_permission` path, `Selected` with the first `allow_*` option's `optionId`) and emits no `PermissionRequested` effect — the human is not re-prompted. The response is still recorded (`PermissionResolved`) so the transcript shows the auto-approval.
+- Identity key: **superseded — see the amendment below.** As planned it was the permission request's `toolCall.toolCallId` when present (0.9.0 `RequestPermissionRequest.tool_call` is a `ToolCallUpdate`, which carries `toolCallId`); else the request `params` canonical-JSON.
+- When a `session/request_permission` arrives whose key is cached, the machine answers **immediately** (same `resolve_permission` path, `Selected` with an allow option's `optionId`) and emits no `PermissionRequested` effect — the human is not re-prompted. The response is still recorded (`PermissionResolved`) so the transcript shows the auto-approval.
+
+> **Amendment (2026-07-25, review 0001 findings 6 and 14).** The
+> `toolCallId` key above was **rejected** during implementation and must not
+> be read as the shipped design; parity-registry row "Auto-approval scoped to
+> tool identity + arguments" supersedes it. Two defects: keying on a
+> per-invocation id fails *open* if an agent reuses an id with different
+> arguments (rejected in commit `e0174e2`), and — because conforming agents
+> mint a fresh id per call — it never hits the cache at all, so the whole
+> auto-answer branch was unreachable in production (finding 6, fixed in
+> cluster D). The shipped key (`_permission_identity`, `machine.py`) is a tool
+> discriminator (`toolCall.kind`/`title`) plus the canonical-JSON of the
+> params with the volatile per-call fields — top-level `sessionId` and
+> `toolCall.toolCallId` — **stripped**. Changed arguments or options yield a
+> different key and re-prompt (fail-closed). The option actually reported on a
+> cache hit is chosen by `_select_auto_option`: the broadest cached scope
+> (`allow_session`/`allow_always`) if offered, else `allow_once`, matching
+> option kinds by explicit enum and skipping non-string `optionId`s — never
+> simply "the first `allow_*` option".
 - **Reset on new session:** `new_session()` clears `auto_approvals` (design 0003 §B.8: "session-scoped cache resets on new session"). Verified by a test: approve-with-session-scope → new session → same request re-prompts.
 
 ### D3. Choice minibuffer (the §A.4 choice variant)
@@ -40,7 +58,7 @@ The current minibuffer is a text prompt. Approvals need a **choice** prompt: the
 
 - New command `PromptPermission(request: PermissionRequested)` — opens the choice minibuffer. It is a **delivery-class** command (agent-initiated), so it joins the gate exemption alongside `DeliverSessionEffects` (a swallowed permission prompt would hang the agent — same desync class as a dropped delivery; registry row extended).
 - Minibuffer state gains a kind: text (existing) vs choice. Choice state carries the `request_id`, the rendered option list, and the selected index. The prompt line renders the tool-call summary + options (e.g. `Allow run-tests? [y]once [s]ession [a]lways [n]o`).
-- `MinibufferInput(char)` in choice mode maps a key to an option (`y`/`s`/`a`/`n` by kind) rather than appending text; `MinibufferAccept` resolves the highlighted option; `MinibufferAbort` resolves `Cancelled`. Resolution emits a new event `PermissionDecided(request_id, decision)` and closes the minibuffer.
+- `MinibufferInput(char)` in choice mode maps a key to an option (`y`/`s`/`a`/`n` by kind) rather than appending text; `MinibufferAccept` resolves the narrowest grant (**amended 2026-07-25, review 0001 finding 9:** RET takes the first usable `allow_once` option and otherwise fails closed to `Cancelled` — the shipped `_choice_accept_decision`. The planned "first allow option in the list" was rejected: option order is agent-controlled, so an agent listing `allow_always` first would turn a habitual RET into a session-wide grant. Broader scopes require their explicit `s`/`a` keys); `MinibufferAbort` resolves `Cancelled`. Resolution emits a new event `PermissionDecided(request_id, decision)` and closes the minibuffer.
 - The session's `apply_permission_decision(request_id, decision)` seam (mirroring `apply_session_effects`) feeds the decision back to the machine via `resolve_permission` and returns the outbound `Response` for the §C pump. In this slice the pump is not wired (§C), so the seam returns the message; tests assert it.
 - The choice prompt is **one decision per request**: two concurrent `PermissionRequested`s queue (the minibuffer is single; the second opens after the first resolves). Queueing is in the session, not the machine (the machine answers whatever it is asked; ordering is a UI concern). Bounded by design: the queue is the set of in-flight permission requests, already bounded by the agent.
 
@@ -89,5 +107,5 @@ The `hermes acp` launcher (§C.9), the end-to-end scenario (§C.10), the text-pr
 
 ## Deferred to §C (added by adversarial review)
 
-- **`session/cancel` MUST sweep pending permissions.** ACP 0.9.0 requires the client to answer every pending `session/request_permission` with `cancelled` when the prompt turn is cancelled. This slice ships no cancellation/pump path (`cancel()` does not clear `in_flight_incoming`, and there is no editor-level sweep of `_permission_queue`/`_choice`), so a `session/cancel` while a permission prompt is open or queued leaves the agent hanging. The slice that wires cancellation (§C pump) must route a synthetic abort through the choice minibuffer and answer all pending requests `cancelled`. Latent until the pump exists.
+- **`session/cancel` MUST sweep pending permissions.** ACP 0.9.0 requires the client to answer every pending `session/request_permission` with `cancelled` when the prompt turn is cancelled. This slice ships no cancellation/pump path (`cancel()` does not clear `in_flight_incoming`, and there is no editor-level sweep of `_permission_queue`/`_choice`), so a `session/cancel` while a permission prompt is open or queued leaves the agent hanging. The slice that wires cancellation (§C pump) must route a synthetic abort through the choice minibuffer and answer all pending requests `cancelled`. Latent until the pump exists. **Resolved 2026-07-25 (review 0001 finding 10, cluster D):** `cancel()` now answers every entry in `in_flight_incoming` with the `cancelled` outcome via `resolve_permission`, and the session gained the delivery-class `AbortPendingPermissions` command that closes an open *choice* prompt and drains `_permission_queue`. Still deferred to §C: *calling* them — no pump drives a cancel today.
 - **`MinibufferClosed` event.** The event stream can show two consecutive `MinibufferOpened` with no close event (choice resolution opens the next queued prompt without an explicit close; text-prompt accept never had one either — pre-existing asymmetry B.8 amplifies). A future event-stream consumer that pairs open/close would need this; recorded, not added in this slice (no consumer pairs them today).

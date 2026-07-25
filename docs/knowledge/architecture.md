@@ -11,14 +11,20 @@ The intended dependency direction is:
 
 ```text
 terminal frontend / TermVerify adapter
-              -> application session and command boundary
+ACP client adapter  ------------------> application session and command boundary
               -> hybrid live editor model
-              -> explicit effect ports
+              -> explicit effect ports (file, process, terminal, ACP)
 
 completed command
               -> ordered immutable event records
               -> immutable semantic observation + rendered frame
 ```
+
+The ACP client adapter is frontend-adjacent, not a second core: an agent's
+streamed updates reach the model only as commands crossing the same boundary
+every keystroke crosses ([design record
+0003](../agent/design/0003-hermes-drei-integration.md)). The live model never
+talks to a subprocess.
 
 Three terms are deliberately distinct:
 
@@ -30,4 +36,81 @@ Determinism requires controlled ownership, explicit inputs/effects, atomic comma
 
 An owner may use controlled private mutation where measured needs justify it, but no ambient component may mutate editor semantics directly. A failed grouped command restores both semantics and the owner's promised identity boundary before any event is emitted. Storage strategy remains separate: strings, line tables, piece tables, ropes, chunks, and indexes must be chosen from measured requirements rather than inferred from the ownership decision.
 
-Native filesystem and process access will be mediated by narrow explicit ports. Direct/in-process and terminal profiles must exercise the same production command path. Structured observation records are authoritative for semantic assertions; terminal frames prove presentation and integration.
+Direct/in-process and terminal profiles must exercise the same production command path. Structured observation records are authoritative for semantic assertions; terminal frames prove presentation and integration.
+
+## Effect ports
+
+Native filesystem, process, and terminal access is mediated by narrow explicit
+ports — Protocol definitions in the core, `System*` implementations at the
+edge, injected by the harness or `run_editor`. Two have shipped:
+
+- **`FilePort`** (`src/drei/files.py`) — `read`/`write` over text. It
+  translates nothing: newline handling is the session's, per buffer, so a
+  save cannot silently rewrite a file's line endings.
+- **`ProcessPort`** (`src/drei/process.py`) — blocking run-to-completion
+  (`run(argv) -> ProcessResult`), with launch failures normalized to tokens
+  rather than raised. Deliberately not streaming; see the ACP subsystem below.
+
+Errors cross a port as **normalized tokens** (`not-found`,
+`permission-denied`, `io-error`, `no-file`), never as a locale-dependent OS
+message: the same failure must read the same on every host.
+
+## The ACP subsystem
+
+Drei speaks the [Agent Client Protocol](../agent/design/0003-hermes-drei-integration.md)
+as the *client*; `hermes acp` is the server. The subsystem is layered so that
+everything below the adapter is pure and replayable without an agent:
+
+```text
+drei.acp.codec      NDJSON framing over bytes
+drei.acp.messages   JSON-RPC envelope model (Request/Response/Notification)
+drei.acp.machine    session lifecycle as an immutable value folded over
+                    inbound messages; emits outbound messages + SessionEffects
+drei.acp.transcript pure fold: SessionEffect* -> rendered transcript text
+session adapters    SessionEffect -> Command -> dispatch
+```
+
+No module in `drei.acp` imports `subprocess`, `asyncio`, or does I/O. A
+`SessionEffect` becomes editor state only by being translated into a `Command`
+and dispatched, so the transcript of events stays the oracle for agent-produced
+text exactly as it is for typed text.
+
+**Not yet built (§C):** the pump that owns a long-lived `hermes acp` child —
+a streaming port, an event-injection point in `run_editor`'s synchronous read
+loop, serialization of deliveries against keystrokes, and cancellation wiring.
+Until it exists the subsystem is unreachable from the shipped editor: nothing
+constructs a machine, no key binds an agent command, and a `PermissionDecided`
+response is returned by the session but sent by nobody. See
+`docs/technical-debt.md`.
+
+## Session-scoped vs buffer-scoped state
+
+The session owns several buffers; which state is per buffer and which is
+global follows Emacs, and the split is load-bearing for replay:
+
+- **Per buffer** (`_BufferState`, `src/drei/session.py`): undo history, redo
+  stack and descent direction; yank-pop chaining; the kill-append chain flag;
+  the last-saved text (the modified flag is derived from it) and the file's
+  line ending. Undo in one buffer never touches another. Chain flags are
+  cleared on switch-away — Emacs reaches the same result through
+  `last-command`.
+- **Session-global**: the kill ring (a kill in buffer A is yankable in B), the
+  transcript, the process log, the minibuffer, the agent-transcript fold
+  cache, and the ports.
+
+None of this lives on `BufferValue`, which stays the frozen per-edit value
+(text, point, mark, file path, modified).
+
+## Minibuffer and window models
+
+- The **minibuffer** is a single slot of session state, not a buffer: a
+  prompt label plus either text input or a *choice* (the permission prompt's
+  option list). It is not recursive and has no keymap of its own. While it is
+  open, only its own commands act — every other command is a silent no-op —
+  with one exception: **delivery-class commands** (process output, agent
+  effects, permission requests) are exempt, because dropping a delivery would
+  desync the transcript from the model.
+- **Windows** are layout views over buffers, not editor state: an ordered
+  tuple of `WindowValue(buffer_id, point, mark)` plus a focused index.
+  Window point is distinct from `BufferValue.point`, so two windows over one
+  buffer hold independent points. Vertical stacks only.

@@ -1,9 +1,10 @@
 # Adversarial review 0001 — full project (2026-07-24)
 
-**Status:** Clusters C (findings 8, 7, 24, 27), D (findings 6, 9, 25, 10, 26)
-and A (findings 2, 3, 1) **implemented and gated** — C as `5d1b105`, D as
-`7bf0a68`, A on 2026-07-25; clusters B, E and the deferred-item bookkeeping
-still pending.
+**Status:** All five clusters and the deferred-item bookkeeping are
+**implemented and gated** — C as `5d1b105`, D as `7bf0a68`, A as `2c08f70`,
+B as `bd662e0`, E + bookkeeping on 2026-07-25. Remaining work is the
+follow-up named at the end of this document: the two design records
+(agent-buffer identity; §C pump), then a fresh adversarial pass.
 **Baseline:** commit `cabb31a` (A.2 multiple buffers/windows), working tree clean,
 full suite green (508 passed, 17 skipped).
 **Method:** three independent adversarial reviewers — (1) implementation audit
@@ -14,8 +15,9 @@ was either reproduced by execution or verified by tracing the exact code path
 source by the coordinating session). Line numbers refer to `cabb31a`.
 
 A later session should resume from **§ Triage** and **§ Remediation plan** below.
-The companion tech-debt entries for deferred findings belong in
-`docs/technical-debt.md` (to be created during remediation).
+The companion tech-debt entries for the deferred findings now live in
+`docs/technical-debt.md` (TD-1…TD-9), each with a `TODO: [tech-debt]` marker
+at its code location.
 
 ---
 
@@ -421,18 +423,54 @@ focused pass; full gates (`AGENTS.md` §Validation) at the end.
    and the Windows-console row records the fixed mechanism. Full gates green
    (556 passed / 17 skipped, coverage 100%, ruff, mypy, pre-commit, pre-push,
    build).
-5. **Cluster E — docs/process (12-17, 30, 28).**
-   Plan statuses 0008-0013 → merged + PR numbers; plan 0013 D2 amendment to
-   the shipped fail-closed key; README caught up (thirteen slices + ACP
-   subsystem); architecture.md ports/ACP section (the design-0003 promise);
-   emacs-parity.md repairs (rows 94-95, A.2 scenarios, new rows from clusters
-   A/B/D, docker prose); sync-check fails loudly (exit 1) without usable `gh`
-   (env override for offline); verdict docstring on first differential test;
-   snapshot/ratchet prose; fold-advance comment (28); plans 0004/0005 still
-   point at `assemble_meta` (replaced by `KeyAssembler` in cluster B).
-6. **Deferred bookkeeping.** Create `docs/technical-debt.md` (entries for 5,
-   11, 18-23, 29 with date, location, deferral reason, suggested approach) +
-   `TODO: [tech-debt]` comments at each code location.
+5. **Cluster E — docs/process (12-17, 30, 28). DONE 2026-07-25.**
+   Plan statuses 0008-0013 carry the merge commit and PR number, and
+   `sync-check.sh` now prints each plan's own Status line beside its
+   filename so the drift is visible at the moment an agent decides whether a
+   slice is free (finding 12's root cause: the closing "update plan status"
+   step is systematically skipped and nothing checked it); plan 0013
+   gained inline amendments where the shipped design differs from the plan
+   (D2's rejected `toolCallId` key, D3's RET semantics, the cancellation
+   sweep that is no longer deferred), so the standard reading order can no
+   longer serve a design the project rejected. README restructured: thirteen
+   merged slices across two arcs, an *Agent integration* section for the ACP
+   subsystem, and the cluster A/B behavior (derived modified flag, line
+   endings, inert navigation keys). `architecture.md` gained the design-0003
+   dependency arrow plus sections on the effect ports (present tense — they
+   shipped), the ACP layering and what §C still owes, the session-global vs
+   per-buffer state split, and the minibuffer/window models. Parity registry:
+   the two malformed `||` rows repaired, the three A.2 differential scenarios
+   registered, four new rows for cluster D semantics (RET grants only
+   `allow_once`; non-string `optionId`s unselectable; cancellation answers
+   pending permissions; `no-file` save token), and the docker prose now
+   describes the prebuilt `drei-parity-emacs:24.04` image. Clusters A and B
+   had already added their own rows, so no back-fill was needed there.
+   Finding 16's third sub-fact — no mechanical registry↔test link — is closed
+   in the checkable direction by `tests/test_parity_registry.py`, which fails
+   when a row cites a test that does not exist (observed failing against a
+   fabricated citation); the converse stays a review responsibility, recorded
+   as registry rule 4. `sync-check.sh` now preflights `gh` (present *and*
+   authenticated) before any network call and exits 1 otherwise, with
+   `DREI_SYNC_CHECK_OFFLINE=1` as the deliberate override; three focused
+   tests drive the real script against a throwaway repo with a local `origin`
+   and a fake `gh`, two of them observed failing first. `claims.md` records
+   the new exit behavior and, for finding 17's second half, states plainly
+   that issue creation is **not** check-and-set and what to do about the race.
+   First differential test gained its Verdict docstring; snapshot/ratchet
+   prose in `verification-model.md` and `development.md` now says what is
+   true (no snapshot mechanism exists; 100% is a hard floor, not a ratchet);
+   the fold-advance comment (28) describes the real ordering and no longer
+   borrows `apply_session_effects`'s atomicity claim; plans 0004/0005 carry
+   supersession notes for `assemble_meta`/`pending_esc`.
+6. **Deferred bookkeeping. DONE 2026-07-25.** `docs/technical-debt.md`
+   created with TD-1…TD-9 (findings 5, 11, 18-23, 29): each entry names the
+   location, severity, why it was deferred, and a suggested approach, and the
+   file states the rules for adding and removing entries. Thirteen
+   `TODO: [tech-debt] TD-n` comments mark the code locations (TD-2 and TD-8
+   have several each). TD-1 records the interaction the plan flagged —
+   cluster A's derived modified flag makes finding 5's silent agent-append
+   *more* visible after an undo, not less. Linked from `AGENTS.md`'s
+   placement table and `docs/knowledge/index.md`.
 
 **Interactions.** 6+7 touch `_handle_inbound_request` (7's guard runs before
 6's cache check). Fix 3's `saved_text` makes deferred finding 5's

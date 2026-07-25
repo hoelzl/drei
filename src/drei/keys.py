@@ -75,6 +75,9 @@ def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingK
         completed = _PREFIX_COMMANDS.get((pending, key))
         if completed is not None:
             return completed
+        # TODO: [tech-debt] TD-5 — C-g lands here too, so "C-x C-g" is one
+        # silent unresolved key: no quit, no echo, and the mark survives.
+        # Emacs cancels the prefix and quits. See docs/technical-debt.md.
         return UnresolvedKey(f"{pending} {key}")
     if key == "C-x":
         return PendingKey("C-x")
