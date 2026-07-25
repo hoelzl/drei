@@ -226,6 +226,15 @@ leaving it to be discovered.
    The readiness-marker gap 0005 recorded is therefore **not** reached by this
    slice. It belongs where 0005 put it: the first redraw driven by something
    the verifier did not dispatch, which is agent output in §C.2.
+
+   **Caveat found by the adversarial review, recorded in code and in 0005:**
+   the editor marks every resize it *observes*, and the watcher observes only
+   *changes*. A dispatched resize to the size the terminal already has
+   produces no event and no marker, so that epoch hangs to the abort deadline.
+   Demonstrated, not theorised. It is not a defect in the editor — a no-op
+   resize should do nothing — but it is a trap for whoever writes the next
+   resize scenario, and the invariant "every dispatched input is marked" is
+   the wrong one to carry into §C.2.
 3. **Shrinking below the split minimum keeps the windows** (D7). Emacs deletes
    windows that no longer fit and the deletion is permanent. Drei keeps them
    and renders what fits, so growing the frame back restores the layout with
@@ -276,8 +285,15 @@ leaving it to be discovered.
 - Shrinking a split frame below the split minimum changes no window state:
   the window count, points, and marks survive, and growing the frame back
   renders every pane as before (D7).
-- The threaded source is exercised by exactly one test that starts a thread;
-  every other test feeds scripted events.
+- The threaded source's *happy path* is exercised by exactly one test that
+  starts a thread; every other behavioral test feeds scripted events.
+  **Amended after the adversarial review:** three more thread-starting tests
+  cover reader *failure* (an exception in `read_key`, end of input, an
+  exception in `get_size`). They exist because without them a dead reader
+  thread left the editor blocked in `next_event` forever with the terminal
+  still in raw mode and `C-g` unable to reach it — a regression against
+  `main`, where the same failure propagated straight into `port.restore()`.
+  Each failure is immediate and deterministic, so the suite stays so.
 - One `apply_session_effects` call produces exactly **one** `CommandOutcome`
   carrying both delivery events, and no code path can observe a state between
   the fold and the append.

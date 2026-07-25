@@ -160,11 +160,17 @@ class DeliverSessionEffects:
     """External delivery: one ``AcpMachine.handle`` call's ``SessionEffect``
     list enters the session (design 0003 §B.7).
 
-    Not a user edit. The session records it as one immutable event; buffer,
-    undo, and kill-ring state are untouched. Validated at construction so a
-    machine-generated delivery (the §C ACP pump) cannot record a corrupt
-    transcript fold: the list must be non-empty and every member must be a
-    ``SessionEffect``.
+    Not a user edit. Since design 0005 D4 one delivery is **one dispatch**:
+    it records the transcript fold as ``AgentTranscriptUpdated`` *and*
+    appends the newly rendered suffix to the target buffer as
+    ``AgentTextInserted``, so no code path can observe the fold advanced
+    without the text having landed. Undo and kill-ring state stay untouched —
+    an agent append creates no undo group (parity registry) and breaks no
+    kill chain.
+
+    Validated at construction so a machine-generated delivery (the §C ACP
+    pump) cannot record a corrupt transcript fold: the list must be non-empty
+    and every member must be a ``SessionEffect``.
 
     ``buffer_id`` names the **target** — the agent buffer this transcript
     belongs to (design 0004 D2). It is carried explicitly rather than resolved

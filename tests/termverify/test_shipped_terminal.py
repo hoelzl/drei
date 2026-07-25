@@ -79,6 +79,18 @@ def _frame_lines(observation: Observation) -> tuple[str, ...]:
     return tuple(observation.frame.lines)
 
 
+def _modeline_row(lines: tuple[str, ...]) -> int:
+    """Index of Drei's modeline in the screen.
+
+    Sensitive to the height *Drei* is rendering at, unlike `len(lines)`,
+    which is the screen model's height and reflects the adapter's resize
+    whatever the editor did with it.
+    """
+    rows = [i for i, line in enumerate(lines) if line.startswith("Drei:")]
+    assert len(rows) == 1, lines
+    return rows[0]
+
+
 def _adapter(tmp_path: Path, argv_file: Path | None = None) -> ConptyAdapter:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir(exist_ok=True)
@@ -156,7 +168,7 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
         started = adapter.start("drei-resize-scenario", _configuration())
         assert type(started) is Started, started
         initial_lines = _frame_lines(started.observation)
-        assert len(initial_lines) == _ROWS, initial_lines
+        assert _modeline_row(initial_lines) == _ROWS - 2, initial_lines
 
         # Type something so the reflow has content to carry across the resize.
         for char in "hi":
@@ -169,10 +181,15 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
         assert type(resized) is EpochCompleted, resized
         resized_lines = _frame_lines(resized.observation)
 
-        # The frame is drawn at the new geometry, and the buffer survived it.
-        assert len(resized_lines) == taller, resized_lines
+        # DREI's OWN geometry, not the screen model's. `len(resized_lines)`
+        # would be `taller` even if the editor ignored the resize entirely —
+        # it is the ConPTY screen, which the adapter resized. What only Drei
+        # controls is where it puts its modeline: it draws `height` rows as
+        # body + modeline + echo, so the modeline sits at `height - 2`. An
+        # editor still rendering at the old height would leave it at
+        # `_ROWS - 2`, four rows higher.
+        assert _modeline_row(resized_lines) == taller - 2, resized_lines
         assert any(line.startswith("hi") for line in resized_lines), resized_lines
-        assert any("Drei: scratch" in line for line in resized_lines), resized_lines
 
         # The editor is still live and still consuming input after the resize.
         moved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "b")))

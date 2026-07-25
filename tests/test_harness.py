@@ -180,15 +180,23 @@ class TestHarnessResize:
         in it — which is exactly why keeping it is safe rather than confusing
         state with nothing behind it.
         """
-        harness = EditorHarness(width=20, height=24)
+        harness = EditorHarness(width=20, height=24, initial_text="ab")
         harness.send("C-x")
         harness.send("2")
         harness.resize(20, 1)  # only the top pane's modeline fits
         harness.send("C-x")
         harness.send("o")  # focus the pane that is off-frame
         assert WindowFocusChanged(1, "scratch") in harness.outcomes[-1].events
-        harness.send("z")  # and it still edits
-        assert harness.observation.text == "z"
+
+        # The invisible window is a real window, not a bookkeeping entry: it
+        # carries its own point, and editing moves *its* point rather than
+        # the visible window's. Asserting on the buffer text alone would not
+        # show this — both windows share one buffer, so the text is the same
+        # whichever window has focus.
+        harness.send("C-f")
+        session = harness._session  # noqa: SLF001 - layout has no public reader
+        assert session.windows[1].point == 1
+        assert session.windows[0].point == 0
 
     def test_resize_does_not_clear_a_pending_echo_message(self) -> None:
         """A resize is not a user action and must not wipe the echo area:

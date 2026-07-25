@@ -2,9 +2,9 @@
 
 All platform-specific I/O lives behind :class:`TerminalPort`. The editor loop
 itself is platform-independent: it consumes one ordered stream of
-:class:`~drei.input.InputEvent` from an injected :class:`~drei.input.
-InputSource`, dispatches the resulting commands through the production
-session via the harness, and writes rendered frames.
+:class:`~drei.input.InputEvent` from an injected
+:class:`~drei.input.InputSource`, dispatches the resulting commands through
+the production session via the harness, and writes rendered frames.
 
 The sources defined here are the terminal-backed ones. They are adapters:
 they may block, own threads, and consult a clock, none of which the loop or
@@ -154,11 +154,15 @@ READINESS_MARKER = "\x1b]7791;ready\x1b\\"
 class SynchronousTerminalSource(InputSource):
     """The events of one terminal, produced on demand by blocking in the port.
 
-    The behavior-preserving default (plan 0015 V1): `next_event` is exactly
-    the `read_key()` the loop used to call inline, so the whole shipped
-    terminal suite gates the loop rewrite before any new event kind exists.
+    **Test-only.** Production uses :class:`ThreadedTerminalSource`; this has
+    no caller in `src/`. It exists because `next_event` is exactly the
+    `read_key()` the loop used to call inline before the seam, which makes it
+    the regression gate the terminal suite injects: those tests pin the loop,
+    not the threads, and stay as deterministic as they were.
+
     It produces `Key` and nothing else — a terminal size is not observable
-    without either a signal handler or a watcher, and this source has neither.
+    without either a signal handler or a watcher, and this source has neither,
+    so a loop driven by it never sees a resize.
     """
 
     def __init__(self, port: TerminalPort) -> None:
@@ -169,6 +173,19 @@ class SynchronousTerminalSource(InputSource):
 
     def close(self) -> None:
         """Nothing to release: the source owns no thread and no queue."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ReaderFailed:
+    """Queued by a reader thread that is about to die, carrying why.
+
+    A thread cannot raise into the loop, and a dead reader must not look like
+    a quiet one: without this the loop would block in `next_event` forever
+    holding the terminal in raw mode, and `C-g` could not reach it because
+    the thread that would have delivered it is the one that died.
+    """
+
+    error: BaseException
 
 
 class ThreadedTerminalSource(InputSource):
@@ -199,7 +216,7 @@ class ThreadedTerminalSource(InputSource):
 
     def __init__(self, port: TerminalPort, *, poll_interval: float = 0.2) -> None:
         self._port = port
-        self._events: queue.Queue[InputEvent] = queue.Queue()
+        self._events: queue.Queue[InputEvent | _ReaderFailed] = queue.Queue()
         self._stopped = threading.Event()
         self._poll_interval = poll_interval
         self._keys = threading.Thread(
@@ -212,7 +229,13 @@ class ThreadedTerminalSource(InputSource):
         self._sizes.start()
 
     def next_event(self) -> InputEvent:
-        return self._events.get()
+        event = self._events.get()
+        if isinstance(event, _ReaderFailed):
+            # Re-raised on the loop's thread, which restores the terminal on
+            # the way out — the same end state a synchronous `read_key()`
+            # failure produced before the threads existed.
+            raise event.error
+        return event
 
     def close(self) -> None:
         """Stop the watcher and let the key reader go.
@@ -227,18 +250,35 @@ class ThreadedTerminalSource(InputSource):
         self._sizes.join(timeout=self._poll_interval * 10)
 
     def _read_keys(self) -> None:
-        while not self._stopped.is_set():
-            self._events.put(Key(self._port.read_key()))
+        try:
+            while not self._stopped.is_set():
+                char = self._port.read_key()
+                if not char:
+                    # POSIX `read(1)` returns "" at end of stream and keeps
+                    # returning it. Left alone this is not a quiet idle but an
+                    # unbounded hot loop filling the queue — measured at ~10^6
+                    # events per second. End of input is the end of the run.
+                    raise EOFError("terminal input stream reached end of file")
+                self._events.put(Key(char))
+        except Exception as error:
+            self._events.put(_ReaderFailed(error))
 
     def _watch_size(self) -> None:
-        last = self._port.get_size()
-        # `wait` returns True only when the flag is set, so this both paces
-        # the poll and exits promptly on close — no sleep-then-check race.
-        while not self._stopped.wait(self._poll_interval):
-            size = self._port.get_size()
-            if size != last:
-                last = size
-                self._events.put(Resize(*size))
+        try:
+            last = self._port.get_size()
+            # `wait` returns True only when the flag is set, so this both
+            # paces the poll and exits promptly on close — no sleep-then-check
+            # race.
+            while not self._stopped.wait(self._poll_interval):
+                size = self._port.get_size()
+                if size != last:
+                    last = size
+                    self._events.put(Resize(*size))
+        except Exception as error:
+            # Surfaced rather than swallowed: a dead watcher silently loses
+            # every resize for the rest of the run, which looks exactly like
+            # a terminal nobody resized.
+            self._events.put(_ReaderFailed(error))
 
 
 def run_editor(
@@ -255,14 +295,19 @@ def run_editor(
     ``source`` (design 0005 D2). ``port`` remains the output side and the
     source of the initial frame size; when ``source`` is omitted the loop
     builds the production :class:`ThreadedTerminalSource` over the same port,
-    so the shipped editor observes resizes as they happen. Tests inject
+    so the shipped editor notices a resize within one poll interval rather
+    than not at all. Tests inject
     either a scripted source or :class:`SynchronousTerminalSource`.
     """
     port.write("DREI:READY\n")
     port.flush()
     port.enter_raw()
-    events = ThreadedTerminalSource(port) if source is None else source
+    # Built inside the try: constructing the default source starts threads,
+    # and a failure there must still restore the terminal rather than leave
+    # it raw.
+    events: InputSource | None = None
     try:
+        events = ThreadedTerminalSource(port) if source is None else source
         # The size is read once here to build the first frame; from then on
         # the source reports every change as a Resize event (plan 0015 V4).
         width, height = port.get_size()
@@ -285,6 +330,14 @@ def run_editor(
                 # reads until exactly one marker. Leaving it unmarked would
                 # not make the epoch quiet — it would make this epoch consume
                 # the *next* input's marker and shift every epoch after it.
+                #
+                # The marker follows an *observed size change*, not a
+                # dispatched resize: the watcher emits nothing when the polled
+                # size is unchanged, so resizing a terminal to the dimensions
+                # it already has produces no event and no marker here. A
+                # TermVerify scenario must therefore change the geometry, or
+                # its epoch waits for a marker that is never coming. See the
+                # parity registry row and design 0005's evidence note.
                 _write_frame(port, harness)
                 continue
             assembler, resolved = assembler.feed(event.char)
@@ -310,7 +363,8 @@ def run_editor(
                 if quit_requested:
                     return
     finally:
-        events.close()
+        if events is not None:
+            events.close()
         port.restore()
 
 

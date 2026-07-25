@@ -149,10 +149,11 @@ class TestDeliveryLeavesTheFocusedBufferBookkeepingAlone:
     def test_a_delivery_breaks_the_targets_chain_not_the_users(self) -> None:
         """Both halves of plan 0014 pin 1.
 
-        A fold-only delivery is an event-emitting command, so it intervenes in
-        the kill-append chain — of the buffer it targeted. Before this slice it
-        broke whichever chain the human happened to have open, which is the
-        same ambient-focus defect as the text arm, one block over.
+        A delivery of silent effects appends no text, but it is still an
+        event-emitting command, so it intervenes in the kill-append chain — of
+        the buffer it targeted. Before this slice it broke whichever chain the
+        human happened to have open, which is the same ambient-focus defect as
+        the text arm, one block over.
         """
         session = _session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())  # the human's chain is open

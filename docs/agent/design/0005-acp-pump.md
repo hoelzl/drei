@@ -225,6 +225,15 @@ next input's marker. The gap above is therefore narrower than it looked: it
 covers only redraws the verifier did not dispatch at all, which means agent
 output and nothing else in §C.1.
 
+**The invariant is narrower still, and §C.2 must respect it.** The editor
+marks every resize it *observes*, and the size watcher observes only
+*changes*. Dispatching a resize to the geometry the terminal already has
+therefore produces no event, no redraw, and no marker — the epoch waits for a
+marker that never arrives and dies on the abort deadline. A resize scenario
+must genuinely change the geometry. The general rule for §C.2: an event kind
+may be filtered by its adapter, and every filtered event is a marker the
+verifier is still waiting for.
+
 ## Consequences
 
 - **`run_editor` is rewritten**, and its tests move from "feed bytes" to

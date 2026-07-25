@@ -895,3 +895,91 @@ def test_run_editor_defaults_to_the_threaded_source() -> None:
     with patch.object(drei.terminal, "ThreadedTerminalSource", RecordingSource):
         run_editor(port)
     assert built == [port]
+
+
+class TestThreadedSourceFailures:
+    """A dead reader thread must not look like a quiet one.
+
+    Found by adversarial review. A thread cannot raise into the loop, so
+    before this the loop blocked in `next_event` forever with the terminal
+    still in raw mode — and `C-g` could not reach it, because the thread that
+    would have delivered the `C-g` was the one that had died. On `main` the
+    same failure propagated out of a synchronous `read_key()` straight into
+    `port.restore()`, so this was a regression the seam introduced.
+
+    These tests start threads, which the plan wanted confined to one test.
+    Correctness wins: each failure is immediate and deterministic, and the
+    alternative is an unquittable editor with no test naming it.
+    """
+
+    def test_a_reader_exception_reaches_the_loop_instead_of_wedging_it(self) -> None:
+        class BoomPort(FakePort):
+            def read_key(self) -> str:
+                raise OSError(5, "Input/output error")
+
+        source = ThreadedTerminalSource(BoomPort([]), poll_interval=0.01)
+        try:
+            with pytest.raises(OSError, match="Input/output error"):
+                source.next_event()
+        finally:
+            source.close()
+
+    def test_end_of_input_ends_the_run_instead_of_spinning(self) -> None:
+        """`read(1)` returns "" at EOF and keeps returning it.
+
+        Unguarded this is not an idle loop but an unbounded one: the reader
+        queues empty keys as fast as the interpreter allows (measured at
+        ~10^6/second, memory climbing) while the loop treats each as an
+        unresolved key. It has to terminate the run.
+        """
+
+        class EofPort(FakePort):
+            def read_key(self) -> str:
+                return ""
+
+        source = ThreadedTerminalSource(EofPort([]), poll_interval=0.01)
+        try:
+            with pytest.raises(EOFError):
+                source.next_event()
+        finally:
+            source.close()
+
+    def test_a_size_watcher_exception_reaches_the_loop(self) -> None:
+        """A dead watcher silently loses every later resize, which is
+        indistinguishable from a terminal nobody resized."""
+
+        parked = threading.Event()
+
+        class UnsizeablePort(FakePort):
+            def read_key(self) -> str:
+                # Park like a real terminal waiting for a keystroke, so the
+                # watcher's failure is the only one in play.
+                parked.wait(timeout=5)
+                return "\x07"
+
+            def get_size(self) -> tuple[int, int]:
+                raise OSError("no tty")
+
+        source = ThreadedTerminalSource(UnsizeablePort([]), poll_interval=0.01)
+        try:
+            with pytest.raises(OSError, match="no tty"):
+                source.next_event()
+        finally:
+            parked.set()
+            source.close()
+
+    def test_the_terminal_is_restored_when_the_source_cannot_be_built(self) -> None:
+        """`enter_raw()` has already happened by the time the default source
+        is constructed, so a failure there (a thread that will not start)
+        must still hand the terminal back."""
+
+        def explode(port: TerminalPort) -> InputSource:
+            raise RuntimeError("can't start new thread")
+
+        port = FakePort([])
+        with (
+            patch.object(drei.terminal, "ThreadedTerminalSource", explode),
+            pytest.raises(RuntimeError, match="can't start new thread"),
+        ):
+            run_editor(port)
+        assert port.restored
