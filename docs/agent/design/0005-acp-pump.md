@@ -1,6 +1,11 @@
 # 0005: The ACP pump (design 0003 §C)
 
-**Status:** proposed — decision committed, drives the §C slices
+**Status:** partially implemented — **D2** (the injection point) and **D4**
+(atomic delivery) shipped in plan `0015-input-events-and-resize.md` (slice
+15). D1 (streaming port), D3 (fairness over two live sources), D5
+(cancellation), and D6 (launcher and keymap) remain proposed and drive §C.2
+onward. Where slice 15 departed from this record, the departure is noted in
+place below.
 **Builds on:** `0003-hermes-drei-integration.md`, `0004-agent-buffer-identity.md`
 **Does not revise:** 0001/0002/0003. It supplies the §C boundary 0003 assumed
 but never placed, and amends one 0003 §A.1 sentence (see *Amendments*).
@@ -122,11 +127,11 @@ a home now rather than inventing a second mechanism later.
 
 ### D4. Delivery becomes genuinely atomic
 
-`apply_session_effects` currently claims atomicity and is two dispatches
-(`DeliverSessionEffects` then `InsertAgentText`) with an observable seam: the
-fold advances in the first whether or not the second runs. Nothing exploits
-the seam today only because nothing drives deliveries concurrently — which the
-pump is about to change.
+**Implemented in plan 0015 V5.** `apply_session_effects` claimed atomicity and
+was two dispatches (`DeliverSessionEffects` then `InsertAgentText`) with an
+observable seam: the fold advanced in the first whether or not the second ran.
+Nothing exploited the seam only because nothing drove deliveries concurrently
+— which the pump was about to change.
 
 One delivery becomes **one dispatch** emitting both `AgentTranscriptUpdated`
 and `AgentTextInserted`. `InsertAgentText` survives as a command in its own
@@ -210,6 +215,25 @@ take it to TermVerify as its own issue — a second marker kind for
 non-input-driven quiescence is the shape to propose. Do not invent a private
 marker in Drei.
 
+**Sharpened by plan 0015 V4.** The rule is markers bound to each *dispatched
+input*, not to each dispatched **key**. Plan 0015 initially read it the
+narrower way and planned an unmarked resize redraw; TermVerify's
+`ConptyAdapter.dispatch` accepts a `Resize` on the same ordered input stream
+as a `KeyInput` and `_read_epoch_chunks` then reads until exactly one marker,
+so a resize *is* an input epoch and an unmarked one would have swallowed the
+next input's marker. The gap above is therefore narrower than it looked: it
+covers only redraws the verifier did not dispatch at all, which means agent
+output and nothing else in §C.1.
+
+**The invariant is narrower still, and §C.2 must respect it.** The editor
+marks every resize it *observes*, and the size watcher observes only
+*changes*. Dispatching a resize to the geometry the terminal already has
+therefore produces no event, no redraw, and no marker — the epoch waits for a
+marker that never arrives and dies on the abort deadline. A resize scenario
+must genuinely change the geometry. The general rule for §C.2: an event kind
+may be filtered by its adapter, and every filtered event is a marker the
+verifier is still waiting for.
+
 ## Consequences
 
 - **`run_editor` is rewritten**, and its tests move from "feed bytes" to
@@ -221,7 +245,10 @@ marker in Drei.
 - **Three deferred findings close together** — 5 (via 0004), 9's keystroke
   race (a prompt can no longer open "between keystrokes": prompts arrive as
   events in the same ordered queue), and 10 (cancellation actually wired).
-  TD-6 (resize) closes as a side effect of D2.
+  TD-6 (resize) closes as a side effect of D2 — **paid in plan 0015 V4**,
+  though not quite "as a side effect": a synchronous source would have
+  observed the resize and acted on it only at the next keystroke, so the
+  threaded source had to ship with it.
 - **Drei gains a runtime dependency on a child process**, as 0003 consequence
   1 already accepted. Confined to the port; the core stays fake-testable.
 

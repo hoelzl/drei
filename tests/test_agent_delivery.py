@@ -82,6 +82,25 @@ class TestApplySessionEffects:
         kinds = [type(e) for e in session.transcript]
         assert kinds == [AgentTranscriptUpdated, AgentTextInserted]
 
+    def test_one_delivery_is_one_dispatch(self) -> None:
+        """Design 0005 D4 / plan 0015 D5: both events come from a single
+        command, so there is no state between the fold and the append that
+        any code path can observe.
+
+        The event order is unchanged — it is the *outcome count* that this
+        pins. Before D5 the same two events arrived as two dispatches, and
+        design 0003 consequence 2 called that "atomic" when it was not.
+        """
+        session = make_session()
+        outcome = session.apply_session_effects((AgentTextChunk(text="hi"),), AGENT)
+        assert [type(e) for e in outcome.events] == [
+            AgentTranscriptUpdated,
+            AgentTextInserted,
+        ]
+        # One command in, one outcome out: the observation belongs to the
+        # same dispatch that advanced the fold.
+        assert outcome.observation.text.endswith("hi")
+
     def test_delivery_event_carries_exactly_the_new_suffix(self) -> None:
         session = make_session()
         session.apply_session_effects((AgentTextChunk(text="a"),), AGENT)
@@ -274,7 +293,13 @@ class TestDispatchRejectsCorruptDelivery:
         outcome = session.dispatch(
             DeliverSessionEffects((AgentTextChunk(text="q"),), AGENT)
         )
-        assert [type(e) for e in outcome.events] == [AgentTranscriptUpdated]
-        # Raw dispatch does NOT append text — the fold→append step belongs to
-        # apply_session_effects (the atomic delivery seam).
-        assert outcome.observation.text == ""
+        # One dispatch, both events, text appended (design 0005 D4). Before
+        # D5 a raw dispatch recorded the fold and left the text alone, so a
+        # caller reaching past apply_session_effects could advance the fold
+        # without the buffer ever catching up. That gap is now unreachable:
+        # there is no dispatch that does one half.
+        assert [type(e) for e in outcome.events] == [
+            AgentTranscriptUpdated,
+            AgentTextInserted,
+        ]
+        assert outcome.observation.text == "\n── agent ──\nq"

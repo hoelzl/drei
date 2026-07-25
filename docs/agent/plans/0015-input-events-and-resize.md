@@ -1,9 +1,24 @@
 # Fifteenth slice: input events and resize (§C.1)
 
-**Status:** approved at the plan gate (issue #37). Three decisions were taken
-at that gate and are recorded inline below: the threaded source stays in this
-slice (V4, risk 3), resize stays a command rather than a setter (D3), and a
-shrink never destroys windows (D7). No code written before this point.
+**Status:** implemented (issue #37). Three decisions were taken at the plan
+gate and are recorded inline below: the threaded source stays in this slice
+(V4, risk 3), resize stays a command rather than a setter (D3), and a shrink
+never destroys windows (D7).
+
+Two things this plan got wrong, corrected in place where they appear:
+
+- **Owned deviation 2 (unmarked resize redraw) was withdrawn during V4.** Its
+  premise was false — TermVerify dispatches a resize as an input epoch and
+  requires its marker like any other. Leaving it unmarked would have hung the
+  epoch, not weakened its evidence.
+- **D7's rationale claimed `C-x 1` was unbound.** It is bound, and
+  `WindowsCollapsed` already exists, so the decision rests on reversibility
+  alone, not on implementation cost.
+
+One thing it did not anticipate: shrinking a frame far enough exposed that
+row truncation drops the shared echo row before any window pane, recorded as
+**TD-10** and pinned rather than fixed (rendering priority is its own
+decision). TD-6 is paid and removed; TD-2's atomicity paragraph is gone.
 
 **Architecture gate:** design `0005-acp-pump.md` D2 (the injection point) and
 D4 (atomic delivery). This slice places the boundary and proves it with the
@@ -118,9 +133,11 @@ moves *where* the append happens, not *what* it does.
 - **No agent keymap binding and no launcher** (0005 D6). Nothing spawns a
   child; `drei` on a machine without `hermes` is unaffected.
 - **No readiness marker for non-input-driven quiescence.** 0005's recorded
-  evidence gap belongs to the slice that first produces a spontaneous redraw.
-  A `Resize` *is* such a redraw — see *Owned deviations* — so this slice names
-  the gap concretely rather than deferring it abstractly.
+  evidence gap belongs to the slice that first produces a redraw the verifier
+  did not dispatch. This plan expected a `Resize` to be one; V4 found it is
+  not — TermVerify dispatches a resize as an input epoch and requires its
+  marker like any other (see *Owned deviations* 2). The gap stays with §C.2's
+  agent output, unreached and unchanged.
 
 ### D7. A shrink never destroys windows (plan-gate decision)
 
@@ -147,11 +164,14 @@ Why keep rather than delete, given Emacs deletes windows that no longer fit:
   lose their layout. A resize is a *clumsy, frequent, accidental* gesture in a
   way `C-x 0` is not, so the destructive reading is the wrong default for the
   same input.
-- **It keeps `ResizeFrame` a size update.** Deletion would put window-lifecycle
-  machinery (a deletion event, a focus-reassignment rule when the focused
-  window is the one that no longer fits, a point-salvage rule) into a slice
-  whose subject is the input boundary. No user command needs that machinery
-  yet; `C-x 0` and `C-x 1` are not in the shipped keymap.
+- **It keeps `ResizeFrame` a size update.** Deletion would put a window
+  *lifecycle* decision into a slice whose subject is the input boundary: which
+  window dies, and what happens when the dying one is focused. Note this is
+  **not** an argument from implementation cost — `C-x 1` is bound and
+  `DeleteOtherWindows`/`WindowsCollapsed` already exist, so collapsing to the
+  focused window would have been cheap to build. It is an argument about which
+  slice owns the decision. Cheapness is not a reason to make a resize
+  destructive.
 - **The semantic gate still holds.** While shrunk, `C-x 2` correctly refuses —
   that is D3 working, evaluated at the new size, and it is the property V2
   actually pins.
@@ -188,12 +208,33 @@ leaving it to be discovered.
    on `SIGWINCH` immediately. Drei's watcher polls, so a resize is observed
    within one poll interval rather than instantly. Presentation-only lag; the
    semantic frame size is correct from the next command onward.
-2. **A resize redraws without a readiness marker.** Markers stay bound to
-   input epochs (0005's recorded decision), so a TermVerify resize scenario
-   must wait on frame content with an explicit deadline rather than on
-   quiescence. This is weaker evidence than Drei uses elsewhere and is the
-   first concrete instance of 0005's recorded gap: the row exists so that the
-   TermVerify issue for a second marker kind has something to cite.
+2. ~~**A resize redraws without a readiness marker.**~~ **Withdrawn during V4;
+   the premise was false.** The deviation assumed a resize is a *spontaneous*
+   redraw and therefore outside the marker's "one per input epoch" rule.
+   TermVerify's epoch model says otherwise: `ConptyAdapter.dispatch` accepts a
+   `Resize` on the same ordered input stream as `KeyInput`, and
+   `_read_epoch_chunks` then reads until it observes exactly one marker. A
+   resize *is* an input epoch under the very protocol the marker serves.
+
+   Leaving it unmarked would not have produced weaker evidence, it would have
+   produced broken evidence: the resize epoch would block until the abort
+   deadline, and any marker that did arrive later would be the *next* input's,
+   shifting every epoch after it. So the editor marks a resize like any other
+   consumed input, and `test_shipped_editor_resize_scenario` gets its evidence
+   through ordinary quiescence — no deadline, no sleep, no weaker oracle.
+
+   The readiness-marker gap 0005 recorded is therefore **not** reached by this
+   slice. It belongs where 0005 put it: the first redraw driven by something
+   the verifier did not dispatch, which is agent output in §C.2.
+
+   **Caveat found by the adversarial review, recorded in code and in 0005:**
+   the editor marks every resize it *observes*, and the watcher observes only
+   *changes*. A dispatched resize to the size the terminal already has
+   produces no event and no marker, so that epoch hangs to the abort deadline.
+   Demonstrated, not theorised. It is not a defect in the editor — a no-op
+   resize should do nothing — but it is a trap for whoever writes the next
+   resize scenario, and the invariant "every dispatched input is marked" is
+   the wrong one to carry into §C.2.
 3. **Shrinking below the split minimum keeps the windows** (D7). Emacs deletes
    windows that no longer fit and the deletion is permanent. Drei keeps them
    and renders what fits, so growing the frame back restores the layout with
@@ -244,8 +285,15 @@ leaving it to be discovered.
 - Shrinking a split frame below the split minimum changes no window state:
   the window count, points, and marks survive, and growing the frame back
   renders every pane as before (D7).
-- The threaded source is exercised by exactly one test that starts a thread;
-  every other test feeds scripted events.
+- The threaded source's *happy path* is exercised by exactly one test that
+  starts a thread; every other behavioral test feeds scripted events.
+  **Amended after the adversarial review:** three more thread-starting tests
+  cover reader *failure* (an exception in `read_key`, end of input, an
+  exception in `get_size`). They exist because without them a dead reader
+  thread left the editor blocked in `next_event` forever with the terminal
+  still in raw mode and `C-g` unable to reach it — a regression against
+  `main`, where the same failure propagated straight into `port.restore()`.
+  Each failure is immediate and deterministic, so the suite stays so.
 - One `apply_session_effects` call produces exactly **one** `CommandOutcome`
   carrying both delivery events, and no code path can observe a state between
   the fold and the append.
@@ -253,7 +301,7 @@ leaving it to be discovered.
   runs on a machine with no `hermes`.
 - Full quality gate green on 3.12–3.14 and both CI OSes; coverage floor held
   at 100%; `drei.acp` purity unchanged.
-- TD-6 is **reduced and re-scoped, not removed** (see risks), and TD-2's
+- TD-6 is **paid and removed** (V4 shipped the threaded source), and TD-2's
   atomicity paragraph is removed.
 
 ## Risks / open questions
@@ -262,12 +310,12 @@ leaving it to be discovered.
   Mitigation: V1 is deliberately behavior-preserving and keeps the default
   source synchronous, so the entire shipped terminal suite gates it before any
   new event kind exists.
-- **TD-6 is not fully paid by this slice.** The size watcher observes a
-  resize, but with a *synchronous* default source (V1) a resize is only acted
-  on when the next event arrives. V4's threaded source removes that, which is
-  why V4 is in scope. If V4 slips, TD-6 must be re-scoped in
-  `docs/technical-debt.md` rather than marked done — the rules say entries are
-  removed when paid, not when re-scoped.
+- ~~**TD-6 is not fully paid by this slice.**~~ **Resolved: V4 shipped, so
+  TD-6 is paid and its entry removed.** The contingency (re-scope rather than
+  delete, had V4 slipped) was not needed. `ThreadedTerminalSource` is the
+  production default, so a resize is acted on when it happens rather than
+  when the next key arrives, and `test_shipped_editor_resize_scenario` proves
+  it against the real process on a real ConPTY.
 - ~~**Is the threaded source in the right slice?**~~ **Settled at the plan
   gate: yes, V4 stays in slice 15.** The alternative was to defer every thread
   to §C.2 and ship a synchronous source here, accepting that resize lags a

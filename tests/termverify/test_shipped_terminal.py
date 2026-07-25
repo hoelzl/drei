@@ -30,6 +30,7 @@ from termverify import (
     ManualTime,
     NetworkConfiguration,
     Observation,
+    Resize,
     RunConfiguration,
     RunFinished,
     Started,
@@ -76,6 +77,18 @@ def _reaped(adapter: ConptyAdapter) -> Iterator[ConptyAdapter]:
 def _frame_lines(observation: Observation) -> tuple[str, ...]:
     assert observation.frame is not None, observation
     return tuple(observation.frame.lines)
+
+
+def _modeline_row(lines: tuple[str, ...]) -> int:
+    """Index of Drei's modeline in the screen.
+
+    Sensitive to the height *Drei* is rendering at, unlike `len(lines)`,
+    which is the screen model's height and reflects the adapter's resize
+    whatever the editor did with it.
+    """
+    rows = [i for i, line in enumerate(lines) if line.startswith("Drei:")]
+    assert len(rows) == 1, lines
+    return rows[0]
 
 
 def _adapter(tmp_path: Path, argv_file: Path | None = None) -> ConptyAdapter:
@@ -127,6 +140,64 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
         process = final.observation.process
         assert process is not None
         assert process.state == "exited", process
+
+
+def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
+    """A real terminal resize reaches the shipped editor and reflows the frame.
+
+    This is the terminal-level proof of plan 0015: the threaded source's size
+    watcher notices the new size, the loop turns it into a `ResizeFrame`
+    command, and the next frame is drawn at the new width. Nothing here stubs
+    a port — the child is the real `drei` process on a real ConPTY.
+
+    It is also the evidence that settled deviation 2. TermVerify dispatches a
+    `Resize` on the same ordered input stream as a key and then reads until
+    exactly one readiness marker, so a resize *is* an input epoch under the
+    cooperation protocol: the editor marks it like any other consumed input.
+    Had it stayed unmarked, this epoch would have hung until the abort
+    deadline rather than merely being "harder to observe".
+
+    The one thing that is genuinely weaker here: the watcher polls, so the
+    resize is observed within a poll interval rather than instantly. The
+    epoch's own marker wait absorbs that — no sleep, no fixed deadline in the
+    test (parity registry: presentation-only lag).
+    """
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-resize-scenario", _configuration())
+        assert type(started) is Started, started
+        initial_lines = _frame_lines(started.observation)
+        assert _modeline_row(initial_lines) == _ROWS - 2, initial_lines
+
+        # Type something so the reflow has content to carry across the resize.
+        for char in "hi":
+            inserted = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(inserted) is EpochCompleted, inserted
+
+        # Now resize the terminal itself. Wider and taller than the start.
+        wider, taller = _COLUMNS + 20, _ROWS + 4
+        resized = adapter.dispatch(Resize(ManualTime(0), wider, taller))
+        assert type(resized) is EpochCompleted, resized
+        resized_lines = _frame_lines(resized.observation)
+
+        # DREI's OWN geometry, not the screen model's. `len(resized_lines)`
+        # would be `taller` even if the editor ignored the resize entirely —
+        # it is the ConPTY screen, which the adapter resized. What only Drei
+        # controls is where it puts its modeline: it draws `height` rows as
+        # body + modeline + echo, so the modeline sits at `height - 2`. An
+        # editor still rendering at the old height would leave it at
+        # `_ROWS - 2`, four rows higher.
+        assert _modeline_row(resized_lines) == taller - 2, resized_lines
+        assert any(line.startswith("hi") for line in resized_lines), resized_lines
+
+        # The editor is still live and still consuming input after the resize.
+        moved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "b")))
+        assert type(moved) is EpochCompleted, moved
+
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
 def test_shipped_editor_save_scenario(tmp_path: Path) -> None:

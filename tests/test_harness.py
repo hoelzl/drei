@@ -1,7 +1,10 @@
 from drei.commands import (
+    FrameResized,
     KeyboardQuitEvent,
     PointMoved,
     TextInserted,
+    WindowFocusChanged,
+    WindowSplit,
 )
 from drei.harness import EditorHarness
 from drei.keys import UnresolvedKey
@@ -130,3 +133,96 @@ def test_harness_routes_minibuffer_keys() -> None:
     assert harness.observation.text == ""
     assert harness.observation.file_path == "/tmp/nope.txt"
     assert harness.observation.minibuffer is None
+
+
+class TestHarnessResize:
+    """V3 of plan 0015: a resize reaches the session as a command and the
+    harness re-renders at the new size."""
+
+    def test_resize_changes_the_rendered_width(self) -> None:
+        harness = EditorHarness(width=20, height=5)
+        harness.send("h")
+        assert len(harness.frame.rows[0]) == 20
+        harness.resize(40, 8)
+        assert len(harness.frame.rows[0]) == 40
+        assert len(harness.frame.rows) == 8
+        assert harness.frame.rows[0].startswith("h")
+
+    def test_resize_records_the_command_in_the_outcome_sequence(self) -> None:
+        harness = EditorHarness(width=20, height=5)
+        harness.resize(40, 8)
+        assert FrameResized(40, 8) in harness.outcomes[-1].events
+
+    def test_a_grown_frame_permits_a_split_the_old_size_refused(self) -> None:
+        harness = EditorHarness(width=20, height=6)  # < (1+1)*3+1 = 7
+        harness.send("C-x")
+        harness.send("2")
+        assert not any(
+            isinstance(e, WindowSplit) for o in harness.outcomes for e in o.events
+        )
+        harness.resize(20, 24)
+        harness.send("C-x")
+        harness.send("2")
+        assert WindowSplit(2) in harness.outcomes[-1].events
+
+    def test_a_shrunk_frame_refuses_a_further_split(self) -> None:
+        harness = EditorHarness(width=20, height=24)
+        harness.send("C-x")
+        harness.send("2")
+        harness.resize(20, 6)
+        harness.send("C-x")
+        harness.send("2")
+        assert WindowSplit(3) not in harness.outcomes[-1].events
+
+    def test_focus_still_cycles_into_a_window_the_frame_cannot_show(self) -> None:
+        """The hazard D7 owns: while shrunk, a window exists that the frame
+        does not render. It is not lost — C-x o reaches it and typing lands
+        in it — which is exactly why keeping it is safe rather than confusing
+        state with nothing behind it.
+        """
+        harness = EditorHarness(width=20, height=24, initial_text="ab")
+        harness.send("C-x")
+        harness.send("2")
+        harness.resize(20, 1)  # only the top pane's modeline fits
+        harness.send("C-x")
+        harness.send("o")  # focus the pane that is off-frame
+        assert WindowFocusChanged(1, "scratch") in harness.outcomes[-1].events
+
+        # The invisible window is a real window, not a bookkeeping entry: it
+        # carries its own point, and editing moves *its* point rather than
+        # the visible window's. Asserting on the buffer text alone would not
+        # show this — both windows share one buffer, so the text is the same
+        # whichever window has focus.
+        harness.send("C-f")
+        session = harness._session  # noqa: SLF001 - layout has no public reader
+        assert session.windows[1].point == 1
+        assert session.windows[0].point == 0
+
+    def test_resize_does_not_clear_a_pending_echo_message(self) -> None:
+        """A resize is not a user action and must not wipe the echo area:
+        `Quit` survives the terminal changing shape underneath it."""
+        harness = EditorHarness(width=20, height=5)
+        harness.send("C-g")
+        assert harness.frame.rows[-1].startswith("Quit")
+        harness.resize(40, 8)
+        assert harness.frame.rows[-1].startswith("Quit")
+
+    def test_resize_while_the_minibuffer_is_open_is_not_swallowed(self) -> None:
+        """Pinned answer (plan 0015 V3): the minibuffer gate routes *keys*,
+        and a resize is not one. The frame size is a property of the
+        terminal, not of input focus — swallowing it would render the prompt
+        against a stale width for as long as the prompt stayed open.
+        """
+        harness = EditorHarness(width=20, height=5)
+        harness.send("C-x")
+        harness.send("C-f")  # find-file prompt open
+        assert harness.observation.minibuffer == ""
+        harness.resize(40, 8)
+        # The prompt survived the resize and re-rendered at the new size...
+        assert harness.observation.minibuffer == ""
+        assert len(harness.frame.rows[-1]) == 40
+        assert harness.frame.rows[-1].startswith("Find file:")
+        # ...and typing continues into the same prompt, so the resize was
+        # not read as minibuffer input.
+        harness.send("x")
+        assert harness.observation.minibuffer == "x"

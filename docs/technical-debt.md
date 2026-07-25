@@ -29,8 +29,7 @@ that review's.
 **Deferred to:** a design record — **written**, `agent/design/0005-acp-pump.md`.
 The debt now is the slices that implement it.
 **Location:** `src/drei/harness.py` (`EditorHarness.__init__` takes no process
-port), `src/drei/terminal.py` (`run_editor`'s synchronous `read_key` loop has
-no injection point), `src/drei/keys.py` (no agent command is bound),
+port), `src/drei/keys.py` (no agent command is bound),
 `src/drei/session.py` (`apply_permission_decision` returns a `Response`
 nobody sends), `src/drei/process.py` (`ProcessPort` is run-to-completion
 only).
@@ -44,26 +43,27 @@ run-to-completion by design (plan 0008 deferred the pump deliberately;
 design 0003 §A.1 carried the unamended streaming description until design
 0005 split it).
 
-Two related inaccuracies live in the code: `apply_session_effects` documents
-its delivery as "atomic", but it is **two** dispatches
-(`DeliverSessionEffects` then `InsertAgentText`) with an observable seam —
-the fold advances in the first whether or not the second runs. And design
-0003's consequence 2 claims that atomicity as a property.
-
 **Why deferred:** the pump is several slices, not a fix. It needed a streaming
-port shape, an event-injection point in a loop that blocks on `read_key()`, a
+port shape, an event-injection point in a loop that blocked on `read_key()`, a
 serialization rule for deliveries against keystrokes, cancellation wiring (the
 machine's sweep and the session's `AbortPendingPermissions` both exist but
-nothing calls them). TD-1's buffer binding is no longer among them: plan
+nothing calls them). Plan 0015 paid two of those: the loop now consumes an
+ordered `InputEvent` stream from an injectable `InputSource` (V1/V4), and the
+delivery is a single dispatch, so the "atomic" claim in
+`apply_session_effects` and design 0003 consequence 2 is true as written
+(V5). What remains unreachable is the agent side: no streaming port, no
+launcher, no bound key. TD-1's buffer binding is no longer among them: plan
 0014 implemented design 0004, so the pump inherits a resolved agent buffer
 per ACP session rather than a decision to make.
 
 **Suggested approach:** design 0005 decides all five — a `StreamingProcessPort`
 separate from `ProcessPort`, one ordered `InputEvent` queue fed by adapter-side
-reader threads (which also closes TD-6), one event per loop iteration with keys
-ahead of agent bytes, a single-dispatch delivery, and cancellation calling
-`cancel()` then `AbortPendingPermissions`. Implement it in that order; the
-first slice needs neither cancellation nor a real agent. Note 0005's two open
+reader threads (resize included — the old TD-6, paid by plan 0015 V4), one
+event per loop iteration with keys ahead of agent bytes, a single-dispatch
+delivery (paid by plan 0015 V5), and cancellation calling `cancel()` then
+`AbortPendingPermissions`. Implement it in that order; plan 0015 did the
+first and the fourth, so what is left is the streaming port, the fairness
+rule over two live sources, and cancellation. Note 0005's two open
 blockers before starting the cancellation slice: `C-g` currently exits the
 editor, and readiness markers have no epoch for a spontaneous delivery.
 
@@ -124,25 +124,6 @@ special-casing `C-g`.
 **Suggested approach:** handle `C-g` in the pending branch as
 `KeyboardQuit()`, and register the resulting behavior. Then decide whether
 any *other* non-completing key should echo something rather than vanish.
-
-## TD-6 (finding 21) — terminal size is read once; resize is never observed
-
-**Location:** `src/drei/terminal.py` — `run_editor` reads `port.get_size()`
-once before the loop; there is no SIGWINCH / `WINDOW_BUFFER_SIZE_EVENT` path.
-**Severity:** medium in real use, invisible in tests.
-
-After a resize, frames wrap or truncate against the stale width, and the
-split-window minimum-height gate tests a height the terminal no longer has —
-so `C-x 2` can be refused in a window that is now tall enough, or allowed in
-one that is not.
-
-**Why deferred:** hardening, and it is the first genuinely asynchronous input
-the editor would accept. That is the same injection-point question TD-2 owns,
-so building a one-off signal path first would likely be thrown away.
-
-**Suggested approach:** land it with, or after, the §C pump's injection
-point; a resize is then just another external delivery. Keep the size an
-explicit session input rather than something the renderer reads ambiently.
 
 ## TD-7 (finding 22) — frozen dataclasses over aliased mutable dicts
 
@@ -207,3 +188,41 @@ arm.
 **Suggested approach:** have the CLI hand the path to the session and let
 `_visit` produce the outcome, so there is exactly one open path and one
 vocabulary of failures. The CLI then reports the normalized token.
+
+## TD-10 (plan 0015 V2) — the frame cap drops the echo row before a window pane
+
+**Location:** `src/drei/render.py` — `rows = rows[:height]` at the end of
+`render_session`.
+**Severity:** low; reachable only at absurd frame heights, but newly
+reachable *in production* rather than only from a hand-built observation.
+
+`render_session` builds every pane, appends the shared echo row last, then
+truncates the row list to the frame height. Truncation therefore cuts from
+the bottom, and the echo row is the bottom. With two windows in a
+two-row frame the result is two modelines and **no echo row**: the minibuffer
+prompt is invisible while the minibuffer is open, and the cursor — placed at
+`height - 1` for an open minibuffer — lands on a modeline instead of on the
+prompt it is supposed to be editing.
+
+Emacs prioritizes the other way round: the echo area is the last thing it
+gives up, and windows are deleted to make room.
+
+This was found while implementing plan 0015 D7. Before `ResizeFrame` existed,
+the truncation branch was reachable only by constructing a `SessionObservation`
+by hand, because the `C-x 2` gate prevented a real session from over-
+subscribing its frame. A resize can now shrink a live split frame to any
+height, so the path ships.
+
+**Why deferred:** fixing it is a *rendering priority* decision (which row
+wins when rows are scarce: echo, modeline, or body), not a resize decision.
+It deserves its own reasoning and a parity row of its own, and slice 15's
+subject is the input boundary. Pinning the wrong-but-current behavior is
+deliberate: `test_shrink_below_the_split_minimum_degrades_in_stages` asserts
+the echo row is the first casualty, so the fix will show up as a failing
+test rather than as a silent change.
+
+**Suggested approach:** reserve the echo row before distributing body rows —
+compute pane heights against `height - 1` and let the *panes* absorb the
+shortfall, dropping whole panes from the bottom while the echo row is
+retained. Then decide, with a parity row, whether a frame too short for even
+one pane keeps the echo row or renders empty.

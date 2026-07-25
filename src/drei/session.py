@@ -31,6 +31,7 @@ from drei.commands import (
     ExchangePointAndMark,
     FindFile,
     ForwardChar,
+    FrameResized,
     InsertAgentText,
     InsertText,
     KeyboardQuit,
@@ -53,6 +54,7 @@ from drei.commands import (
     PromptPermission,
     RegionCopied,
     RegionKilled,
+    ResizeFrame,
     SaveBuffer,
     SaveFailed,
     SessionObservation,
@@ -115,6 +117,7 @@ Command = (
     | SplitWindow
     | OtherWindow
     | DeleteOtherWindows
+    | ResizeFrame
     | MinibufferInput
     | MinibufferBackspace
     | MinibufferAccept
@@ -145,6 +148,7 @@ Event = (
     | WindowSplit
     | WindowFocusChanged
     | WindowsCollapsed
+    | FrameResized
     | OpenFailed
     | AgentTranscriptUpdated
     | AgentTextInserted
@@ -454,9 +458,10 @@ class EditorSession:
         # comment used to claim otherwise): _render_effects runs a few lines
         # before the AgentTranscriptUpdated append. That is safe because the
         # two are one command — a caller never observes a state between them,
-        # and replaying the event stream reconstructs the same fold. It is
-        # NOT the same as apply_session_effects being atomic; that seam is
-        # two dispatches (see its docstring and docs/technical-debt.md).
+        # and replaying the event stream reconstructs the same fold. Since
+        # design 0005 D4 the *whole* delivery is that one command: the append
+        # happens in the same dispatch, so apply_session_effects is atomic in
+        # the same sense rather than in a weaker one.
         from drei.acp.transcript import TranscriptFold
 
         self._agent_folds: dict[BufferId, TranscriptFold] = {}
@@ -683,29 +688,17 @@ class EditorSession:
                     assert error is not None
                     events.append(ProcessOutputRecorded(argv, -1, 0, 0, error))
             case DeliverSessionEffects(effects=effects, buffer_id=target):
-                # External delivery, not a user edit: buffer value untouched.
-                # The fold→append step lives in apply_session_effects (the
-                # atomic delivery seam); a raw dispatch only records the fold.
-                new_value = current
+                # One dispatch, both events (design 0005 D4, plan 0015 D5).
+                # The fold advances and the rendered suffix lands in the same
+                # command, so no code path can observe a state between them —
+                # which is what design 0003 consequence 2 always claimed.
                 rendered = self._render_effects(effects, target)
                 events.append(AgentTranscriptUpdated(effects, rendered, target.value))
+                new_value = self._append_agent_text(current, rendered, target, events)
             case InsertAgentText(text=text, buffer_id=target):
-                if text:
-                    before = len(current.text)
-                    after = before + len(text)
-                    new_value = replace(
-                        current,
-                        text=current.text + text,
-                        # Tail-follow, not a cursor grab (design 0004 D6): a
-                        # point that sat at end-of-buffer tracks the stream;
-                        # a point anywhere else is where a human put it.
-                        point=after if current.point == before else current.point,
-                        mark=_adjust_mark_insert(current.mark, before, len(text)),
-                    )
-                    self._tail_follow_windows(target, before, after)
-                    events.append(AgentTextInserted(text, before, after, target.value))
-                else:
-                    new_value = current
+                # Still a command in its own right: appending agent text
+                # without advancing a transcript fold is a real thing to want.
+                new_value = self._append_agent_text(current, text, target, events)
             case CreateAgentBuffer():
                 # The buffer (and its BufferCreated event) came out of target
                 # resolution above; creation edits nothing. `current` is the
@@ -719,6 +712,15 @@ class EditorSession:
                 new_value = self._other_window(events)
             case DeleteOtherWindows():
                 new_value = self._delete_other_windows(events)
+            case ResizeFrame(width, height):
+                # Plan 0015 D7: the size changes and nothing else. Windows are
+                # never deleted to make them fit — the renderer drops the
+                # panes that do not, so growing the frame back restores the
+                # layout with its points intact. `C-x 2` is gated at the new
+                # size from here on, which is why this is a command.
+                self._frame_size = (width, height)
+                events.append(FrameResized(width, height))
+                new_value = current
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
@@ -1115,6 +1117,38 @@ class EditorSession:
             for i, w in enumerate(self._windows)
         )
 
+    def _append_agent_text(
+        self,
+        current: BufferValue,
+        text: str,
+        target: BufferId,
+        events: list[Event],
+    ) -> BufferValue:
+        """Append agent text to ``current``, recording ``AgentTextInserted``.
+
+        Shared by `DeliverSessionEffects` and `InsertAgentText` so the two
+        cannot drift apart — before design 0005 D4 the append existed only on
+        the second, which is what made the "atomic" delivery two dispatches.
+        Empty text is a no-op that records nothing: a delivery of silent
+        effects leaves no trace in the buffer.
+        """
+        if not text:
+            return current
+        before = len(current.text)
+        after = before + len(text)
+        new_value = replace(
+            current,
+            text=current.text + text,
+            # Tail-follow, not a cursor grab (design 0004 D6): a point that
+            # sat at end-of-buffer tracks the stream; a point anywhere else
+            # is where a human put it.
+            point=after if current.point == before else current.point,
+            mark=_adjust_mark_insert(current.mark, before, len(text)),
+        )
+        self._tail_follow_windows(target, before, after)
+        events.append(AgentTextInserted(text, before, after, target.value))
+        return new_value
+
     def _split_window(self, events: list[Event]) -> BufferValue:
         """C-x 2 (plan 0012 D3): split the focused window into two stacked
         halves over the same buffer; both inherit the buffer's current
@@ -1320,7 +1354,7 @@ class EditorSession:
     ) -> CommandOutcome:
         """The agent-delivery entry point (design 0003 §B.7), mirroring
         ``run_process``: validate, record the fold as one immutable delivery
-        event, then append the newly rendered text as one buffer edit. One
+        event, and append the newly rendered text as one buffer edit. One
         ``handle()`` call's effects land as one ``AgentTranscriptUpdated``
         plus at most one ``AgentTextInserted``.
 
@@ -1329,22 +1363,13 @@ class EditorSession:
         from, readable via ``agent_buffer_id``. It is required and must name a
         generated buffer; anything else raises (design 0004 D3).
 
-        TODO: [tech-debt] TD-2 — design 0003 §consequence-2 calls this
-        delivery *atomic*; it is two dispatches with an observable seam. The
-        fold advances in the first whether or not the second runs. Nothing
-        drives it concurrently today (there is no §C pump), so the seam is
-        unobservable in practice. Design 0005 D4 collapses it to one
-        dispatch emitting both events; see docs/technical-debt.md.
+        The delivery is **one dispatch** (design 0005 D4), so it is atomic in
+        the sense design 0003 consequence 2 always asserted: no code path can
+        observe the fold advanced without the text appended. This is now a
+        thin wrapper — the work is the `DeliverSessionEffects` arm — and it
+        stays because it is the named entry point the ACP side calls.
         """
-        delivery = DeliverSessionEffects(tuple(effects), buffer_id)
-        outcome = self.dispatch(delivery)
-        rendered = next(
-            e.rendered for e in outcome.events if isinstance(e, AgentTranscriptUpdated)
-        )
-        if not rendered:
-            return outcome
-        append = self.dispatch(InsertAgentText(rendered, buffer_id))
-        return CommandOutcome(outcome.events + append.events, append.observation)
+        return self.dispatch(DeliverSessionEffects(tuple(effects), buffer_id))
 
     def run_process(
         self,

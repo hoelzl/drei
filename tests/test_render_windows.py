@@ -15,9 +15,10 @@ from drei.commands import (
     SplitWindow,
     WindowObservation,
 )
+from drei.harness import EditorHarness
 from drei.model import Buffer, BufferId, BufferValue
-from drei.render import render_session
-from drei.session import EditorSession
+from drei.render import Frame, render_session
+from drei.session import EditorSession, WindowValue
 
 
 def _session(text: str = "hello world") -> EditorSession:
@@ -151,3 +152,75 @@ def test_render_session_height_zero_is_an_empty_frame() -> None:
     assert frame.rows == ()
     assert frame.cursor == (0, 0)
     assert frame.height == 0
+
+
+def _modelines(frame: Frame) -> int:
+    return sum(1 for row in frame.rows if row.startswith("Drei:"))
+
+
+def _windows(harness: EditorHarness) -> tuple[WindowValue, ...]:
+    return harness._session.windows  # noqa: SLF001 - layout state has no public reader
+
+
+def _split_harness(height: int) -> EditorHarness:
+    """A harness with two windows over one buffer, at the given height.
+
+    The harness is what makes these *resize* tests rather than renderer
+    tests: `render_session` takes width/height as arguments and never reads
+    `session._frame_size`, so calling it directly with a smaller number
+    proves nothing about `ResizeFrame`. `EditorHarness.resize` is the path
+    that actually carries a resize into the rendered frame.
+    """
+    harness = EditorHarness(width=10, height=height, initial_text="alpha\nbeta")
+    harness.send("C-x")
+    harness.send("2")
+    return harness
+
+
+def test_shrink_below_the_split_minimum_degrades_in_stages() -> None:
+    """Plan 0015 D7, render half: the shrink is absorbed by the renderer in
+    stages, and the session keeps both windows through all of them.
+
+    Below the *split* minimum (4 < (2+1)*3+1 = 10) both panes still render;
+    the top one loses its body rows and keeps its modeline. Squeezed further,
+    the frame cap starts cutting from the bottom — first the shared echo row
+    (see TD-10), then the lower panes. No stage touches window state, which
+    is what makes the resize reversible.
+    """
+    harness = _split_harness(height=8)
+    assert _modelines(harness.frame) == 2
+
+    harness.resize(10, 4)
+    assert len(_windows(harness)) == 2  # nothing deleted to make it fit
+    assert _modelines(harness.frame) == 2  # both panes present, top bodyless
+
+    harness.resize(10, 2)
+    assert len(_windows(harness)) == 2  # still nothing deleted
+    assert len(harness.frame.rows) == 2  # the Frame contract holds
+    # TD-10: the echo row is what the cap takes first, so both modelines
+    # survive and the echo area does not. Pinned as the current truth, not
+    # endorsed — see docs/technical-debt.md.
+    assert _modelines(harness.frame) == 2
+
+    harness.resize(10, 1)
+    assert len(_windows(harness)) == 2  # still nothing deleted
+    assert _modelines(harness.frame) == 1  # the lower pane is now off-frame
+    assert harness.frame.cursor[0] < len(harness.frame.rows)
+
+
+def test_growing_the_frame_back_restores_both_panes() -> None:
+    """The other half of D7: what a shrink hid, a grow shows again, with the
+    window points it had. Emacs cannot do this — it deletes the window that
+    no longer fits, and growing the frame does not bring it back."""
+    harness = _split_harness(height=8)
+    harness.send("C-x")
+    harness.send("o")  # focus the lower window
+    harness.send("C-f")  # and move its point off zero
+    before = _windows(harness)
+
+    harness.resize(10, 1)  # the lower pane goes off-frame entirely
+    assert _modelines(harness.frame) == 1
+
+    harness.resize(10, 8)
+    assert _modelines(harness.frame) == 2
+    assert _windows(harness) == before  # points and marks came back untouched

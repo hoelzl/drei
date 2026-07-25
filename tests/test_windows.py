@@ -14,8 +14,10 @@ from drei.commands import (
     BufferSelected,
     DeleteOtherWindows,
     ForwardChar,
+    FrameResized,
     KillLine,
     OtherWindow,
+    ResizeFrame,
     SetMark,
     SplitWindow,
     Undo,
@@ -242,3 +244,80 @@ def test_focus_return_after_undo_shrink_clamps_the_window_point() -> None:
     assert WindowFocusChanged(1, "alpha") in outcome.events
     assert session.buffer.current.text == "aa"
     assert session.buffer.current.point == 2  # clamped to the buffer end
+
+
+class TestResizeFrame:
+    """V2 of plan 0015: the frame size is semantic, so changing it is a
+    command (D3), and shrinking never destroys windows (D7)."""
+
+    def test_resize_records_the_new_size_as_an_event(self) -> None:
+        session = _session()
+        outcome = session.dispatch(ResizeFrame(100, 40))
+        assert FrameResized(100, 40) in outcome.events
+
+    def test_a_grown_frame_permits_a_split_the_old_size_refused(self) -> None:
+        # height 6 < (1+1)*3+1 = 7, so C-x 2 is a silent no-op...
+        session = _session(height=6)
+        assert session.dispatch(SplitWindow()).events == ()
+        assert len(session.windows) == 1
+        # ...and the same C-x 2 succeeds once the frame is tall enough. This
+        # is the property that makes the size an input to a command's outcome.
+        session.dispatch(ResizeFrame(80, 24))
+        assert WindowSplit(2) in session.dispatch(SplitWindow()).events
+        assert len(session.windows) == 2
+
+    def test_a_shrunk_frame_refuses_a_further_split(self) -> None:
+        session = _session(height=24)
+        session.dispatch(SplitWindow())
+        session.dispatch(ResizeFrame(80, 6))
+        assert session.dispatch(SplitWindow()).events == ()
+        assert len(session.windows) == 2  # the shrink split nothing off
+
+    def test_shrinking_below_the_split_minimum_keeps_every_window(self) -> None:
+        """D7: a resize is not destructive. Emacs deletes windows that no
+        longer fit; Drei keeps them and renders what fits, so the layout
+        survives a terminal the user drags too small and back."""
+        session = _session(height=24)
+        session.dispatch(SplitWindow())
+        session.dispatch(OtherWindow())
+        for _ in range(4):
+            session.dispatch(ForwardChar())  # bottom window point 4
+        session.dispatch(ResizeFrame(80, 5))  # far below (2+1)*3+1 = 10
+        assert len(session.windows) == 2
+        assert session.windows[1].point == 4
+        assert session.focused == 1
+
+    def test_growing_back_restores_the_layout_with_points_intact(self) -> None:
+        """The round trip D7 exists for: shrink past the threshold, grow
+        back, and both panes render again at the points they held."""
+        session = _session(height=24)
+        session.dispatch(SplitWindow())
+        session.dispatch(OtherWindow())
+        for _ in range(4):
+            session.dispatch(ForwardChar())
+        before = session.windows
+        session.dispatch(ResizeFrame(80, 5))
+        session.dispatch(ResizeFrame(80, 24))
+        assert session.windows == before
+        # And the layout is genuinely usable again, not merely remembered.
+        assert WindowSplit(3) in session.dispatch(SplitWindow()).events
+
+    def test_resize_does_not_disturb_the_focused_buffer(self) -> None:
+        session = _session(height=24)
+        for _ in range(3):
+            session.dispatch(ForwardChar())
+        before = session.buffer.current
+        session.dispatch(ResizeFrame(20, 8))
+        assert session.buffer.current == before
+
+    def test_resize_is_recorded_for_replay(self) -> None:
+        """D3's reason for making this a command: a transcript that omitted
+        the resize could not reproduce the split-or-no-op decision."""
+        session = _session(height=6)
+        session.dispatch(SplitWindow())  # refused at height 6: no events
+        session.dispatch(ResizeFrame(80, 24))
+        session.dispatch(SplitWindow())  # succeeds at height 24
+        # The resize is in the transcript and precedes the split it enabled,
+        # so a replay sees the same height the split decision saw. Without
+        # the FrameResized row the replay would refuse the split.
+        assert session.transcript == (FrameResized(80, 24), WindowSplit(2))
