@@ -1,5 +1,3 @@
-from typing import NamedTuple
-
 from conftest import FakeFilePort, FakeProcessPort
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -211,16 +209,6 @@ def _switch_to(draw: st.DrawFn) -> list[object]:
     return [SwitchBuffer(), *(MinibufferInput(c) for c in name), MinibufferAccept()]
 
 
-class _Delivery(NamedTuple):
-    """One ``apply_session_effects`` call — the whole delivery, fold *and*
-    append. A bare ``DeliverSessionEffects`` dispatch records the fold without
-    appending (the two-dispatch seam, TD-2), so the fold oracle is stated over
-    complete deliveries."""
-
-    effects: tuple[object, ...]
-    buffer_id: BufferId
-
-
 @st.composite
 def _agent_effect(draw: st.DrawFn) -> object:
     from drei.acp.machine import AgentTextChunk, PromptCompleted, ThoughtChunk
@@ -260,8 +248,12 @@ def multi_buffer_agent_history(draw: st.DrawFn) -> list[object]:
                 st.builds(InsertText, st.text(min_size=0, max_size=4)),
                 st.just(KillLine()),
                 _switch_to(),
+                # A whole delivery is one command since design 0005 D4:
+                # the dispatch that advances the fold is the dispatch that
+                # appends. This used to need a _Delivery wrapper standing for
+                # the two-dispatch pair the oracle had to see as one step.
                 st.builds(
-                    _Delivery,
+                    DeliverSessionEffects,
                     st.lists(_agent_effect(), min_size=1, max_size=3).map(tuple),
                     st.sampled_from([AGENT, AGENT2]),
                 ),
@@ -282,9 +274,6 @@ def _run(session: EditorSession, history: list[object], *, skip_edits: bool) -> 
     §A.3 owns the fix), and the fold oracle is not claimed to survive it.
     """
     for item in history:
-        if isinstance(item, _Delivery):
-            session.apply_session_effects(item.effects, item.buffer_id)  # type: ignore[arg-type]
-            continue
         if (
             skip_edits
             and isinstance(item, (InsertText, KillLine))

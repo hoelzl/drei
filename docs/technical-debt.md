@@ -29,8 +29,7 @@ that review's.
 **Deferred to:** a design record — **written**, `agent/design/0005-acp-pump.md`.
 The debt now is the slices that implement it.
 **Location:** `src/drei/harness.py` (`EditorHarness.__init__` takes no process
-port), `src/drei/terminal.py` (`run_editor`'s synchronous `read_key` loop has
-no injection point), `src/drei/keys.py` (no agent command is bound),
+port), `src/drei/keys.py` (no agent command is bound),
 `src/drei/session.py` (`apply_permission_decision` returns a `Response`
 nobody sends), `src/drei/process.py` (`ProcessPort` is run-to-completion
 only).
@@ -44,17 +43,16 @@ run-to-completion by design (plan 0008 deferred the pump deliberately;
 design 0003 §A.1 carried the unamended streaming description until design
 0005 split it).
 
-Two related inaccuracies live in the code: `apply_session_effects` documents
-its delivery as "atomic", but it is **two** dispatches
-(`DeliverSessionEffects` then `InsertAgentText`) with an observable seam —
-the fold advances in the first whether or not the second runs. And design
-0003's consequence 2 claims that atomicity as a property.
-
 **Why deferred:** the pump is several slices, not a fix. It needed a streaming
-port shape, an event-injection point in a loop that blocks on `read_key()`, a
+port shape, an event-injection point in a loop that blocked on `read_key()`, a
 serialization rule for deliveries against keystrokes, cancellation wiring (the
 machine's sweep and the session's `AbortPendingPermissions` both exist but
-nothing calls them). TD-1's buffer binding is no longer among them: plan
+nothing calls them). Plan 0015 paid two of those: the loop now consumes an
+ordered `InputEvent` stream from an injectable `InputSource` (V1/V4), and the
+delivery is a single dispatch, so the "atomic" claim in
+`apply_session_effects` and design 0003 consequence 2 is true as written
+(V5). What remains unreachable is the agent side: no streaming port, no
+launcher, no bound key. TD-1's buffer binding is no longer among them: plan
 0014 implemented design 0004, so the pump inherits a resolved agent buffer
 per ACP session rather than a decision to make.
 
@@ -62,9 +60,10 @@ per ACP session rather than a decision to make.
 separate from `ProcessPort`, one ordered `InputEvent` queue fed by adapter-side
 reader threads (resize included — the old TD-6, paid by plan 0015 V4), one
 event per loop iteration with keys ahead of agent bytes, a single-dispatch
-delivery, and cancellation calling
-`cancel()` then `AbortPendingPermissions`. Implement it in that order; the
-first slice needs neither cancellation nor a real agent. Note 0005's two open
+delivery (paid by plan 0015 V5), and cancellation calling `cancel()` then
+`AbortPendingPermissions`. Implement it in that order; plan 0015 did the
+first and the fourth, so what is left is the streaming port, the fairness
+rule over two live sources, and cancellation. Note 0005's two open
 blockers before starting the cancellation slice: `C-g` currently exits the
 editor, and readiness markers have no epoch for a spontaneous delivery.
 
