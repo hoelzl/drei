@@ -141,10 +141,18 @@ class TestInsertAgentText:
         outcome2 = session2.dispatch(InsertAgentText("z", AGENT))
         assert outcome2.observation.modified is False
 
-    def test_point_tracks_the_new_end(self) -> None:
-        session = make_session(text="abc", point=1)
-        outcome = session.dispatch(InsertAgentText("def", AGENT))
+    def test_point_follows_the_tail_only_from_the_tail(self) -> None:
+        """Plan 0014 pin 3 / design 0004 D6. This used to assert that point
+        tracked the new end unconditionally, which is how a burst of agent
+        output relocated the cursor of a human mid-edit (review 0001 finding
+        5). The negative arm below *is* the finding."""
+        at_tail = make_session(text="abc", point=3)
+        outcome = at_tail.dispatch(InsertAgentText("def", AGENT))
         assert outcome.observation.point == 6
+
+        mid_buffer = make_session(text="abc", point=1)
+        outcome = mid_buffer.dispatch(InsertAgentText("def", AGENT))
+        assert outcome.observation.point == 1
 
     def test_mark_adjusted_marker_style(self) -> None:
         session = make_session(text="abc", point=3)
@@ -220,25 +228,34 @@ class TestMinibufferDoesNotSwallowDeliveries:
 
 
 class TestDeliveriesAndTheKillChain:
-    """An event-emitting delivery breaks the kill append chain (the chain
-    rule is 'event-emitting commands intervene'); a delivery whose append
-    moves point to end-of-buffer also turns a following KillLine into a
-    silent no-op, which leaves the chain intact. Both pinned as deliberate."""
+    """An event-emitting delivery breaks the kill-append chain of the buffer
+    it targeted (the chain rule is 'event-emitting commands intervene'), and
+    a command that emits nothing intervenes in nothing. Pinned as deliberate.
 
-    def test_fold_only_delivery_breaks_the_chain(self) -> None:
+    That the broken chain is the *target's* and not the focused buffer's is
+    plan 0014 pin 1, pinned in ``test_agent_buffer_identity.py`` where the two
+    buffers are distinct; here the agent buffer is the focused one.
+    """
+
+    def test_fold_only_delivery_breaks_its_targets_chain(self) -> None:
         session = make_session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())
         session.dispatch(DeliverSessionEffects((AgentTextChunk(text="x"),), AGENT))
         session.dispatch(KillLine())
         assert session.kill_ring == ("\n", "aa")  # two entries: chain broken
 
-    def test_append_delivery_indirectly_preserves_the_chain(self) -> None:
+    def test_a_silent_noop_does_not_break_the_chain(self) -> None:
+        """Plan 0014 pin 2. This rule used to be pinned *through* a delivery:
+        the delivery dragged point to end-of-buffer, which turned the next
+        KillLine into the silent no-op under test. Design 0004 D6 removed that
+        mechanism (point no longer jumps), so the rule is pinned directly —
+        an empty insert emits nothing and therefore intervenes in nothing."""
         session = make_session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())
-        session.dispatch(InsertAgentText("X", AGENT))  # point → end-of-buffer
-        outcome = session.dispatch(KillLine())  # silent no-op at buffer end
+        outcome = session.dispatch(InsertText(""))  # silent no-op
         assert outcome.events == ()
-        assert session.kill_ring == ("aa",)  # chain intact (no intervening event)
+        session.dispatch(KillLine())
+        assert session.kill_ring == ("aa\n",)  # one entry: chain intact
 
 
 class TestDispatchRejectsCorruptDelivery:

@@ -690,18 +690,19 @@ class EditorSession:
                 rendered = self._render_effects(effects, target)
                 events.append(AgentTranscriptUpdated(effects, rendered, target.value))
             case InsertAgentText(text=text, buffer_id=target):
-                # TODO: [tech-debt] TD-1 — the target is a generated buffer
-                # since V2, but point still jumps to end-of-buffer rather than
-                # following the tail (design 0004 D6, plan 0014 V4).
                 if text:
                     before = len(current.text)
                     after = before + len(text)
                     new_value = replace(
                         current,
                         text=current.text + text,
-                        point=after,
+                        # Tail-follow, not a cursor grab (design 0004 D6): a
+                        # point that sat at end-of-buffer tracks the stream;
+                        # a point anywhere else is where a human put it.
+                        point=after if current.point == before else current.point,
                         mark=_adjust_mark_insert(current.mark, before, len(text)),
                     )
+                    self._tail_follow_windows(target, before, after)
                     events.append(AgentTextInserted(text, before, after, target.value))
                 else:
                     new_value = current
@@ -1087,6 +1088,31 @@ class EditorSession:
             mark=current.mark,
             minibuffer=self._minibuffer,
             minibuffer_prompt=self.minibuffer_prompt,
+        )
+
+    def _tail_follow_windows(
+        self, buffer_id: BufferId, before: int, after: int
+    ) -> None:
+        """Apply D6's tail-follow rule to the **non-focused** windows showing
+        an appended-to buffer.
+
+        0004 states the rule over windows rather than over the buffer because
+        A.2 made window point distinct from ``BufferValue.point``: a user
+        scrolled back through the transcript in one window is not dragged to
+        the end because output arrived in another window on the same buffer.
+        The focused window is excluded because its live point *is*
+        ``BufferValue.point``, which the append itself already moved (or did
+        not); refreshing it from the new value happens at the end of dispatch.
+
+        Window marks need no adjustment: an append lands at end-of-buffer, and
+        the existing insert rule never moves a mark at or before the insertion
+        point.
+        """
+        self._windows = tuple(
+            WindowValue(w.buffer_id, after, w.mark)
+            if i != self._focused and w.buffer_id == buffer_id and w.point == before
+            else w
+            for i, w in enumerate(self._windows)
         )
 
     def _split_window(self, events: list[Event]) -> BufferValue:

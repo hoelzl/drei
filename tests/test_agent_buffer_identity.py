@@ -31,8 +31,10 @@ from drei.commands import (
     InsertAgentText,
     InsertText,
     KillLine,
+    OtherWindow,
     SaveBuffer,
     SaveFailed,
+    SplitWindow,
     Yank,
 )
 from drei.model import Buffer, BufferId, BufferValue
@@ -145,17 +147,24 @@ class TestDeliveryLeavesTheFocusedBufferBookkeepingAlone:
         assert session._states[FOCUSED].undo_descending is False
         assert len(session._states[FOCUSED].undo_history) == 1
 
-    def test_delivery_bookkeeping_lands_on_the_target(self) -> None:
-        """The flip side: the target's own chains DO see the delivery."""
-        session = _session()
-        target_state = session._states[AGENT]
-        target_state.last_was_kill = True
+    def test_a_delivery_breaks_the_targets_chain_not_the_users(self) -> None:
+        """Both halves of plan 0014 pin 1.
+
+        A fold-only delivery is an event-emitting command, so it intervenes in
+        the kill-append chain — of the buffer it targeted. Before this slice it
+        broke whichever chain the human happened to have open, which is the
+        same ambient-focus defect as the text arm, one block over.
+        """
+        session = _session(text="aa\nbb\n", point=0)
+        session.dispatch(KillLine())  # the human's chain is open
+        session._states[AGENT].last_was_kill = True  # so is the agent buffer's
 
         session.dispatch(
             DeliverSessionEffects((AgentTextChunk(text="x"),), buffer_id=AGENT)
         )
 
-        assert target_state.last_was_kill is False
+        assert session._states[AGENT].last_was_kill is False  # target's: broken
+        assert session._states[FOCUSED].last_was_kill is True  # the human's: intact
 
 
 class TestCreateAgentBuffer:
@@ -375,3 +384,82 @@ class TestEachAgentBufferFoldsIndependently:
 
         assert session._agent_folds[first].turns == 3
         assert session._agent_folds.get(second, TranscriptFold()).turns == 0
+
+
+class TestDeliveriesFollowTheTail:
+    """V4 / design 0004 D6: ``tail -f``, not a cursor grab.
+
+    Point moves to the new end **only** if it was already at the old end.
+    Stated over windows as well as the buffer, because A.2 made window point
+    distinct from ``BufferValue.point``: a user scrolled back through the
+    transcript in one window must not be dragged to the end because output
+    arrived in another window showing the same buffer.
+    """
+
+    def _split_with_agent_in_the_unfocused_window(
+        self, agent_text: str = "", agent_point: int = 0
+    ) -> EditorSession:
+        """Two windows: the unfocused one shows the agent buffer, the focused
+        one the user's. The only arrangement in which the window rule is
+        distinguishable from the buffer rule."""
+        session = _session()
+        session._buffers[AGENT].replace(BufferValue(text=agent_text, point=agent_point))
+        session.dispatch(SplitWindow())
+        session._select_buffer(AGENT, [])  # focused window shows *agent*
+        session.dispatch(OtherWindow())  # …and focus moves off it
+        assert session.buffer.buffer_id == FOCUSED
+        assert session.windows[0].buffer_id == AGENT
+        return session
+
+    def test_point_at_the_tail_follows(self) -> None:
+        session = _session()
+        session._buffers[AGENT].replace(BufferValue(text="abc", point=3))
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session._buffers[AGENT].current.point == 6
+
+    def test_point_before_the_tail_stays_put(self) -> None:
+        """The finding: a burst of agent output must not relocate a cursor."""
+        session = _session()
+        session._buffers[AGENT].replace(BufferValue(text="abc", point=1))
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session._buffers[AGENT].current.point == 1
+        assert session._buffers[AGENT].current.text == "abcdef"
+
+    def test_a_non_focused_window_at_the_tail_follows(self) -> None:
+        session = self._split_with_agent_in_the_unfocused_window("abc", 3)
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session.windows[0].point == 6
+
+    def test_a_non_focused_window_scrolled_back_keeps_its_point(self) -> None:
+        session = self._split_with_agent_in_the_unfocused_window("abc", 1)
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session.windows[0].point == 1
+
+    def test_the_focused_window_over_another_buffer_is_untouched(self) -> None:
+        """The window rule reads the *target's* windows; a window showing
+        something else keeps its point whatever its numeric value."""
+        session = self._split_with_agent_in_the_unfocused_window("abc", 3)
+        focused_before = session.windows[session.focused]
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session.windows[session.focused] == focused_before
+
+    def test_mark_adjustment_is_unchanged(self) -> None:
+        """Design 0004 D6: the existing insert rule still applies. An append
+        happens at end-of-buffer, so a mark is never after it and never
+        moves."""
+        session = _session()
+        session._buffers[AGENT].replace(BufferValue(text="abc", point=3, mark=1))
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session._buffers[AGENT].current.mark == 1
