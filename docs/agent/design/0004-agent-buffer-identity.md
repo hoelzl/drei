@@ -1,8 +1,11 @@
 # 0004: Agent buffer identity
 
-**Status:** accepted — implemented in full by plan
-`0014-agent-buffer-identity.md`, which paid TD-1. D6 (editability) is
-deliberately still open and belongs to §A.3.
+**Status:** accepted — the binding (D2), the buffer kind (D3), no-file (D4),
+tail-follow (D5) and the per-buffer fold shipped in plan
+`0014-agent-buffer-identity.md`, which paid TD-1. Two parts remain open by
+design: D1's **trigger** — nothing folds `SessionEstablished` into a creation
+yet; `CreateAgentBuffer` exists and has no production caller until the pump
+(design 0005) — and D6 (editability), which belongs to §A.3.
 **Builds on:** `0003-hermes-drei-integration.md`
 **Does not revise:** 0001/0002/0003. It supplies a binding 0003 named but never
 defined.
@@ -71,6 +74,17 @@ Rejected alternatives:
   `C-x b *agent*` works or does not depending on timing. Existence should
   depend on the session, which is an event, not on output, which is a race.
 
+**Implementation note (plan 0014).** The trigger is not wired: creation is the
+`CreateAgentBuffer` command, which the pump will dispatch. One ordering fact
+the pump must handle, found while implementing: `initialize` emits
+`Initialized` **before** any session id exists, so at that moment there is no
+agent buffer to deliver it to, and a delivery now *requires* a target. Both
+`Initialized` and `SessionEstablished` render the empty string, so dropping
+the pre-session delivery costs its `AgentTranscriptUpdated` event and no fold
+state — but 0005 must decide that deliberately rather than discover it. The
+B.7 end-to-end test currently mints the buffer up front with a session id it
+knows in advance, which a pump cannot do.
+
 ### D2. Deliveries name their target; the transcript records it
 
 `DeliverSessionEffects` and `InsertAgentText` gain a target `BufferId` field,
@@ -110,6 +124,16 @@ definition everywhere else.
 
 Writing a transcript to disk is a real want; it is a `write-file` command,
 which Drei does not have. Recorded, not designed here.
+
+**Implementation note (plan 0014).** The dissolution is not quite total. A
+generated buffer is created through the same `_visit` path as any other, so
+its `saved_text` is `""`, and `_modified_after_undo` therefore compares
+against an empty file that does not exist: a generated buffer typed into and
+then undone back to empty reads *clean*. Coherent (it did start empty) and
+harmless while nothing renders the flag differently for a generated buffer,
+but it is a meaning for a flag this record calls meaningless. §A.3 owns the
+disposal along with the rest of generated-buffer behavior. Pre-existing for
+`C-x b`-created buffers, which have no file either.
 
 ### D5. Deliveries follow the tail; they do not steal point
 

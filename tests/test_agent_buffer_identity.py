@@ -21,7 +21,6 @@ import pytest
 from conftest import FakeFilePort
 
 from drei.acp.machine import AgentTextChunk, PromptCompleted, ThoughtChunk
-from drei.acp.transcript import TranscriptFold
 from drei.commands import (
     AgentTextInserted,
     AgentTranscriptUpdated,
@@ -38,7 +37,7 @@ from drei.commands import (
     Yank,
 )
 from drei.model import Buffer, BufferId, BufferValue
-from drei.session import EditorSession
+from drei.session import EditorSession, WindowValue
 
 FOCUSED = BufferId("alpha")
 AGENT = BufferId("*agent*")
@@ -376,6 +375,11 @@ class TestEachAgentBufferFoldsIndependently:
         """Turn counting is fold state too: three turns in one transcript must
         not make the other transcript's next turn its fourth."""
         session, first, second = self._two()
+        # The second buffer must have a fold of its own before the assertion
+        # below means anything: `.get(second, TranscriptFold()).turns == 0`
+        # over an absent key asserts a property of the default value, and
+        # passes even under one session-wide fold.
+        session.apply_session_effects((AgentTextChunk(text="b"),), second)
 
         for _ in range(3):
             session.apply_session_effects(
@@ -383,7 +387,7 @@ class TestEachAgentBufferFoldsIndependently:
             )
 
         assert session._agent_folds[first].turns == 3
-        assert session._agent_folds.get(second, TranscriptFold()).turns == 0
+        assert session._agent_folds[second].turns == 0
 
 
 class TestDeliveriesFollowTheTail:
@@ -444,14 +448,39 @@ class TestDeliveriesFollowTheTail:
         assert session.windows[0].point == 1
 
     def test_the_focused_window_over_another_buffer_is_untouched(self) -> None:
-        """The window rule reads the *target's* windows; a window showing
-        something else keeps its point whatever its numeric value."""
+        """The end-of-dispatch window refresh is skipped when the target is
+        not the focused buffer: the focused window must not be handed a point
+        read from a buffer it does not show."""
         session = self._split_with_agent_in_the_unfocused_window("abc", 3)
         focused_before = session.windows[session.focused]
 
         session.dispatch(InsertAgentText("def", buffer_id=AGENT))
 
         assert session.windows[session.focused] == focused_before
+
+    def test_a_window_over_another_buffer_does_not_follow_the_targets_tail(
+        self,
+    ) -> None:
+        """The rule reads the **target's** windows. A non-focused window over
+        a *different* buffer whose stored point merely coincides with the
+        target's old length must not be dragged along — it would land past the
+        end of its own buffer, and the staleness clamp would then hide the
+        corruption until the next `C-x o`."""
+        session = self._split_with_agent_in_the_unfocused_window("abc", 3)
+        # Window 1 (focused, showing 'alpha') is excluded by the focus rule,
+        # so give window 2 the coinciding point: three windows, the third
+        # showing the user's buffer at the target's pre-append length.
+        session.dispatch(SplitWindow())
+        session._windows = (
+            session.windows[0],
+            session.windows[1],
+            WindowValue(FOCUSED, 3, None),
+        )
+
+        session.dispatch(InsertAgentText("def", buffer_id=AGENT))
+
+        assert session.windows[0].point == 6  # the target's window: follows
+        assert session.windows[2].point == 3  # the user's window: does not
 
     def test_mark_adjustment_is_unchanged(self) -> None:
         """Design 0004 D6: the existing insert rule still applies. An append

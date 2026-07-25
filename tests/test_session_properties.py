@@ -243,6 +243,14 @@ def multi_buffer_agent_history(draw: st.DrawFn) -> list[object]:
     The history the fold oracle needed all along (design 0004 §consequences):
     before this slice a switch between two deliveries split one transcript
     across two buffers, and no single-buffer history could see it.
+
+    Coverage of that exact shape is a *sweep*, not a guarantee — under the CI
+    profile 10 of 50 draws contain delivery → effective switch → delivery to
+    the same buffer, and a later change to the strategy or the profile could
+    take that to zero silently. The guarantee is the deterministic pin,
+    ``test_fold_cache_reconstructible_across_a_buffer_switch`` in
+    ``test_agent_delivery.py``. Note also that ``_switch_to`` samples the
+    focused buffer about a third of the time, where a switch is a quiet no-op.
     """
     size = draw(st.integers(min_value=0, max_value=12))
     history: list[object] = []
@@ -315,16 +323,21 @@ def test_no_ordinary_buffer_ever_receives_agent_text(history: list[object]) -> N
     """The other half, and it holds even when the human *does* type into an
     agent buffer: agent text lands only in generated buffers, so a transcript
     being written into the user's file (review 0001 finding 5, hazard 2)
-    cannot recur."""
+    cannot recur.
+
+    The text check is what has teeth. Under the pre-slice rule a delivery
+    arriving while the user's buffer was focused appended straight into it,
+    turn header and all; the header is 12 characters and the history's edits
+    draw at most 4, so it cannot have been typed.
+    """
     session = _two_agent_session()
     _run(session, history, skip_edits=False)
 
     for event in session.transcript:
         if isinstance(event, AgentTextInserted):
             assert session._states[BufferId(event.buffer_id)].kind == "generated"
-    assert session._buffers[BufferId("scratch")].current.file_path is not None
-    for buffer_id in (AGENT, AGENT2):
-        assert session._buffers[buffer_id].current.file_path is None
+    user_buffer = session._buffers[BufferId("scratch")].current
+    assert "── agent ──" not in user_buffer.text
 
 
 @given(command_history())
@@ -823,3 +836,33 @@ def test_fold_cache_coherent_with_transcript_events(history: list[object]) -> No
                 for effect in event.effects:
                     fold, _ = advance(fold, effect)
         assert session._agent_folds.get(AGENT, TranscriptFold()) == fold
+
+
+@given(multi_buffer_agent_history())
+def test_each_buffers_fold_cache_holds_only_its_own_effects(
+    history: list[object],
+) -> None:
+    """Design 0004 D5, against an oracle the implementation cannot satisfy by
+    construction.
+
+    The text-vs-``rendered`` oracles are self-consistent under *any* keying —
+    both sides come out of the same ``_render_effects`` call — so they cannot
+    see a shared fold. This refolds each buffer's effects from a **fresh**
+    ``TranscriptFold`` and compares to that buffer's cache, which a shared
+    fold fails immediately: buffer B's cache would carry A's turns.
+    """
+    from drei.acp.transcript import TranscriptFold, advance
+
+    session = _two_agent_session()
+    _run(session, history, skip_edits=False)
+
+    for buffer_id in (AGENT, AGENT2):
+        fold = TranscriptFold()
+        for event in session.transcript:
+            if (
+                isinstance(event, AgentTranscriptUpdated)
+                and event.buffer_id == buffer_id.value
+            ):
+                for effect in event.effects:
+                    fold, _ = advance(fold, effect)
+        assert session._agent_folds.get(buffer_id, TranscriptFold()) == fold

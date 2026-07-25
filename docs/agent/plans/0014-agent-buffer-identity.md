@@ -25,6 +25,21 @@ must not lose.
 - The V5 property runs deliveries through `apply_session_effects`, not raw
   `DeliverSessionEffects` dispatches: a raw dispatch records the fold without
   appending (the TD-2 seam), so the oracle is stated over whole deliveries.
+- `test_agent_delivery.py`'s fixture builds its agent buffer through the
+  private `_create_buffer`/`_select_buffer` rather than dispatching
+  `CreateAgentBuffer`, because several of its pins assert exact transcripts
+  that a `BufferCreated` would break. Consequence: in that file target and
+  focus coincide, and the command itself is covered in
+  `test_agent_buffer_identity.py`.
+
+**Found by the V6 review, fixed before merge:** three assertions that could
+not fail (a `dict.get` default standing in for an absent fold; `file_path`
+values no command in the history can change; a window guard excluded twice
+over), and the fold oracle being self-consistent under any keying — both
+sides came from the same `_render_effects` call, so a session-wide fold
+passed it. The replacement refolds each buffer's effects from a fresh
+`TranscriptFold`, which a shared fold fails. Both new tests were confirmed by
+mutating the source and watching them fail.
 
 **Architecture gate:** design `0004-agent-buffer-identity.md`, which this slice
 implements in full. No new ports, no I/O, no protocol change, no new
