@@ -287,8 +287,11 @@ class CreateGeneratedBuffer:
     die, and swallowing that because a prompt happened to be open would hide
     the one message that explains the failure.
 
-    Not idempotent — the collision rule would produce ``*agent-log*<2>``. The
-    caller creates it once and keeps the id, the same way it keeps the child.
+    Idempotent by requested name, like ``CreateAgentBuffer`` is by session id:
+    a second dispatch returns the existing buffer and records nothing. The
+    *minted* id is not the requested name, though — the collision rule may
+    have produced ``*agent-log*<2>`` — so a caller reads it back with
+    ``generated_buffer_id`` rather than guessing.
     """
 
     name: str

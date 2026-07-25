@@ -23,7 +23,7 @@ import pytest
 from drei.harness import EditorHarness
 from drei.input import AgentBytes, AgentExited, AgentStderr, EndOfInput, EventQueue
 from drei.model import BufferId
-from drei.pump import AgentPump, AgentReaders
+from drei.pump import AgentIo, AgentPump
 from drei.streaming import SystemStreamingProcessPort
 
 pytestmark = pytest.mark.integration
@@ -90,7 +90,7 @@ def test_a_real_child_answers_a_real_prompt(tmp_path: Path) -> None:
         stream,
         argv=AGENT_ARGV,
         cwd=str(tmp_path),
-        start_readers=AgentReaders,
+        start_channel=AgentIo,
     )
     consumer = _Consumer(stream, pump, harness)
     try:
@@ -123,7 +123,7 @@ def test_the_childs_stderr_reaches_the_diagnostics_buffer(tmp_path: Path) -> Non
         stream,
         argv=AGENT_ARGV,
         cwd=str(tmp_path),
-        start_readers=AgentReaders,
+        start_channel=AgentIo,
     )
     consumer = _Consumer(stream, pump, harness)
     try:
@@ -154,7 +154,7 @@ def test_a_child_that_dies_is_reported_and_the_editor_survives(
         stream,
         argv=(sys.executable, "-c", "raise SystemExit(7)"),
         cwd=str(tmp_path),
-        start_readers=AgentReaders,
+        start_channel=AgentIo,
     )
     consumer = _Consumer(stream, pump, harness)
     try:
@@ -187,7 +187,7 @@ def test_the_editor_leaves_no_child_behind(tmp_path: Path) -> None:
         stream,
         argv=(sys.executable, "-c", "import sys; sys.stdin.read()"),
         cwd=str(tmp_path),
-        start_readers=AgentReaders,
+        start_channel=AgentIo,
     )
     consumer = _Consumer(stream, pump, harness)
     try:

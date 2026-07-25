@@ -46,6 +46,47 @@ it in would have changed a contract slice 14 pinned.
 through ConPTY, because raw mode has already cleared `ENABLE_PROCESSED_INPUT`.
 No fallback to `C-x a`, no parity row for an abbrev-prefix collision.
 
+**What the adversarial review found (V6).** Two merge-blockers and seven
+assertions that could not fail, all confirmed by mutation and all fixed:
+
+- **A pipe write blocked the loop thread.** `SystemAgentProcess.write` runs on
+  `run_editor`'s thread, and a pipe write blocks once the kernel buffer fills
+  and the peer is not draining — measured at a *single 4 KB chunk* against a
+  child that never reads. The editor would stop consuming input with the
+  terminal still raw and `C-g` unable to reach it: exactly the wedge slice
+  15's review found in the reader, arriving from the other direction. Drei's
+  own writes are small, but how many it makes is peer-driven — the machine
+  answers every `fs/*` and `terminal/*` request the agent sends. Fixed with a
+  writer thread (`AgentIo`); the loop now hands bytes to a queue and never
+  blocks. The test-side channel stays synchronous, so the write-to-a-dead-child
+  path is still observable where it is raised.
+- **`_send_pending` bypassed the `OSError` guard**, so a child that died
+  between `session/new` and `session/prompt` raised `BrokenPipeError` out of
+  the pump and took the editor with it. It writes through `_write` now.
+- **A second prompt typed during one turn was silently discarded** — the held
+  prompt was a slot, not a queue, so `"second"` vanished between `"first"` and
+  `"third"`. That is the same silence the slot exists to prevent, at n > 1. It
+  is a list now, sent one per completed turn, and prompts still unsent when the
+  child dies are reported rather than dropped.
+- **`after_command` was the one entry point with no error containment**:
+  answering a permission the machine no longer tracks raised `AcpStateError`.
+  Every other entry point degrades a peer problem to a transcript line; this
+  one does too now.
+- **Seven tests could not fail.** Two asserted an ordering they never
+  observed ("in the transcript *before* the prompt opens", "answered
+  *immediately*"); one asserted an outcome the bug also produced; one built its
+  own passing answer (`order.insert(0, "close" ...)`) and passed with the two
+  calls reversed; two left `_reset`'s decoder and transcript clearing
+  unpinned; and **nothing outside the Windows-only ConPTY scenario asserted
+  that the pump displays the transcript at all**, so a Linux CI leg would
+  never have noticed it going away. Each is now mutation-verified.
+
+Also fixed: a `TerminalReaders` thread leak inherited from slice 15 (if the
+second thread fails to start, the first ran on with no owner), and two
+docstrings that claimed the opposite of the code — `CreateGeneratedBuffer`
+said "not idempotent" after it was made idempotent, and `_ProducerFailed`
+said it never jumps the queue when it deliberately jumps the agent lanes.
+
 TD-2 is **edited, not removed**: cancellation is what remains of it.
 
 **Architecture gate:** design `0005-acp-pump.md` — **D1** (the streaming port),

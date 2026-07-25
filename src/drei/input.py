@@ -106,8 +106,10 @@ class _ProducerFailed:
     like a quiet one: without this the loop blocks in `next_event` forever
     holding the terminal in raw mode, and `C-g` cannot reach it because the
     thread that would have delivered it is the one that died. It rides the
-    queue rather than jumping it, so input the producer already delivered is
-    still consumed first.
+    *priority* lane, so input the producer already delivered is still consumed
+    first — but queued agent output is not: if the terminal producer is dead,
+    nothing after this can be typed, and there is no reason to hand the peer's
+    backlog to an editor that is about to unwind.
 
     Only the *terminal* producers use it. An agent reader that fails reports
     `AgentExited`: a dead child is a peer failure the editor survives, and

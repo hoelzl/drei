@@ -15,12 +15,17 @@ import threading
 import pytest
 
 from drei.acp.codec import encode
+from drei.acp.machine import PermissionRequested
 from drei.acp.messages import (
     SESSION_REQUEST_PERMISSION,
     SESSION_UPDATE,
     JsonValue,
 )
-from drei.commands import AgentTranscriptUpdated, BufferCreated
+from drei.commands import (
+    AgentTranscriptUpdated,
+    BufferCreated,
+    PromptPermission,
+)
 from drei.harness import EditorHarness
 from drei.input import (
     AgentBytes,
@@ -29,7 +34,7 @@ from drei.input import (
     EndOfInput,
     EventQueue,
 )
-from drei.pump import AgentPump, AgentReaders
+from drei.pump import AgentIo, AgentPump, DirectAgentChannel
 from drei.streaming import AgentProcess
 
 _AGENT_CAPS: JsonValue = {"loadSession": False, "promptCapabilities": {"image": False}}
@@ -81,20 +86,15 @@ class FakeStreamingPort:
         return child
 
 
-class _NoReaders:
-    """The reader-thread stand-in for layer 1: the test feeds bytes itself."""
-
-    def close(self) -> None:
-        pass
-
-
 def _pump(port: FakeStreamingPort) -> AgentPump:
     return AgentPump(
         port,
         EventQueue(),
         argv=("fake-agent",),
         cwd="/work",
-        start_readers=lambda process, events: _NoReaders(),
+        # The synchronous channel: writes land in the fake child immediately
+        # and nothing reads, because the test feeds the bytes itself.
+        start_channel=lambda process, events: DirectAgentChannel(process),
     )
 
 
@@ -215,6 +215,26 @@ class TestHandshake:
 
         assert harness.agent_buffer_id("sess-1") is not None
 
+    def test_the_transcript_is_shown_without_taking_focus(self) -> None:
+        """The gap the end-to-end scenario found: a transcript nowhere on
+        screen is a feature the user cannot use. Asserted here and not only in
+        the Windows-only ConPTY scenario, because a Linux CI leg would
+        otherwise never notice the display going away.
+        """
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=12)
+
+        _handshake(pump, harness, port)
+
+        session = harness._session  # noqa: SLF001 - layout has no public reader
+        transcript = harness.agent_buffer_id("sess-1")
+        assert len(session.windows) == 2
+        assert session.windows[1].buffer_id == transcript
+        # ...and the user is still where they were.
+        assert session.focused == 0
+        assert session.windows[0].buffer_id != transcript
+
     def test_a_second_prompt_reuses_the_child_and_the_session(self) -> None:
         port = FakeStreamingPort()
         pump = _pump(port)
@@ -232,6 +252,32 @@ class TestHandshake:
             "session/prompt",
             "session/prompt",
         ]
+
+    def test_every_prompt_typed_mid_turn_is_sent_in_order(self) -> None:
+        """Two prompts during one turn, not one. A held-prompt *slot* would
+        keep the last and swallow the rest — the same silence the slot exists
+        to avoid, just at n > 1."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port, text="first")
+
+        pump.submit("second", harness)
+        pump.submit("third", harness)
+        for _ in range(2):
+            in_flight = [
+                message
+                for message in child.sent()
+                if message.get("method") == "session/prompt"
+            ][-1]
+            pump.receive(_frames(_completed(in_flight["id"])), harness)
+
+        sent = [
+            message["params"]["prompt"][0]["text"]
+            for message in child.sent()
+            if message.get("method") == "session/prompt"
+        ]
+        assert sent == ["first", "second", "third"]
 
     def test_a_prompt_typed_mid_turn_is_sent_when_the_turn_completes(self) -> None:
         """ACP allows one prompt per turn. A second one typed while the agent
@@ -370,6 +416,16 @@ class TestDelivery:
         pump = _pump(port)
         harness = EditorHarness(width=40, height=8)
         child = _handshake(pump, harness, port)
+        # Record how far the editor had got each time something was written.
+        dispatched_at_write: list[int] = []
+        inner = child.write
+
+        def watched(data: bytes) -> None:
+            dispatched_at_write.append(len(harness.outcomes))
+            inner(data)
+
+        child.write = watched  # type: ignore[method-assign]
+        before = len(harness.outcomes)
 
         pump.receive(
             _frames(
@@ -378,7 +434,8 @@ class TestDelivery:
                     "id": 11,
                     "method": "fs/read_text_file",
                     "params": {"sessionId": "sess-1", "path": "/etc/passwd"},
-                }
+                },
+                _chunk("sess-1", "and some text"),
             ),
             harness,
         )
@@ -386,6 +443,11 @@ class TestDelivery:
         answer = child.sent()[-1]
         assert answer["id"] == 11
         assert "error" in answer
+        # Written *during* the drain: the delivery that the same read produced
+        # had not been dispatched yet. Deferring it until after would stall a
+        # peer that is waiting on the answer to continue the turn.
+        assert dispatched_at_write == [before]
+        assert len(harness.outcomes) > before
 
 
 class TestPermissions:
@@ -413,13 +475,23 @@ class TestPermissions:
         }
 
     def test_the_request_is_in_the_transcript_before_the_prompt_opens(self) -> None:
+        """Order, not just presence: the transcript records that the agent
+        asked, and only then does the prompt appear. Reversed, a user who
+        answered instantly would see the request logged after their answer."""
         port = FakeStreamingPort()
         pump = _pump(port)
         harness = EditorHarness(width=40, height=8)
         _handshake(pump, harness, port)
+        before = len(harness.outcomes)
 
         pump.receive(_frames(_permission_request(7, "sess-1")), harness)
 
+        kinds = [
+            type(event).__name__
+            for outcome in harness.outcomes[before:]
+            for event in outcome.events
+        ]
+        assert kinds.index("AgentTranscriptUpdated") < kinds.index("MinibufferOpened")
         assert "permission requested (id 7)" in _agent_text(harness)
 
     def test_a_prompt_typed_at_the_keyboard_reaches_the_agent(self) -> None:
@@ -497,6 +569,89 @@ class TestChildFailure:
         pump.exited(None, harness)
 
         assert harness.observation.minibuffer is None
+
+    def test_the_next_child_starts_from_a_clean_decoder(self) -> None:
+        """A child that dies mid-frame leaves half a line buffered. Carried
+        into the next child, that fragment is prefixed onto its first frame and
+        the handshake fails on a syntax error nobody sent."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        _handshake(pump, harness, port)
+
+        pump.receive(b'{"jsonrpc":"2.0","meth', harness)  # cut off mid-frame
+        pump.exited(1, harness)
+
+        pump.submit("again", harness)
+        second = port.children[1]
+        pump.receive(_frames(_init_response(second.sent()[0]["id"])), harness)
+        pump.receive(
+            _frames(_new_session_response(second.sent()[1]["id"], "sess-2")), harness
+        )
+        pump.receive(_frames(_chunk("sess-2", "clean")), harness)
+
+        buffer_id = harness.agent_buffer_id("sess-2")
+        assert buffer_id is not None
+        text = harness._session._buffers[buffer_id].current.text  # noqa: SLF001
+        assert text.endswith("clean")
+        assert "protocol error" not in text
+
+    def test_the_dead_sessions_transcript_receives_nothing_more(self) -> None:
+        """Design 0004 D1 is one buffer per ACP *session*. A stale transcript
+        id surviving the reset would deliver the next child's handshake
+        failures into the previous session's buffer."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        _handshake(pump, harness, port)
+        pump.exited(1, harness)
+        first = harness.agent_buffer_id("sess-1")
+        assert first is not None
+        before = harness._session._buffers[first].current.text  # noqa: SLF001
+
+        pump.submit("again", harness)
+        pump.receive(b"garbage before the new session\n", harness)
+
+        after = harness._session._buffers[first].current.text  # noqa: SLF001
+        assert after == before
+
+    def test_prompts_the_dead_child_never_received_are_reported(self) -> None:
+        """The queue exists so a prompt is never silently lost. If the child
+        dies holding some, saying nothing would be exactly the loss it was
+        built to prevent."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        _handshake(pump, harness, port)
+        pump.submit("never sent", harness)  # held behind the turn in flight
+
+        pump.exited(1, harness)
+
+        assert "unsent prompts dropped: 'never sent'" in _diagnostics(harness)
+
+    def test_a_permission_answered_after_the_child_died_is_not_fatal(self) -> None:
+        """Every other entry point degrades a peer problem to a transcript
+        line. `after_command` must too: the human's key arrives on its own
+        schedule, and answering a prompt the machine no longer tracks cannot
+        be allowed to take the editor down."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        _handshake(pump, harness, port)
+        pump.receive(_frames(_permission_request(7, "sess-1")), harness)
+        # The child dies while the choice prompt is open, and the sweep leaves
+        # the machine with nothing tracked.
+        pump.exited(1, harness)
+        # ...and a prompt for that dead request is somehow open again, which
+        # is the state the human's key is about to answer.
+        harness.apply(PromptPermission(PermissionRequested(7, {"options": []})))
+        outcome = harness.send("C-g")
+        assert outcome is not None
+
+        pump.after_command(outcome, harness)  # must not raise
+
+        harness.send("x")
+        assert harness.observation.text == "x"
 
     def test_an_exit_with_no_status_says_so_rather_than_guessing(self) -> None:
         port = FakeStreamingPort()
@@ -640,7 +795,7 @@ class TestLifecycle:
         assert port.children[0].terminated == 1
 
 
-class TestAgentReaders:
+class TestAgentIo:
     """Verification layer 2: the agent's producer threads, in isolation.
 
     Every failure here is immediate and deterministic — a scripted fake child
@@ -665,7 +820,7 @@ class TestAgentReaders:
                 return self._chunks.pop(0) if self._chunks else b""
 
         stream = EventQueue()
-        readers = AgentReaders(ScriptedChild(), stream)
+        readers = AgentIo(ScriptedChild(), stream)
         try:
             assert self._drain(stream, 3) == [
                 AgentBytes(b"one"),
@@ -685,7 +840,7 @@ class TestAgentReaders:
                 return self._diagnostics.pop(0) if self._diagnostics else b""
 
         stream = EventQueue()
-        readers = AgentReaders(NoisyChild(), stream)
+        readers = AgentIo(NoisyChild(), stream)
         try:
             # The wire reader also reports the exit; stderr is what we assert.
             seen = self._drain(stream, 2)
@@ -708,7 +863,7 @@ class TestAgentReaders:
                 raise BrokenPipeError("gone")
 
         stream = EventQueue()
-        readers = AgentReaders(BrokenChild(), stream)
+        readers = AgentIo(BrokenChild(), stream)
         try:
             assert stream.next_event() == AgentExited(None)
             readers._errors.join(timeout=5)  # noqa: SLF001 - shutdown assertion
@@ -729,12 +884,128 @@ class TestAgentReaders:
                 raise AssertionError("drei is broken")
 
         stream = EventQueue()
-        readers = AgentReaders(BuggyChild(), stream)
+        readers = AgentIo(BuggyChild(), stream)
         try:
             with pytest.raises(AssertionError, match="drei is broken"):
                 stream.next_event()
         finally:
             readers.close()
+
+    def test_a_write_never_blocks_the_caller(self) -> None:
+        """The merge-blocker the adversarial review found.
+
+        A pipe write blocks once the kernel buffer fills and the peer is not
+        draining — measured at a single 4 KB chunk against a child that never
+        reads. On the loop's thread that means the editor stops consuming
+        input, with the terminal still in raw mode and `C-g` unable to reach
+        it: the exact wedge slice 15's review found in the reader, arriving
+        from the other direction. Drei's own writes are small, but how *many*
+        it makes is peer-driven — the machine answers every `fs/*` and
+        `terminal/*` request the agent sends.
+        """
+        released = threading.Event()
+        wrote = threading.Event()
+
+        class StuckChild(FakeAgentProcess):
+            def write(self, data: bytes) -> None:
+                released.wait(timeout=5)
+                wrote.set()
+
+            def read(self, size: int = 65536) -> bytes:
+                released.wait(timeout=5)
+                return b""
+
+            def read_stderr(self, size: int = 65536) -> bytes:
+                released.wait(timeout=5)
+                return b""
+
+        stream = EventQueue()
+        io = AgentIo(StuckChild(), stream)
+        try:
+            # Would hang here if the write happened on this thread.
+            for _ in range(64):
+                io.write(b'{"jsonrpc":"2.0"}\n')
+            assert not wrote.is_set()
+            # Released, the writer drains what it was holding — the bytes are
+            # queued, not discarded.
+            released.set()
+            assert wrote.wait(timeout=5)
+        finally:
+            io.close()
+
+    def test_a_write_to_a_dead_child_stops_the_writer_without_a_second_exit(
+        self,
+    ) -> None:
+        """The wire reader is what reports a death. A writer that reported it
+        too would put two exits in the transcript for one child."""
+
+        class BrokenStdin(FakeAgentProcess):
+            def __init__(self) -> None:
+                super().__init__()
+                self.status = 4
+
+            def write(self, data: bytes) -> None:
+                raise BrokenPipeError("gone")
+
+        stream = EventQueue()
+        io = AgentIo(BrokenStdin(), stream)
+        try:
+            io.write(b"anything\n")
+            assert stream.next_event() == AgentExited(4)  # from the reader
+            io._writer.join(timeout=5)  # noqa: SLF001 - shutdown assertion
+            assert not io._writer.is_alive()  # noqa: SLF001
+            stream.close()
+            with pytest.raises(EndOfInput):
+                stream.next_event()
+        finally:
+            io.close()
+
+    def test_a_bug_in_the_writer_reaches_the_loop(self) -> None:
+        parked = threading.Event()
+
+        class BuggyStdin(FakeAgentProcess):
+            def write(self, data: bytes) -> None:
+                raise AssertionError("writer is broken")
+
+            def read(self, size: int = 65536) -> bytes:
+                parked.wait(timeout=5)
+                return b""
+
+            def read_stderr(self, size: int = 65536) -> bytes:
+                parked.wait(timeout=5)
+                return b""
+
+        stream = EventQueue()
+        io = AgentIo(BuggyStdin(), stream)
+        try:
+            io.write(b"anything\n")
+            with pytest.raises(AssertionError, match="writer is broken"):
+                stream.next_event()
+        finally:
+            parked.set()
+            io.close()
+
+    def test_close_releases_an_idle_writer(self) -> None:
+        """The writer parks on an empty queue, so the stop flag alone would
+        never reach it — shutdown would leave a thread waiting forever."""
+        parked = threading.Event()
+
+        class ParkedChild(FakeAgentProcess):
+            def read(self, size: int = 65536) -> bytes:
+                parked.wait(timeout=5)
+                return b""
+
+            def read_stderr(self, size: int = 65536) -> bytes:
+                parked.wait(timeout=5)
+                return b""
+
+        stream = EventQueue()
+        io = AgentIo(ParkedChild(), stream)
+        io.close()
+        io._writer.join(timeout=5)  # noqa: SLF001 - shutdown assertion
+        parked.set()
+
+        assert not io._writer.is_alive()  # noqa: SLF001
 
     def test_a_reader_closed_mid_stream_stops_after_the_chunk_in_hand(self) -> None:
         """`close` is checked between reads, not during one: a reader parked in
@@ -742,7 +1013,7 @@ class TestAgentReaders:
         notices. It must not then report an exit — shutdown is not a peer
         failure."""
         stream = EventQueue()
-        handle: list[AgentReaders] = []
+        handle: list[AgentIo] = []
         # The threads start inside the constructor, so they can call `read`
         # before the test has a reference to close.
         wired = threading.Event()
@@ -758,7 +1029,7 @@ class TestAgentReaders:
                 handle[0].close()
                 return b"note"
 
-        readers = AgentReaders(ClosingChild(), stream)
+        readers = AgentIo(ClosingChild(), stream)
         handle.append(readers)
         wired.set()
         readers._wire.join(timeout=5)  # noqa: SLF001 - shutdown assertion
@@ -789,7 +1060,7 @@ class TestAgentReaders:
                 raise AssertionError("stderr reader is broken")
 
         stream = EventQueue()
-        readers = AgentReaders(NoisyBug(), stream)
+        readers = AgentIo(NoisyBug(), stream)
         try:
             with pytest.raises(AssertionError, match="stderr reader is broken"):
                 stream.next_event()
@@ -813,7 +1084,7 @@ class TestAgentReaders:
                 return b""
 
         stream = EventQueue()
-        readers = AgentReaders(ParkedChild(), stream)
+        readers = AgentIo(ParkedChild(), stream)
         readers.close()
         released.set()
         readers._wire.join(timeout=5)  # noqa: SLF001 - shutdown assertion

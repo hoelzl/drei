@@ -841,8 +841,16 @@ class TestLoopAgentArms:
     """
 
     @staticmethod
-    def _recording() -> tuple[list[tuple[str, object]], type]:
-        calls: list[tuple[str, object]] = []
+    def _recording(
+        journal: list[tuple[str, object]] | None = None,
+    ) -> tuple[list[tuple[str, object]], type]:
+        """A stand-in pump that records what the loop asked of it.
+
+        ``journal`` lets a caller share one ordered log with the port, so a
+        test can assert *when* the pump was called relative to terminal I/O
+        rather than only that it was.
+        """
+        calls: list[tuple[str, object]] = journal if journal is not None else []
 
         class RecordingPump:
             def __init__(self, *args: object, **kwargs: object) -> None:
@@ -942,21 +950,26 @@ class TestLoopAgentArms:
 
     def test_the_child_is_terminated_before_the_terminal_is_restored(self) -> None:
         """A leaked `hermes acp` holding a pipe outlives a garbled terminal,
-        and terminating it is what releases the agent reader threads."""
-        calls, recording = self._recording()
-        order: list[str] = []
+        and terminating it is what releases the agent reader threads.
+
+        One shared journal, written by both the pump and the port, so the
+        assertion is about *order* — an earlier version appended "close" to
+        the front unconditionally and passed with the two calls reversed.
+        """
+        journal: list[tuple[str, object]] = []
+        _, recording = self._recording(journal)
 
         class TrackingPort(FakePort):
             def restore(self) -> None:
-                order.append("restore")
+                journal.append(("restore", None))
                 super().restore()
 
         port = TrackingPort([])
         with patch.object(drei.terminal, "AgentPump", recording):
             run_editor(port, events=scripted(keys("\x07")))
-        order.insert(0, "close" if ("close", None) in calls else "missing")
 
-        assert order == ["close", "restore"]
+        names = [name for name, _ in journal]
+        assert names[-2:] == ["close", "restore"]
 
 
 class _GatedPort(FakePort):
@@ -1153,6 +1166,40 @@ class TestReaderFailures:
         finally:
             parked.set()
             readers.close()
+
+    def test_a_half_started_reader_pair_stops_the_thread_that_did_start(
+        self,
+    ) -> None:
+        """The threads start one after the other. If the second will not
+        start, the first is running with no owner — `run_editor` never gets
+        its `readers` back, so nothing closes it and it goes on filling a
+        queue nobody reads."""
+        stream = EventQueue()
+        real_start = threading.Thread.start
+        started: list[threading.Thread] = []
+
+        def once(self: threading.Thread) -> None:
+            if started:
+                raise RuntimeError("can't start new thread")
+            started.append(self)
+            real_start(self)
+
+        parked = threading.Event()
+
+        class ParkedPort(FakePort):
+            def read_key(self) -> str:
+                parked.wait(timeout=5)
+                return "\x07"
+
+        with (
+            patch.object(threading.Thread, "start", once),
+            pytest.raises(RuntimeError, match="can't start new thread"),
+        ):
+            TerminalReaders(ParkedPort([]), stream, poll_interval=0.01)
+
+        parked.set()
+        started[0].join(timeout=5)
+        assert not started[0].is_alive()
 
     def test_the_terminal_is_restored_when_the_readers_cannot_be_started(self) -> None:
         """`enter_raw()` has already happened by the time the readers are

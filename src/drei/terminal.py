@@ -31,7 +31,7 @@ from drei.input import (
     Key,
     Resize,
 )
-from drei.pump import DEFAULT_AGENT_ARGV, AgentPump, AgentReaders
+from drei.pump import DEFAULT_AGENT_ARGV, AgentIo, AgentPump
 from drei.streaming import StreamingProcessPort, SystemStreamingProcessPort
 
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
@@ -206,8 +206,16 @@ class TerminalReaders:
         self._sizes = threading.Thread(
             target=self._watch_size, name="drei-input-size", daemon=True
         )
-        self._keys.start()
-        self._sizes.start()
+        try:
+            self._keys.start()
+            self._sizes.start()
+        except BaseException:
+            # A thread that will not start leaves the *other* one running with
+            # no owner: `run_editor` never gets its `readers` back, so nothing
+            # closes it, and the key reader goes on filling a queue nobody
+            # reads. Stop what did start before letting the failure out.
+            self.close()
+            raise
 
     def close(self) -> None:
         """Stop the watcher and let the key reader go.
@@ -219,7 +227,10 @@ class TerminalReaders:
         user pressed a key.
         """
         self._stopped.set()
-        self._sizes.join(timeout=self._poll_interval * 10)
+        if self._sizes.is_alive():
+            # Guarded because `close` also runs on the half-started path, where
+            # the watcher never began and joining it would raise.
+            self._sizes.join(timeout=self._poll_interval * 10)
 
     def _read_keys(self) -> None:
         try:
@@ -287,7 +298,7 @@ def run_editor(
         stream,
         argv=agent_argv,
         cwd=agent_cwd,
-        start_readers=AgentReaders,
+        start_channel=AgentIo,
     )
     port.write("DREI:READY\n")
     port.flush()

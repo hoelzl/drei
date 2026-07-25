@@ -20,6 +20,7 @@ scripted bytes and no thread at all.
 
 from __future__ import annotations
 
+import queue
 import threading
 from collections.abc import Callable
 from typing import Protocol
@@ -27,6 +28,7 @@ from typing import Protocol
 from drei.acp.codec import AcpDecodeError, JsonRpcDecoder, encode
 from drei.acp.machine import (
     AcpMachine,
+    AcpStateError,
     Initialized,
     PermissionRequested,
     PromptCompleted,
@@ -72,50 +74,88 @@ DIAGNOSTICS_BUFFER = "*agent-log*"
 DEFAULT_AGENT_ARGV = ("hermes", "acp")
 
 
-class Readers(Protocol):
-    """Whatever is producing agent events, for as long as the child lives."""
+class AgentChannel(Protocol):
+    """Everything that talks to the child, for as long as the child lives."""
 
+    def write(self, data: bytes) -> None: ...
     def close(self) -> None: ...
 
 
-class AgentReaders:
-    """The agent child's two producer threads (design 0005 D2).
+class AgentIo:
+    """The agent child's three threads: two readers and a writer.
 
-    Symmetric with :class:`~drei.terminal.TerminalReaders`, and for the same
-    reason: there is no portable way to wait on a pipe and a console handle at
-    once, so each gets a thread that is allowed to block, and they meet on the
-    one shared queue.
+    The readers are symmetric with :class:`~drei.terminal.TerminalReaders`, and
+    for the same reason: there is no portable way to wait on a pipe and a
+    console handle at once, so each gets a thread that is allowed to block, and
+    they meet on the one shared queue.
 
-    One asymmetry, deliberate. A terminal reader that dies calls
-    ``EventQueue.fail``, because an editor that cannot be typed into is over.
-    A pipe error here is instead reported as ``AgentExited``: the agent is
-    optional, the child dying is an ordinary peer failure, and killing the
-    editor because a pipe closed would be the wrong trade. An exception that
-    is *not* a pipe error still fails the queue — that is Drei being broken,
-    not the peer.
+    **The writer exists so the loop cannot block.** A pipe write blocks once
+    the kernel buffer is full and the peer is not draining it — measured at one
+    4 KB chunk against a child that never reads. On the loop's thread that
+    means the editor stops consuming input entirely, with the terminal still in
+    raw mode and `C-g` unable to reach it, which is precisely the wedge slice
+    15's review found in the reader. Drei's own writes are small, but the
+    number of them is peer-driven: the machine answers every `fs/*` and
+    `terminal/*` request the agent sends. So writes are queued and drained by a
+    thread that is allowed to block instead.
+
+    One asymmetry with the terminal, deliberate. A terminal reader that dies
+    calls ``EventQueue.fail``, because an editor that cannot be typed into is
+    over. A pipe error here is instead reported as ``AgentExited``: the agent
+    is optional, the child dying is an ordinary peer failure, and killing the
+    editor because a pipe closed would be the wrong trade. An exception that is
+    *not* a pipe error still fails the queue — that is Drei being broken, not
+    the peer.
     """
 
     def __init__(self, process: AgentProcess, events: EventQueue) -> None:
         self._process = process
         self._events = events
         self._stopped = threading.Event()
+        self._outbox: queue.Queue[bytes | None] = queue.Queue()
         self._wire = threading.Thread(
             target=self._read_wire, name="drei-agent-wire", daemon=True
         )
         self._errors = threading.Thread(
             target=self._read_stderr, name="drei-agent-stderr", daemon=True
         )
+        self._writer = threading.Thread(
+            target=self._write_loop, name="drei-agent-writer", daemon=True
+        )
         self._wire.start()
         self._errors.start()
+        self._writer.start()
+
+    def write(self, data: bytes) -> None:
+        """Hand ``data`` to the writer thread. Never blocks the caller."""
+        self._outbox.put(data)
 
     def close(self) -> None:
-        """Stop reporting. The threads end when the child's pipes close.
+        """Stop reporting and release the writer.
 
-        Neither is joined: both are parked in a blocking read that only the
-        child's exit can end, and the pump terminates the child immediately
-        after calling this. Daemons, like the key reader, for the same reason.
+        No thread is joined: the readers are parked in a blocking read that
+        only the child's exit can end, and the pump terminates the child
+        immediately after calling this. Daemons, like the key reader, for the
+        same reason. The writer gets a sentinel so it stops even if it is idle.
         """
         self._stopped.set()
+        self._outbox.put(None)
+
+    def _write_loop(self) -> None:
+        while True:
+            data = self._outbox.get()
+            if data is None or self._stopped.is_set():
+                return
+            try:
+                self._process.write(data)
+            except (OSError, ValueError):
+                # The child is gone. The wire reader is the one that reports
+                # that, so this thread just stops: reporting it twice would
+                # put two exits in the transcript for one death.
+                return
+            except Exception as error:
+                self._events.fail(error)
+                return
 
     def _read_wire(self) -> None:
         try:
@@ -148,6 +188,25 @@ class AgentReaders:
             self._events.fail(error)
 
 
+class DirectAgentChannel:
+    """Writes straight through on the caller's thread, and starts nothing.
+
+    The test-side channel (design 0005's verification layer 1): the pump's
+    behavioural tests feed bytes themselves, so there is nothing to read, and a
+    synchronous write keeps the ``OSError`` path — a write to a dead child —
+    observable where it is raised.
+    """
+
+    def __init__(self, process: AgentProcess) -> None:
+        self._process = process
+
+    def write(self, data: bytes) -> None:
+        self._process.write(data)
+
+    def close(self) -> None:
+        """Nothing to release: this channel owns no thread and no queue."""
+
+
 class AgentPump:
     """Drives one agent at a time: spawn, handshake, turn, teardown.
 
@@ -163,20 +222,23 @@ class AgentPump:
         *,
         argv: tuple[str, ...],
         cwd: str | None = None,
-        start_readers: Callable[[AgentProcess, EventQueue], Readers],
+        start_channel: Callable[[AgentProcess, EventQueue], AgentChannel],
     ) -> None:
         self._port = port
         self._events = events
         self._argv = argv
         self._cwd = cwd
-        self._start_readers = start_readers
+        self._start_channel = start_channel
         self._machine = AcpMachine()
         self._decoder = JsonRpcDecoder()
         self._process: AgentProcess | None = None
-        self._readers: Readers | None = None
-        # A prompt the user has submitted but the protocol cannot carry yet:
-        # before the session exists, or while the previous turn is in flight.
-        self._pending_prompt: str | None = None
+        self._channel: AgentChannel | None = None
+        # Prompts the user has submitted that the protocol cannot carry yet:
+        # before the session exists, or while a turn is in flight. A list, not
+        # a slot — overwriting would swallow the second of two prompts typed
+        # during one turn, and the user pressed RET with nothing on screen to
+        # say it went nowhere.
+        self._pending_prompts: list[str] = []
         self._transcript: BufferId | None = None
         self._diagnostics: BufferId | None = None
         # Effects produced before the transcript buffer exists. The handshake
@@ -197,8 +259,8 @@ class AgentPump:
         """The human pressed RET on an agent prompt."""
         if self._process is None and not self._spawn(harness):
             return
-        self._pending_prompt = text
-        self._send_pending()
+        self._pending_prompts.append(text)
+        self._send_pending(harness)
 
     def receive(self, data: bytes, harness: EditorHarness) -> None:
         """Wire bytes arrived from the child.
@@ -261,9 +323,18 @@ class AgentPump:
                 case AgentPromptSubmitted(text=text):
                     self.submit(text, harness)
                 case PermissionDecided(request_id=request_id, decision=decision):
-                    self._machine, responses, resolved = resolve_permission(
-                        self._machine, request_id, decision
-                    )
+                    try:
+                        self._machine, responses, resolved = resolve_permission(
+                            self._machine, request_id, decision
+                        )
+                    except AcpStateError as error:
+                        # The machine no longer tracks the request — a child
+                        # that died between the prompt opening and the human
+                        # answering. Every other entry point degrades to a
+                        # transcript line; this one must too, or answering a
+                        # stale prompt takes the editor down.
+                        self._deliver([ProtocolError(detail=str(error))], harness)
+                        continue
                     for response in responses:
                         self._write(response, harness)
                     self._deliver(resolved, harness)
@@ -276,9 +347,9 @@ class AgentPump:
         Runs in ``run_editor``'s ``finally`` alongside ``port.restore()``: a
         leaked child holding a pipe is worse than a garbled terminal.
         """
-        if self._readers is not None:
-            self._readers.close()
-            self._readers = None
+        if self._channel is not None:
+            self._channel.close()
+            self._channel = None
         if self._process is not None:
             self._process.terminate()
             self._process = None
@@ -298,7 +369,7 @@ class AgentPump:
             )
             return False
         self._process = process
-        self._readers = self._start_readers(process, self._events)
+        self._channel = self._start_channel(process, self._events)
         self._machine, request = start(self._machine)
         self._write(request, harness)
         return True
@@ -347,7 +418,7 @@ class AgentPump:
         # A turn that completed frees the protocol for a prompt the user
         # submitted while it was still running.
         if any(isinstance(effect, PromptCompleted) for effect in effects):
-            self._send_pending()
+            self._send_pending(harness)
 
     def _bind(self, session_id: str, harness: EditorHarness) -> None:
         harness.apply(CreateAgentBuffer(session_id))
@@ -359,20 +430,24 @@ class AgentPump:
         harness.apply(DisplayBuffer(self._transcript))
         held, self._backlog = self._backlog, []
         self._deliver(held, harness)
-        self._send_pending()
+        self._send_pending(harness)
 
-    def _send_pending(self) -> None:
-        """Send the held prompt if the protocol can carry one now.
+    def _send_pending(self, harness: EditorHarness) -> None:
+        """Send the oldest held prompt if the protocol can carry one now.
 
         ACP allows one prompt per turn, and a session id is needed before the
         first. A prompt submitted at any other moment waits here rather than
-        raising out of the machine.
+        raising out of the machine; the rest of the queue goes out one per
+        completed turn.
         """
-        if self._pending_prompt is None or self._machine.phase != "SESSION_ACTIVE":
+        if not self._pending_prompts or self._machine.phase != "SESSION_ACTIVE":
             return
-        text, self._pending_prompt = self._pending_prompt, None
+        text = self._pending_prompts.pop(0)
         self._machine, request = prompt(self._machine, text)
-        self._write_raw(request)
+        # Through `_write`, not `_write_raw`: a child that died between the
+        # handshake and this call would otherwise raise BrokenPipeError out of
+        # the pump and take the editor with it.
+        self._write(request, harness)
 
     def _deliver(self, effects: list[SessionEffect], harness: EditorHarness) -> None:
         if not effects:
@@ -391,9 +466,9 @@ class AgentPump:
             self._log(f"agent write failed: {error}\n", harness)
 
     def _write_raw(self, message: Message) -> None:
-        if self._process is None:  # pragma: no cover - guarded by every caller
+        if self._channel is None:  # pragma: no cover - guarded by every caller
             return
-        self._process.write(encode(to_json(message)))
+        self._channel.write(encode(to_json(message)))
 
     def _log(self, text: str, harness: EditorHarness) -> None:
         if self._diagnostics is None:
@@ -418,7 +493,12 @@ class AgentPump:
             # failed child goes.
             held, self._backlog = self._backlog, []
             self._log("".join(f"{effect}\n" for effect in held), harness)
+        if self._pending_prompts:
+            # Say so. A prompt the user typed and never got an answer to is
+            # exactly the silence the held-prompt queue exists to avoid.
+            dropped = ", ".join(repr(text) for text in self._pending_prompts)
+            self._log(f"agent gone; unsent prompts dropped: {dropped}\n", harness)
+            self._pending_prompts = []
         self._machine = AcpMachine()
         self._decoder = JsonRpcDecoder()
-        self._pending_prompt = None
         self._transcript = None
