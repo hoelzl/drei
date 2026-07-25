@@ -35,6 +35,8 @@ from drei.model import Buffer, BufferId, BufferValue
 from drei.process import ProcessResult
 from drei.session import EditorSession
 
+SCRATCH = BufferId("scratch")
+
 
 def make_session(text: str = "", point: int = 0) -> EditorSession:
     return EditorSession(
@@ -45,11 +47,11 @@ def make_session(text: str = "", point: int = 0) -> EditorSession:
 class TestDeliverSessionEffectsValidation:
     def test_empty_effects_rejected(self) -> None:
         with pytest.raises(ValueError, match="non-empty"):
-            DeliverSessionEffects(())
+            DeliverSessionEffects((), SCRATCH)
 
     def test_non_effect_members_rejected(self) -> None:
         with pytest.raises(ValueError, match="SessionEffect"):
-            DeliverSessionEffects((AgentTextChunk(text="a"), "junk"))  # type: ignore[arg-type]
+            DeliverSessionEffects((AgentTextChunk(text="a"), "junk"), SCRATCH)  # type: ignore[arg-type]
 
 
 class TestApplySessionEffects:
@@ -107,34 +109,34 @@ class TestApplySessionEffects:
 class TestInsertAgentText:
     def test_appends_at_end_regardless_of_point(self) -> None:
         session = make_session(text="user text", point=0)
-        outcome = session.dispatch(InsertAgentText(" AGENT"))
+        outcome = session.dispatch(InsertAgentText(" AGENT", SCRATCH))
         assert outcome.observation.text == "user text AGENT"
-        assert outcome.events == (AgentTextInserted(" AGENT", 9, 15),)
+        assert outcome.events == (AgentTextInserted(" AGENT", 9, 15, "scratch"),)
 
     def test_buffer_stays_unmodified(self) -> None:
         session = make_session(text="x", point=1)
         session.dispatch(InsertText("y"))  # user edit: modified=True
-        outcome = session.dispatch(InsertAgentText("z"))
+        outcome = session.dispatch(InsertAgentText("z", SCRATCH))
         assert outcome.observation.modified is True  # inherited, not set by delivery
         session2 = make_session(text="x", point=1)
-        outcome2 = session2.dispatch(InsertAgentText("z"))
+        outcome2 = session2.dispatch(InsertAgentText("z", SCRATCH))
         assert outcome2.observation.modified is False
 
     def test_point_tracks_the_new_end(self) -> None:
         session = make_session(text="abc", point=1)
-        outcome = session.dispatch(InsertAgentText("def"))
+        outcome = session.dispatch(InsertAgentText("def", SCRATCH))
         assert outcome.observation.point == 6
 
     def test_mark_adjusted_marker_style(self) -> None:
         session = make_session(text="abc", point=3)
         session.dispatch(__import__("drei.commands", fromlist=["SetMark"]).SetMark())
-        outcome = session.dispatch(InsertAgentText("zz"))
+        outcome = session.dispatch(InsertAgentText("zz", SCRATCH))
         # Insertion at the mark keeps the mark before the inserted text.
         assert outcome.observation.mark == 3
 
     def test_empty_insert_is_silent_noop(self) -> None:
         session = make_session()
-        outcome = session.dispatch(InsertAgentText(""))
+        outcome = session.dispatch(InsertAgentText("", SCRATCH))
         assert outcome.events == ()
         assert session.transcript == ()
 
@@ -207,14 +209,14 @@ class TestDeliveriesAndTheKillChain:
     def test_fold_only_delivery_breaks_the_chain(self) -> None:
         session = make_session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())
-        session.dispatch(DeliverSessionEffects((AgentTextChunk(text="x"),)))
+        session.dispatch(DeliverSessionEffects((AgentTextChunk(text="x"),), SCRATCH))
         session.dispatch(KillLine())
         assert session.kill_ring == ("\n", "aa")  # two entries: chain broken
 
     def test_append_delivery_indirectly_preserves_the_chain(self) -> None:
         session = make_session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())
-        session.dispatch(InsertAgentText("X"))  # point → end-of-buffer
+        session.dispatch(InsertAgentText("X", SCRATCH))  # point → end-of-buffer
         outcome = session.dispatch(KillLine())  # silent no-op at buffer end
         assert outcome.events == ()
         assert session.kill_ring == ("aa",)  # chain intact (no intervening event)
@@ -223,7 +225,9 @@ class TestDeliveriesAndTheKillChain:
 class TestDispatchRejectsCorruptDelivery:
     def test_deliver_sessioneffects_through_dispatch(self) -> None:
         session = make_session()
-        outcome = session.dispatch(DeliverSessionEffects((AgentTextChunk(text="q"),)))
+        outcome = session.dispatch(
+            DeliverSessionEffects((AgentTextChunk(text="q"),), SCRATCH)
+        )
         assert [type(e) for e in outcome.events] == [AgentTranscriptUpdated]
         # Raw dispatch does NOT append text — the fold→append step belongs to
         # apply_session_effects (the atomic delivery seam).

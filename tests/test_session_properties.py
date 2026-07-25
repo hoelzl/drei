@@ -145,7 +145,7 @@ def _session_effects(draw: st.DrawFn) -> DeliverSessionEffects:
             max_size=4,
         )
     )
-    return DeliverSessionEffects(tuple(effects))
+    return DeliverSessionEffects(tuple(effects), BufferId("scratch"))
 
 
 @st.composite
@@ -161,7 +161,15 @@ def agent_history(draw: st.DrawFn) -> list[object]:
                 st.just(Undo()),
                 st.just(SetMark()),
                 _session_effects(),
-                st.builds(InsertAgentText, st.text(min_size=0, max_size=5)),
+                # Target pinned to the session's one buffer: this suite's
+                # sessions have no agent buffer, and generating arbitrary ids
+                # would only exercise the unknown-target error path (plan
+                # 0014 V2), not the delivery semantics under test.
+                st.builds(
+                    InsertAgentText,
+                    st.text(min_size=0, max_size=5),
+                    st.just(BufferId("scratch")),
+                ),
             )
         )
         for _ in range(size)
