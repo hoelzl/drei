@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
+from drei.model import BufferId
 from drei.process import ProcessResult
 
 if TYPE_CHECKING:
@@ -145,9 +146,16 @@ class DeliverSessionEffects:
     machine-generated delivery (the §C ACP pump) cannot record a corrupt
     transcript fold: the list must be non-empty and every member must be a
     ``SessionEffect``.
+
+    ``buffer_id`` names the **target** — the agent buffer this transcript
+    belongs to (design 0004 D2). It is carried explicitly rather than resolved
+    from focus at dispatch time: an implicit binding would make the transcript
+    un-replayable across a rebinding, and appending to whatever happened to be
+    focused is review 0001 finding 5.
     """
 
     effects: tuple[SessionEffect, ...]
+    buffer_id: BufferId
 
     def __post_init__(self) -> None:
         from drei.acp.machine import SessionEffect as _SessionEffect
@@ -163,15 +171,39 @@ class DeliverSessionEffects:
 
 @dataclass(frozen=True, slots=True)
 class InsertAgentText:
-    """Append agent-streamed text to the agent buffer at end-of-buffer.
+    """Append agent-streamed text to ``buffer_id`` at end-of-buffer.
 
     Not a user edit: the buffer's ``modified`` flag is untouched and no undo
     group is created (undo of an external stream is incoherent with the
     fold-of-effects invariant — parity registry row). Point moves to the new
     end so a visible agent buffer tracks the stream.
+
+    ``buffer_id`` names the target explicitly — see
+    :class:`DeliverSessionEffects`.
     """
 
     text: str
+    buffer_id: BufferId
+
+
+@dataclass(frozen=True, slots=True)
+class CreateAgentBuffer:
+    """Bind an ACP session to a generated ``*agent*`` buffer (design 0004 D1).
+
+    Idempotent: a session already bound keeps its buffer and the command is a
+    silent no-op — a re-fold of ``SessionEstablished`` must not mint a second
+    transcript. Otherwise a generated buffer named ``*agent*`` (``*agent*<2>``
+    … via the existing collision rule) is created, visiting no file, and
+    ``BufferCreated`` is recorded.
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: a
+    swallowed creation would leave every later delivery for this session
+    naming a buffer that does not exist, which is an error since design 0004
+    D3. It does **not** switch focus — the agent buffer appearing must not
+    yank the user out of their work.
+    """
+
+    acp_session_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,24 +420,29 @@ class AgentTranscriptUpdated:
     ``rendered`` is exactly the text this delivery appended to the agent
     buffer (the incremental suffix, not the whole transcript), so the
     buffer's agent text is reconstructible as the concatenation of every
-    ``AgentTranscriptUpdated.rendered`` in the transcript — one of the two
-    fold oracles (design 0003 §B.7 verify). ``effects`` carries the folded
+    ``AgentTranscriptUpdated.rendered`` **targeting that buffer** — one of the
+    two fold oracles (design 0003 §B.7 verify, scoped per buffer by design
+    0004 D2; without ``buffer_id`` the oracle described no buffer once more
+    than one could receive deliveries). ``effects`` carries the folded
     ``SessionEffect`` values for the second oracle (refolding through
     ``TranscriptFold.advance`` must reproduce the same text).
     """
 
     effects: tuple[SessionEffect, ...]
     rendered: str
+    buffer_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class AgentTextInserted:
     """Agent text appended at end-of-buffer; ``before`` is the pre-insert
-    buffer end, ``after`` the new end."""
+    buffer end, ``after`` the new end. ``buffer_id`` names the buffer that
+    changed — deliveries do not target the focused buffer (design 0004 D2)."""
 
     text: str
     before: int
     after: int
+    buffer_id: str
 
 
 @dataclass(frozen=True, slots=True)

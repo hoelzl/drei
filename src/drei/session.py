@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from drei.acp.machine import (
@@ -24,6 +24,7 @@ from drei.commands import (
     BufferSelected,
     CommandOutcome,
     CopyRegionAsKill,
+    CreateAgentBuffer,
     DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
@@ -106,6 +107,7 @@ Command = (
     | DeliverProcessOutput
     | DeliverSessionEffects
     | InsertAgentText
+    | CreateAgentBuffer
     | PromptPermission
     | AbortPendingPermissions
     | FindFile
@@ -251,6 +253,9 @@ def _shift_index(file_text: str, index: int) -> int:
     return index - file_text.count(CRLF, 0, index)
 
 
+BufferKind = Literal["ordinary", "generated"]
+
+
 def _visit(value: BufferValue) -> tuple[BufferValue, _BufferState]:
     """Prepare a buffer value that carries file text, and its state.
 
@@ -332,11 +337,11 @@ class _BufferState:
     """Per-buffer editing state (design 0003 §A.2, plan 0012 D2).
 
     Everything Emacs scopes per buffer lives here: undo history/redo/descent,
-    yank-pop chaining, the kill-append chain flag, and the file-facing facts
-    (last-saved text, line ending). Session-global state (kill ring,
-    transcript, process log, minibuffer, ports) stays on the session — the
-    ring is global in Emacs (kill in one buffer, yank in another), pinned
-    since slice 7.
+    yank-pop chaining, the kill-append chain flag, the buffer's kind, and the
+    file-facing facts (last-saved text, line ending). Session-global state
+    (kill ring, transcript, process log, minibuffer, ports) stays on the
+    session — the ring is global in Emacs (kill in one buffer, yank in
+    another), pinned since slice 7.
     """
 
     __slots__ = (
@@ -349,9 +354,22 @@ class _BufferState:
         "last_was_kill",
         "saved_text",
         "eol",
+        "kind",
     )
 
-    def __init__(self, saved_text: str | None = None, eol: str = LF) -> None:
+    def __init__(
+        self,
+        saved_text: str | None = None,
+        eol: str = LF,
+        kind: BufferKind = "ordinary",
+    ) -> None:
+        # What produced this buffer (design 0004 D3). "generated" means it was
+        # produced by an effect and visits no file — today only agent buffers,
+        # and only they accept a delivery. It lives here rather than on
+        # BufferValue because it is a per-buffer session fact that never
+        # varies per edit, the same category as saved_text and eol. §A.3's
+        # read-only enforcement is the hook's other user.
+        self.kind: BufferKind = kind
         # Buffer text as last read from or written to the file, or None when
         # that is unknown (a buffer handed to the session already modified).
         # The undo path derives the modified flag from it (finding 3).
@@ -425,8 +443,11 @@ class EditorSession:
         # hostile agent can flood it — accepted: each request is already in the
         # machine's in_flight_incoming, so this adds no new resource class).
         self._permission_queue: list[PermissionRequested] = []
-        # Agent-transcript fold cache (design 0003 §B.7): a derived,
-        # reconstructible cache of the AgentTranscriptUpdated event stream —
+        # Agent-transcript fold cache, per agent buffer (design 0003 §B.7,
+        # keyed by target since design 0004 D5 — the fold is rendering state,
+        # and one shared fold would let two ACP sessions close each other's
+        # turns): a derived, reconstructible cache of the
+        # AgentTranscriptUpdated event stream —
         # the same discipline as _process_log. The transcript remains
         # authoritative. The fold advances *inside* the dispatch that records
         # the delivery event, not after it (review 0001 finding 28 — this
@@ -438,7 +459,11 @@ class EditorSession:
         # two dispatches (see its docstring and docs/technical-debt.md).
         from drei.acp.transcript import TranscriptFold
 
-        self._agent_fold = TranscriptFold()
+        self._agent_folds: dict[BufferId, TranscriptFold] = {}
+        # ACP session id → its agent buffer (design 0004 D1). One buffer per
+        # ACP session: the binding must be as fine-grained as the transcript
+        # being folded, or a second session would append into the first's.
+        self._agent_buffers: dict[str, BufferId] = {}
 
     @property
     def buffer(self) -> Buffer:
@@ -500,8 +525,60 @@ class EditorSession:
         """
         return tuple(self._process_log)
 
+    def agent_buffer_id(self, acp_session_id: str) -> BufferId | None:
+        """The agent buffer bound to an ACP session, or None if unbound
+        (design 0004 D1). A caller reads it to build deliveries; nothing else
+        may guess an agent buffer's identity."""
+        return self._agent_buffers.get(acp_session_id)
+
+    def _pinned_target(self, command: Command, events: list[Event]) -> BufferId | None:
+        """The buffer a command pins as its target, when it names or mints one.
+
+        ``None`` means "the focused buffer" — the answer for every command
+        except an agent delivery and the creation of an agent buffer.
+        Deliveries name their target because a transcript binds to an agent
+        buffer, not to whatever the human happens to be looking at (review
+        0001 finding 5); ``CreateAgentBuffer`` mints one here, so it too edits
+        no buffer the user is looking at.
+
+        A delivery naming a buffer that does not exist, or one that is not
+        generated, raises ``ValueError`` before anything mutates (design 0004
+        D3): dropping it silently would desync the fold, and appending into a
+        file buffer is the hazard this slice exists to remove. The pump can
+        only pass ids the session itself minted, so a violation is a
+        programming error, not peer input.
+        """
+        match command:
+            case (
+                DeliverSessionEffects(buffer_id=buffer_id)
+                | InsertAgentText(buffer_id=buffer_id)
+            ):
+                state = self._states.get(buffer_id)
+                if state is None:
+                    raise ValueError(
+                        f"delivery target: no such buffer {buffer_id.value!r}"
+                    )
+                if state.kind != "generated":
+                    raise ValueError(
+                        f"delivery target {buffer_id.value!r} is not a generated buffer"
+                    )
+                return buffer_id
+            case CreateAgentBuffer(acp_session_id=acp_session_id):
+                existing = self._agent_buffers.get(acp_session_id)
+                if existing is not None:
+                    return existing  # idempotent: no second buffer, no event
+                buffer_id = self._create_buffer(
+                    "*agent*",
+                    BufferValue(text="", point=0),
+                    events,
+                    kind="generated",
+                )
+                self._agent_buffers[acp_session_id] = buffer_id
+                return buffer_id
+            case _:
+                return None
+
     def dispatch(self, command: Command) -> CommandOutcome:
-        current = self.buffer.current
         events: list[Event] = []
         new_value: BufferValue
 
@@ -511,6 +588,9 @@ class EditorSession:
         # the agent-buffer fold from the transcript; parity registry row).
         # PromptPermission is delivery-class too: a swallowed permission
         # request would hang the agent (the same row, extended in B.8).
+        # The gate runs before target resolution because resolution has
+        # effects — CreateAgentBuffer mints a buffer — and a gated command
+        # must leave no trace at all.
         if self._minibuffer is not None and not isinstance(
             command,
             MinibufferInput
@@ -520,10 +600,20 @@ class EditorSession:
             | DeliverProcessOutput
             | DeliverSessionEffects
             | InsertAgentText
+            | CreateAgentBuffer
             | PromptPermission
             | AbortPendingPermissions,
         ):
-            return CommandOutcome((), self._observation(current))
+            return CommandOutcome((), self._observation(self.buffer.current))
+
+        # A delivery **pins** its target buffer (design 0004 D1); every other
+        # command follows focus. The distinction is not cosmetic: `find-file`
+        # and `C-x b` change the focused buffer *inside* their match arm, and
+        # their new value belongs to the buffer they switched TO. So a pinned
+        # target is resolved once here, while an unpinned one is resolved
+        # again after the arm runs — `commit_id` below.
+        pinned_id = self._pinned_target(command, events)
+        current = self._buffers[pinned_id].current if pinned_id else self.buffer.current
 
         match command:
             case InsertText(text=text):
@@ -592,33 +682,37 @@ class EditorSession:
                     # Construction validation guarantees error is a token here.
                     assert error is not None
                     events.append(ProcessOutputRecorded(argv, -1, 0, 0, error))
-            case DeliverSessionEffects(effects=effects):
+            case DeliverSessionEffects(effects=effects, buffer_id=target):
                 # External delivery, not a user edit: buffer value untouched.
                 # The fold→append step lives in apply_session_effects (the
                 # atomic delivery seam); a raw dispatch only records the fold.
                 new_value = current
-                rendered = self._render_effects(effects)
-                events.append(AgentTranscriptUpdated(effects, rendered))
-            case InsertAgentText(text=text):
-                # TODO: [tech-debt] TD-1 — this appends to the *focused*
-                # buffer, so a C-x b between two deliveries splits one
-                # transcript across two buffers; it also leaves `modified`
-                # untouched (a later C-x C-s writes agent text into the
-                # user's file) and moves point to end-of-buffer. Design 0004
-                # decides the fix (target in the command, generated buffer
-                # kind, tail-follow point); see docs/technical-debt.md.
+                rendered = self._render_effects(effects, target)
+                events.append(AgentTranscriptUpdated(effects, rendered, target.value))
+            case InsertAgentText(text=text, buffer_id=target):
                 if text:
                     before = len(current.text)
                     after = before + len(text)
                     new_value = replace(
                         current,
                         text=current.text + text,
-                        point=after,
+                        # Tail-follow, not a cursor grab (design 0004 D6): a
+                        # point that sat at end-of-buffer tracks the stream;
+                        # a point anywhere else is where a human put it.
+                        point=after if current.point == before else current.point,
                         mark=_adjust_mark_insert(current.mark, before, len(text)),
                     )
-                    events.append(AgentTextInserted(text, before, after))
+                    self._tail_follow_windows(target, before, after)
+                    events.append(AgentTextInserted(text, before, after, target.value))
                 else:
                     new_value = current
+            case CreateAgentBuffer():
+                # The buffer (and its BufferCreated event) came out of target
+                # resolution above; creation edits nothing. `current` is the
+                # new buffer's own value, so the write-back below is a no-op
+                # and the bookkeeping lands on the new buffer's fresh state
+                # rather than intervening in the focused buffer's chains.
+                new_value = current
             case SplitWindow():
                 new_value = self._split_window(events)
             case OtherWindow():
@@ -751,27 +845,35 @@ class EditorSession:
             case _:
                 raise TypeError(f"unsupported command: {type(command)}")
 
+        # Resolved only now: an unpinned command may have switched buffers in
+        # its arm, and the bookkeeping belongs to the buffer it ended on (the
+        # pre-refactor behavior, which read `self._state` at exactly this
+        # point). A pinned delivery keeps its own target's state, so it can
+        # never break the focused buffer's kill/yank chains or undo descent.
+        commit_id = pinned_id or self._current_id
+        state = self._states[commit_id]
+
         if isinstance(command, KillLine):
             # A kill that emits an event starts/continues the append chain;
             # a no-op kill leaves the chain intact.
             if any(isinstance(e, TextKilled) for e in events):
-                self._state.last_was_kill = True
+                state.last_was_kill = True
         elif events:
             # Only event-emitting commands break the chain. A silent no-op
             # (empty insert) leaves no trace in the transcript, so it must
             # not intervene — keeping the chain derivable from the evidence
             # (modulo capacity eviction, which emits nothing).
-            self._state.last_was_kill = False
+            state.last_was_kill = False
 
         if isinstance(command, Yank):
             # Active only on an event-emitting yank; a no-op yank clears it.
-            self._state.yank_active = any(isinstance(e, TextYanked) for e in events)
+            state.yank_active = any(isinstance(e, TextYanked) for e in events)
         elif isinstance(command, YankPop):
             # Active stays on for a successful pop (chains), off for a no-op.
-            self._state.yank_active = any(isinstance(e, TextYankPopped) for e in events)
+            state.yank_active = any(isinstance(e, TextYankPopped) for e in events)
         elif events:
             # Same rule as the chain: only event-emitting commands intervene.
-            self._state.yank_active = False
+            state.yank_active = False
 
         # Undo bookkeeping: text-changing commands push a group and
         # truncate the redo tail (owned deviation — stock Emacs keeps redo
@@ -785,33 +887,39 @@ class EditorSession:
                 # no-op intervenes in nothing — clearing the flag here would
                 # send the *next* Undo down the redo branch, so a held C-/
                 # oscillated the buffer forever (review 0001 finding 2).
-                self._state.undo_descending = True
+                state.undo_descending = True
         else:
             group = _make_group(command, current, events)
             if group is not None:
-                self._state.undo_history.append(group)
-                del self._state.undo_history[
-                    : max(0, len(self._state.undo_history) - UNDO_CAPACITY)
+                state.undo_history.append(group)
+                del state.undo_history[
+                    : max(0, len(state.undo_history) - UNDO_CAPACITY)
                 ]
-                self._state.undo_redo.clear()
+                state.undo_redo.clear()
             if events:
-                self._state.undo_descending = False
+                state.undo_descending = False
 
         # Validation happens in BufferValue.__post_init__ before any
         # mutation, so command failure is atomic by construction.
-        self.buffer.replace(new_value)
+        self._buffers[commit_id].replace(new_value)
 
         # The focused window tracks the buffer it displays: every command
-        # that moved point/mark updates its WindowValue (plan 0012 D3).
-        self._windows = tuple(
-            WindowValue(w.buffer_id, new_value.point, new_value.mark)
-            if i == self._focused
-            else w
-            for i, w in enumerate(self._windows)
-        )
+        # that moved point/mark updates its WindowValue (plan 0012 D3). Only
+        # when the command actually edited the focused buffer — a delivery
+        # into another buffer must not overwrite the focused window's point
+        # with a value read from a buffer it does not show.
+        if commit_id == self._current_id:
+            self._windows = tuple(
+                WindowValue(w.buffer_id, new_value.point, new_value.mark)
+                if i == self._focused
+                else w
+                for i, w in enumerate(self._windows)
+            )
 
         self._transcript.extend(events)
-        return CommandOutcome(tuple(events), self._observation(new_value))
+        # The observation is the read model for what the user is looking at,
+        # whichever buffer the command edited.
+        return CommandOutcome(tuple(events), self._observation(self.buffer.current))
 
     # ------------------------------------------------------------------
     # B.8 choice-minibuffer helpers
@@ -982,6 +1090,31 @@ class EditorSession:
             minibuffer_prompt=self.minibuffer_prompt,
         )
 
+    def _tail_follow_windows(
+        self, buffer_id: BufferId, before: int, after: int
+    ) -> None:
+        """Apply D6's tail-follow rule to the **non-focused** windows showing
+        an appended-to buffer.
+
+        0004 states the rule over windows rather than over the buffer because
+        A.2 made window point distinct from ``BufferValue.point``: a user
+        scrolled back through the transcript in one window is not dragged to
+        the end because output arrived in another window on the same buffer.
+        The focused window is excluded because its live point *is*
+        ``BufferValue.point``, which the append itself already moved (or did
+        not); refreshing it from the new value happens at the end of dispatch.
+
+        Window marks need no adjustment: an append lands at end-of-buffer, and
+        the existing insert rule never moves a mark at or before the insertion
+        point.
+        """
+        self._windows = tuple(
+            WindowValue(w.buffer_id, after, w.mark)
+            if i != self._focused and w.buffer_id == buffer_id and w.point == before
+            else w
+            for i, w in enumerate(self._windows)
+        )
+
     def _split_window(self, events: list[Event]) -> BufferValue:
         """C-x 2 (plan 0012 D3): split the focused window into two stacked
         halves over the same buffer; both inherit the buffer's current
@@ -1093,13 +1226,21 @@ class EditorSession:
         events.append(BufferSelected(buffer_id.value))
 
     def _create_buffer(
-        self, name: str, value: BufferValue, events: list[Event]
+        self,
+        name: str,
+        value: BufferValue,
+        events: list[Event],
+        kind: BufferKind = "ordinary",
     ) -> BufferId:
         """Add a new buffer to the set with a unique name (plan 0012 D1).
 
         Same-basename collisions get numeric ``<N>`` suffixes — a recorded
         deviation from Emacs 29.3's ``<dirname>`` uniquify suffixes (plan
-        0012 evidence 1; deterministic without directory context).
+        0012 evidence 1; deterministic without directory context). The same
+        rule names the second and later agent buffers (design 0004 D1).
+
+        ``kind`` is the buffer's provenance (design 0004 D3); only a
+        ``"generated"`` buffer accepts an agent delivery.
         """
         candidate = name
         suffix = 2
@@ -1108,6 +1249,7 @@ class EditorSession:
             suffix += 1
         buffer_id = BufferId(candidate)
         visited, state = _visit(value)
+        state.kind = kind
         self._buffers[buffer_id] = Buffer(buffer_id, visited)
         self._states[buffer_id] = state
         events.append(BufferCreated(buffer_id.value, visited.file_path))
@@ -1156,28 +1298,36 @@ class EditorSession:
         self._select_buffer(buffer_id, events)
         return current
 
-    def _render_effects(self, effects: tuple[SessionEffect, ...]) -> str:
-        """Fold effects through the cached ``TranscriptFold``; return the
-        newly rendered suffix. The fold is interpreter state only — it never
-        touches the buffer."""
-        from drei.acp.transcript import advance
+    def _render_effects(
+        self, effects: tuple[SessionEffect, ...], buffer_id: BufferId
+    ) -> str:
+        """Fold effects through the target buffer's cached ``TranscriptFold``;
+        return the newly rendered suffix. The fold is interpreter state only —
+        it never touches the buffer. One fold per agent buffer (design 0004
+        D5): a buffer with no fold yet starts from a fresh one."""
+        from drei.acp.transcript import TranscriptFold, advance
 
         parts: list[str] = []
-        fold = self._agent_fold
+        fold = self._agent_folds.get(buffer_id, TranscriptFold())
         for effect in effects:
             fold, text = advance(fold, effect)
             parts.append(text)
-        self._agent_fold = fold
+        self._agent_folds[buffer_id] = fold
         return "".join(parts)
 
     def apply_session_effects(
-        self, effects: tuple[SessionEffect, ...]
+        self, effects: tuple[SessionEffect, ...], buffer_id: BufferId
     ) -> CommandOutcome:
         """The agent-delivery entry point (design 0003 §B.7), mirroring
         ``run_process``: validate, record the fold as one immutable delivery
         event, then append the newly rendered text as one buffer edit. One
         ``handle()`` call's effects land as one ``AgentTranscriptUpdated``
         plus at most one ``AgentTextInserted``.
+
+        ``buffer_id`` is the agent buffer this transcript belongs to — the one
+        ``CreateAgentBuffer`` minted for the ACP session these effects came
+        from, readable via ``agent_buffer_id``. It is required and must name a
+        generated buffer; anything else raises (design 0004 D3).
 
         TODO: [tech-debt] TD-2 — design 0003 §consequence-2 calls this
         delivery *atomic*; it is two dispatches with an observable seam. The
@@ -1186,14 +1336,14 @@ class EditorSession:
         unobservable in practice. Design 0005 D4 collapses it to one
         dispatch emitting both events; see docs/technical-debt.md.
         """
-        delivery = DeliverSessionEffects(tuple(effects))
+        delivery = DeliverSessionEffects(tuple(effects), buffer_id)
         outcome = self.dispatch(delivery)
         rendered = next(
             e.rendered for e in outcome.events if isinstance(e, AgentTranscriptUpdated)
         )
         if not rendered:
             return outcome
-        append = self.dispatch(InsertAgentText(rendered))
+        append = self.dispatch(InsertAgentText(rendered, buffer_id))
         return CommandOutcome(outcome.events + append.events, append.observation)
 
     def run_process(

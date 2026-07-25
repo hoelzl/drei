@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from conftest import FakeFilePort, FakeProcessPort
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -9,6 +11,7 @@ from drei.commands import (
     BufferOpened,
     BufferSaved,
     CopyRegionAsKill,
+    CreateAgentBuffer,
     DeliverProcessOutput,
     DeliverSessionEffects,
     ExchangePointAndMark,
@@ -31,6 +34,7 @@ from drei.commands import (
     RegionKilled,
     SaveBuffer,
     SetMark,
+    SwitchBuffer,
     TextKilled,
     TextRedone,
     TextUndone,
@@ -46,6 +50,9 @@ from drei.session import EditorSession
 
 settings.register_profile("ci", max_examples=50, derandomize=True, deadline=None)
 settings.load_profile("ci")
+
+AGENT = BufferId("*agent*")
+ACP_SESSION = "acp-1"
 
 
 def _session(port: FakeFilePort | None = None) -> EditorSession:
@@ -145,7 +152,19 @@ def _session_effects(draw: st.DrawFn) -> DeliverSessionEffects:
             max_size=4,
         )
     )
-    return DeliverSessionEffects(tuple(effects))
+    return DeliverSessionEffects(tuple(effects), AGENT)
+
+
+def _agent_session() -> EditorSession:
+    """A session with an agent buffer, focused on the user's buffer.
+
+    Deliveries name a generated buffer (design 0004 D3), so these histories
+    have one to name — and the shape is the one the pump produces: the human
+    keeps working in `scratch` while the transcript accumulates elsewhere.
+    """
+    session = _session()
+    session.dispatch(CreateAgentBuffer(ACP_SESSION))
+    return session
 
 
 @st.composite
@@ -161,11 +180,164 @@ def agent_history(draw: st.DrawFn) -> list[object]:
                 st.just(Undo()),
                 st.just(SetMark()),
                 _session_effects(),
-                st.builds(InsertAgentText, st.text(min_size=0, max_size=5)),
+                st.builds(
+                    InsertAgentText,
+                    st.text(min_size=0, max_size=5),
+                    st.just(AGENT),
+                ),
             )
         )
         for _ in range(size)
     ]
+
+
+AGENT2 = BufferId("*agent*<2>")
+_SWITCHABLE = ("scratch", AGENT.value, AGENT2.value)
+
+
+def _two_agent_session() -> EditorSession:
+    """Two ACP sessions, two agent buffers, focused on the user's buffer."""
+    session = _session()
+    session.dispatch(CreateAgentBuffer(ACP_SESSION))
+    session.dispatch(CreateAgentBuffer("acp-2"))
+    assert session.agent_buffer_id("acp-2") == AGENT2
+    return session
+
+
+@st.composite
+def _switch_to(draw: st.DrawFn) -> list[object]:
+    """The real ``C-x b`` path, spelled out: open, type, accept."""
+    name = draw(st.sampled_from(_SWITCHABLE))
+    return [SwitchBuffer(), *(MinibufferInput(c) for c in name), MinibufferAccept()]
+
+
+class _Delivery(NamedTuple):
+    """One ``apply_session_effects`` call — the whole delivery, fold *and*
+    append. A bare ``DeliverSessionEffects`` dispatch records the fold without
+    appending (the two-dispatch seam, TD-2), so the fold oracle is stated over
+    complete deliveries."""
+
+    effects: tuple[object, ...]
+    buffer_id: BufferId
+
+
+@st.composite
+def _agent_effect(draw: st.DrawFn) -> object:
+    from drei.acp.machine import AgentTextChunk, PromptCompleted, ThoughtChunk
+
+    return draw(
+        st.one_of(
+            st.builds(AgentTextChunk, st.text(min_size=0, max_size=4)),
+            st.builds(ThoughtChunk, st.text(min_size=0, max_size=4)),
+            st.builds(
+                PromptCompleted, st.sampled_from(["end_turn", "refusal", "cancelled"])
+            ),
+        )
+    )
+
+
+@st.composite
+def multi_buffer_agent_history(draw: st.DrawFn) -> list[object]:
+    """Edits, buffer switches, and deliveries to **two** agent buffers.
+
+    The history the fold oracle needed all along (design 0004 §consequences):
+    before this slice a switch between two deliveries split one transcript
+    across two buffers, and no single-buffer history could see it.
+
+    Coverage of that exact shape is a *sweep*, not a guarantee — under the CI
+    profile 10 of 50 draws contain delivery → effective switch → delivery to
+    the same buffer, and a later change to the strategy or the profile could
+    take that to zero silently. The guarantee is the deterministic pin,
+    ``test_fold_cache_reconstructible_across_a_buffer_switch`` in
+    ``test_agent_delivery.py``. Note also that ``_switch_to`` samples the
+    focused buffer about a third of the time, where a switch is a quiet no-op.
+    """
+    size = draw(st.integers(min_value=0, max_value=12))
+    history: list[object] = []
+    for _ in range(size):
+        step = draw(
+            st.one_of(
+                st.builds(InsertText, st.text(min_size=0, max_size=4)),
+                st.just(KillLine()),
+                _switch_to(),
+                st.builds(
+                    _Delivery,
+                    st.lists(_agent_effect(), min_size=1, max_size=3).map(tuple),
+                    st.sampled_from([AGENT, AGENT2]),
+                ),
+            )
+        )
+        if isinstance(step, list):
+            history.extend(step)
+        else:
+            history.append(step)
+    return history
+
+
+def _run(session: EditorSession, history: list[object], *, skip_edits: bool) -> None:
+    """Replay a multi-buffer history.
+
+    ``skip_edits`` drops user edits while a generated buffer is focused: a
+    human typing into an agent buffer is the owned divergence (design 0004 D6;
+    §A.3 owns the fix), and the fold oracle is not claimed to survive it.
+    """
+    for item in history:
+        if isinstance(item, _Delivery):
+            session.apply_session_effects(item.effects, item.buffer_id)  # type: ignore[arg-type]
+            continue
+        if (
+            skip_edits
+            and isinstance(item, (InsertText, KillLine))
+            and session._states[session.buffer.buffer_id].kind == "generated"
+        ):
+            continue
+        session.dispatch(item)  # type: ignore[arg-type]
+
+
+@given(multi_buffer_agent_history())
+def test_every_buffers_agent_text_is_its_own_transcript_fold(
+    history: list[object],
+) -> None:
+    """The per-buffer fold oracle (design 0004 §consequences), as a property.
+
+    For every buffer B, B's text equals the concatenation of ``rendered`` over
+    the ``AgentTranscriptUpdated`` events targeting B — whatever else the
+    history did in between, including switching buffers mid-stream. Strictly
+    stronger than the pre-0004 oracle, which described no buffer at all once
+    more than one could receive a delivery.
+    """
+    session = _two_agent_session()
+    _run(session, history, skip_edits=True)
+
+    for buffer_id in (AGENT, AGENT2):
+        rendered = "".join(
+            e.rendered
+            for e in session.transcript
+            if isinstance(e, AgentTranscriptUpdated) and e.buffer_id == buffer_id.value
+        )
+        assert session._buffers[buffer_id].current.text == rendered
+
+
+@given(multi_buffer_agent_history())
+def test_no_ordinary_buffer_ever_receives_agent_text(history: list[object]) -> None:
+    """The other half, and it holds even when the human *does* type into an
+    agent buffer: agent text lands only in generated buffers, so a transcript
+    being written into the user's file (review 0001 finding 5, hazard 2)
+    cannot recur.
+
+    The text check is what has teeth. Under the pre-slice rule a delivery
+    arriving while the user's buffer was focused appended straight into it,
+    turn header and all; the header is 12 characters and the history's edits
+    draw at most 4, so it cannot have been typed.
+    """
+    session = _two_agent_session()
+    _run(session, history, skip_edits=False)
+
+    for event in session.transcript:
+        if isinstance(event, AgentTextInserted):
+            assert session._states[BufferId(event.buffer_id)].kind == "generated"
+    user_buffer = session._buffers[BufferId("scratch")].current
+    assert "── agent ──" not in user_buffer.text
 
 
 @given(command_history())
@@ -583,20 +755,26 @@ def test_minibuffer_accept_always_closes_with_boundary_event(chars: list[str]) -
 @given(agent_history())
 def test_agent_deliveries_never_create_undo_groups(history: list[object]) -> None:
     """InsertAgentText / DeliverSessionEffects are external deliveries: no
-    undo group, no kill-ring change, buffer modified-flag untouched."""
-    session = _session()
+    undo group, no kill-ring change, buffer modified-flag untouched.
+
+    Checked on the **target**, which is where a delivery's bookkeeping now
+    lands (design 0004 D1): checking the focused buffer would pass whatever
+    the delivery did to the agent buffer's undo stacks.
+    """
+    session = _agent_session()
+    target = session._states[AGENT]
     for command in history:
-        undo_before = (len(session._state.undo_history), len(session._state.undo_redo))
+        undo_before = (len(target.undo_history), len(target.undo_redo))
         ring_before = session.kill_ring
-        modified_before = session.buffer.current.modified
+        modified_before = session._buffers[AGENT].current.modified
         outcome = session.dispatch(command)  # type: ignore[arg-type]
         if isinstance(command, (InsertAgentText, DeliverSessionEffects)):
             assert (
-                len(session._state.undo_history),
-                len(session._state.undo_redo),
+                len(target.undo_history),
+                len(target.undo_redo),
             ) == undo_before
             assert session.kill_ring == ring_before
-            assert session.buffer.current.modified == modified_before
+            assert session._buffers[AGENT].current.modified == modified_before
             # Every outcome event is an agent-delivery event, never a user-edit
             # event (TextInserted/TextKilled/...), so _make_group cannot fire.
             assert all(
@@ -613,41 +791,78 @@ def test_agent_insert_events_match_the_buffer_at_delivery(
     that dispatch: the event's text equals the buffer span it records, at the
     moment it is recorded. (Later user edits/undo may overwrite the span —
     the owned deviation — so the check is delivery-local, not cumulative.)"""
-    session = _session()
+    session = _agent_session()
     for command in history:
         outcome = session.dispatch(command)  # type: ignore[arg-type]
-        text = session.buffer.current.text
         for event in outcome.events:
             if isinstance(event, AgentTextInserted):
+                # The event names the buffer it changed; read that one.
+                text = session._buffers[BufferId(event.buffer_id)].current.text
                 assert event.text == text[event.before : event.after]
                 assert event.after == len(text)  # appended at end-of-buffer
 
 
 @given(agent_history())
 def test_point_in_bounds_with_agent_deliveries(history: list[object]) -> None:
-    session = _session()
+    """Both buffers: the user's, which deliveries must leave alone, and the
+    agent buffer, which they append to."""
+    session = _agent_session()
     for command in history:
         session.dispatch(command)  # type: ignore[arg-type]
-        current = session.buffer.current
-        assert 0 <= current.point <= len(current.text)
-        if current.mark is not None:
-            assert 0 <= current.mark <= len(current.text)
+        for buffer_id in (session.buffer.buffer_id, AGENT):
+            current = session._buffers[buffer_id].current
+            assert 0 <= current.point <= len(current.text)
+            if current.mark is not None:
+                assert 0 <= current.mark <= len(current.text)
 
 
 @given(agent_history())
 def test_fold_cache_coherent_with_transcript_events(history: list[object]) -> None:
-    """The _agent_fold cache is reconstructible: refolding every recorded
-    AgentTranscriptUpdated.effects from the initial state yields the cache.
-    (Catches fold corruption invisible to outcome tuples — the class of bug
-    test_replay_produces_identical_evidence cannot see.)"""
+    """Each buffer's fold cache is reconstructible: refolding the recorded
+    AgentTranscriptUpdated.effects **targeting that buffer** from the initial
+    state yields that buffer's cache. (Catches fold corruption invisible to
+    outcome tuples — the class of bug test_replay_produces_identical_evidence
+    cannot see.) Scoped per buffer since design 0004 D5."""
     from drei.acp.transcript import TranscriptFold, advance
 
-    session = _session()
+    session = _agent_session()
     for command in history:
         session.dispatch(command)  # type: ignore[arg-type]
         fold = TranscriptFold()
         for event in session.transcript:
-            if isinstance(event, AgentTranscriptUpdated):
+            if isinstance(event, AgentTranscriptUpdated) and event.buffer_id == (
+                AGENT.value
+            ):
                 for effect in event.effects:
                     fold, _ = advance(fold, effect)
-        assert session._agent_fold == fold
+        assert session._agent_folds.get(AGENT, TranscriptFold()) == fold
+
+
+@given(multi_buffer_agent_history())
+def test_each_buffers_fold_cache_holds_only_its_own_effects(
+    history: list[object],
+) -> None:
+    """Design 0004 D5, against an oracle the implementation cannot satisfy by
+    construction.
+
+    The text-vs-``rendered`` oracles are self-consistent under *any* keying —
+    both sides come out of the same ``_render_effects`` call — so they cannot
+    see a shared fold. This refolds each buffer's effects from a **fresh**
+    ``TranscriptFold`` and compares to that buffer's cache, which a shared
+    fold fails immediately: buffer B's cache would carry A's turns.
+    """
+    from drei.acp.transcript import TranscriptFold, advance
+
+    session = _two_agent_session()
+    _run(session, history, skip_edits=False)
+
+    for buffer_id in (AGENT, AGENT2):
+        fold = TranscriptFold()
+        for event in session.transcript:
+            if (
+                isinstance(event, AgentTranscriptUpdated)
+                and event.buffer_id == buffer_id.value
+            ):
+                for effect in event.effects:
+                    fold, _ = advance(fold, effect)
+        assert session._agent_folds.get(buffer_id, TranscriptFold()) == fold

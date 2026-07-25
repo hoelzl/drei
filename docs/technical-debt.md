@@ -24,43 +24,6 @@ that review's.
 
 ---
 
-## TD-1 (finding 5) — "the agent buffer" does not exist
-
-**Deferred to:** a design record — **written**, `agent/design/0004-agent-buffer-identity.md`.
-The debt now is the slice that implements it, not the missing decision.
-**Location:** `src/drei/session.py` — `InsertAgentText` in `dispatch`,
-`apply_session_effects`.
-**Severity:** high once the §C pump lands; latent today because nothing
-delivers agent text outside tests.
-
-Design 0003 and parity-registry rows speak of "the agent buffer" as an
-entity. No such entity exists: `InsertAgentText` and `apply_session_effects`
-target `self.buffer` — whichever buffer is *focused right now*. Since A.2
-shipped `C-x b`, a delivery, a buffer switch, and a second delivery split one
-transcript across two buffers, and the documented fold oracle (buffer text =
-concatenation of every `AgentTranscriptUpdated.rendered`) then matches no
-buffer at all. Two further hazards ride along: a delivery into a
-file-visiting buffer appends transcript text **without setting `modified`**,
-so the modeline reads clean and a later `C-x C-s` writes the agent's
-transcript into the user's file; and every delivery moves point to
-end-of-buffer, stealing point from a user who is typing.
-
-Cluster A made the modified-flag hazard *more* visible rather than less: the
-flag is now derived from the buffer's last-saved text, so an undo after an
-agent delivery reports the divergence that the append itself hid.
-
-**Why deferred:** the fix was a decision, not a patch — what does a transcript
-bind to? Choosing inside a bug fix would have smuggled a design decision past
-review.
-
-**Suggested approach:** implement design 0004 — one agent buffer per ACP
-session created on `SessionEstablished`, deliveries carrying their target
-`BufferId` in both command and event, a generated buffer kind that only
-agent buffers satisfy, no file path (so the modified question dissolves), and
-tail-follow point motion. Make
-`test_fold_cache_reconstructible_from_events` dispatch a buffer switch
-between deliveries so the oracle actually covers the case that broke.
-
 ## TD-2 (finding 11) — the ACP subsystem is unreachable from the shipped editor
 
 **Deferred to:** a design record — **written**, `agent/design/0005-acp-pump.md`.
@@ -91,7 +54,9 @@ the fold advances in the first whether or not the second runs. And design
 port shape, an event-injection point in a loop that blocks on `read_key()`, a
 serialization rule for deliveries against keystrokes, cancellation wiring (the
 machine's sweep and the session's `AbortPendingPermissions` both exist but
-nothing calls them), and TD-1's buffer binding.
+nothing calls them). TD-1's buffer binding is no longer among them: plan
+0014 implemented design 0004, so the pump inherits a resolved agent buffer
+per ACP session rather than a decision to make.
 
 **Suggested approach:** design 0005 decides all five — a `StreamingProcessPort`
 separate from `ProcessPort`, one ordered `InputEvent` queue fed by adapter-side

@@ -1,6 +1,45 @@
 # Fourteenth slice: agent buffer identity
 
-**Status:** claimed (issue #34), plan under review — no code written yet.
+**Status:** implemented (issue #34); plan merged (PR #35). V1–V5 landed on
+`feat/agent-buffer-identity` (`7a0bd3b`, `2886d58`, `f1a357a`, `bf34fea`,
+`b5e83a4`); V6 is the review and the code PR. Design 0004 is accepted.
+
+**Reading this later?** The D1 amendment below corrects the plan as drafted —
+target resolution is *pinned for a delivery, re-resolved after the arm for
+everything else* — and that distinction is the one thing here a future reader
+must not lose.
+
+**How the shipped code differs from the plan as written:**
+
+- `_target_of` became `_pinned_target(command, events)`, which also mints the
+  agent buffer for `CreateAgentBuffer`. Resolution is where creation happens,
+  so creation is pinned to its own buffer and cannot break the human's chains
+  — the plan did not say where creation would sit.
+- The minibuffer gate moved *above* target resolution. It has to: resolution
+  now has an effect (it can create a buffer), and a gated command must leave
+  no trace. Behavior-preserving, since every pinned command is gate-exempt.
+- Pin 1 is asserted in `test_agent_buffer_identity.py` (where the human's
+  buffer and the agent buffer are distinct) rather than rewritten in place;
+  `test_agent_delivery.py` focuses its agent buffer, so both halves are not
+  expressible there.
+- The V5 property runs deliveries through `apply_session_effects`, not raw
+  `DeliverSessionEffects` dispatches: a raw dispatch records the fold without
+  appending (the TD-2 seam), so the oracle is stated over whole deliveries.
+- `test_agent_delivery.py`'s fixture builds its agent buffer through the
+  private `_create_buffer`/`_select_buffer` rather than dispatching
+  `CreateAgentBuffer`, because several of its pins assert exact transcripts
+  that a `BufferCreated` would break. Consequence: in that file target and
+  focus coincide, and the command itself is covered in
+  `test_agent_buffer_identity.py`.
+
+**Found by the V6 review, fixed before merge:** three assertions that could
+not fail (a `dict.get` default standing in for an absent fold; `file_path`
+values no command in the history can change; a window guard excluded twice
+over), and the fold oracle being self-consistent under any keying — both
+sides came from the same `_render_effects` call, so a session-wide fold
+passed it. The replacement refolds each buffer's effects from a fresh
+`TranscriptFold`, which a shared fold fails. Both new tests were confirmed by
+mutating the source and watching them fail.
 
 **Architecture gate:** design `0004-agent-buffer-identity.md`, which this slice
 implements in full. No new ports, no I/O, no protocol change, no new
@@ -42,10 +81,28 @@ generated buffer can receive one.
 
 ### D1. Dispatch resolves a target buffer; focus is the default, not the rule
 
-`dispatch` gains one resolution step at the top: the **target** is the focused
-buffer for every command except `DeliverSessionEffects` and `InsertAgentText`,
-which name theirs. `current`, `self._state`, and the write-back all follow the
-target.
+`dispatch` gains one resolution step: the **target** is the focused buffer for
+every command except `DeliverSessionEffects` and `InsertAgentText`, which name
+theirs. `current`, `self._state`, and the write-back all follow the target.
+
+> **Amended during V1 (commit `7a0bd3b`) — resolve *when*, not just *what*.**
+> As drafted this paragraph said the target is resolved "at the top", once,
+> for every command. That is wrong, and the existing suite caught it: a
+> command may change the focused buffer **inside its own match arm**
+> (`find-file` selects the buffer it just created; `C-x b` selects the one it
+> switched to), and its new value belongs to the buffer it ended on. The
+> pre-refactor code got this right by accident, re-resolving `self.buffer` at
+> commit time. Freezing the target up front sent find-file's loaded text into
+> the *previous* buffer — four tests failed, including the shipped ConPTY
+> switch-buffer scenario.
+>
+> The rule is therefore narrower than "resolve once": a delivery **pins** its
+> target at the top (it must not follow a focus change it did not cause);
+> every other command resolves again **after** the arm runs, preserving the
+> existing semantics exactly. In code: `pinned_id = self._target_of(command)`
+> up front, `commit_id = pinned_id or self._current_id` after the match. Any
+> future command that moves focus as part of its own effect stays correct
+> under this rule; it would not under the original wording.
 
 This is the structural core of the slice and it is deliberately a *general*
 mechanism stated in one place, not a special case threaded through two match
