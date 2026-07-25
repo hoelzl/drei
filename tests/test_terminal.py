@@ -10,13 +10,12 @@ import pytest
 
 import drei.terminal
 from drei.files import SystemFilePort
-from drei.input import InputEvent, InputSource, Key, Resize
+from drei.input import EndOfInput, EventQueue, InputEvent, Key, Resize
 from drei.terminal import (
     _CLEAR_SCREEN,
     READINESS_MARKER,
-    SynchronousTerminalSource,
     TerminalPort,
-    ThreadedTerminalSource,
+    TerminalReaders,
     run_editor,
 )
 
@@ -47,15 +46,30 @@ class FakePort(TerminalPort):
         self.restored = True
 
 
-def run_with_keys(port: FakePort, **kwargs: object) -> None:
-    """Drive the loop over the port's scripted bytes, synchronously.
+def scripted(events: list[InputEvent]) -> EventQueue:
+    """A queue holding exactly these events, closed behind them.
 
-    The production default is the threaded source (plan 0015 V4). These tests
-    pin the *loop*, not the threads, so they inject the synchronous source —
-    which is exactly the `read_key()` the loop used to call inline, making
-    them the unchanged regression gate they were before the seam existed.
+    Design 0005's verification layer 1: no thread, no clock, no port. Closing
+    it means a run that forgets to quit ends in `EndOfInput` rather than
+    blocking the suite forever — the safety the old scripted source got from
+    popping an empty list.
     """
-    run_editor(port, source=SynchronousTerminalSource(port), **kwargs)  # type: ignore[arg-type]
+    stream = EventQueue()
+    for event in events:
+        stream.put(event)
+    stream.close()
+    return stream
+
+
+def run_with_keys(port: FakePort, **kwargs: object) -> None:
+    """Drive the loop over the port's scripted characters.
+
+    The port's `inputs` are turned into `Key` events rather than read through
+    `read_key`, because production keys arrive the same way: a reader thread
+    puts them on the queue. These tests pin the *loop*, so they skip the
+    thread and script the queue directly.
+    """
+    run_editor(port, events=scripted(keys(*port.inputs)), **kwargs)  # type: ignore[arg-type]
 
 
 def test_editor_writes_readiness_and_exits_on_quit() -> None:
@@ -74,13 +88,20 @@ def test_editor_inserts_text_and_renders() -> None:
 
 
 def test_editor_restores_on_exception() -> None:
+    """A terminal that cannot be read hands the terminal back.
+
+    Driven through the *production* path — real reader threads over a port
+    whose `read_key` raises — because that is now the only way a port failure
+    can reach the loop at all. Deterministic: the failure is immediate.
+    """
+
     class BoomPort(FakePort):
         def read_key(self) -> str:
             raise RuntimeError("boom")
 
     port = BoomPort([])
     with pytest.raises(RuntimeError, match="boom"):
-        run_with_keys(port)
+        run_editor(port)
     assert port.restored
 
 
@@ -319,25 +340,6 @@ def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
     assert port.restored
 
 
-class ScriptedSource(InputSource):
-    """A list of input events, in order (plan 0015 D2, verification layer 1).
-
-    Every test but V4's touches the loop through one of these: no thread, no
-    port, no clock. Exhaustion raises like a closed stream would, which is how
-    the existing suite already ends a run that forgets to quit.
-    """
-
-    def __init__(self, events: list[InputEvent]) -> None:
-        self.events = list(events)
-        self.closed = False
-
-    def next_event(self) -> InputEvent:
-        return self.events.pop(0)
-
-    def close(self) -> None:
-        self.closed = True
-
-
 def keys(*chars: str) -> list[InputEvent]:
     return [Key(char) for char in chars]
 
@@ -354,20 +356,28 @@ def test_loop_consumes_events_and_never_reads_the_port() -> None:
             raise AssertionError("run_editor read the port instead of the source")
 
     port = UnreadablePort([])
-    source = ScriptedSource(keys("a", "\x07"))
-    run_editor(port, source=source)
+    run_editor(port, events=scripted(keys("a", "\x07")))
     assert "a" in "".join(port.outputs)
 
 
-def test_loop_closes_the_source_even_when_the_body_raises() -> None:
-    class BoomSource(ScriptedSource):
-        def next_event(self) -> InputEvent:
-            raise RuntimeError("boom")
-
-    source = BoomSource([])
+def test_a_producer_failure_leaves_the_terminal_restored() -> None:
+    """The failure a reader thread reports is raised on the loop's thread, so
+    it unwinds through the same `finally` a synchronous read failure did."""
+    stream = EventQueue()
+    stream.fail(RuntimeError("boom"))
+    port = FakePort([])
     with pytest.raises(RuntimeError, match="boom"):
-        run_editor(FakePort([]), source=source)
-    assert source.closed
+        run_editor(port, events=stream)
+    assert port.restored
+
+
+def test_a_stream_that_runs_dry_ends_the_run_rather_than_blocking() -> None:
+    """A closed, drained queue is the end of input: the loop does not sit in
+    `next_event` waiting for a producer that has already stopped."""
+    port = FakePort([])
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted(keys("a")))
+    assert port.restored
 
 
 def test_cli_rejects_non_tty(capsys: pytest.CaptureFixture[str]) -> None:
@@ -719,7 +729,7 @@ def test_resize_event_redraws_at_the_new_size() -> None:
     """V3 wiring: a Resize on the stream reaches the session as a command and
     every later frame is drawn at the new size. FakePort starts at 10x3."""
     port = FakePort([])
-    run_editor(port, source=ScriptedSource([Key("a"), Resize(30, 6), Key("\x07")]))
+    run_editor(port, events=scripted([Key("a"), Resize(30, 6), Key("\x07")]))
     frames = _frame_rows(port)
     # Frames before the resize are 10 wide, after it 30 — and the buffer
     # content survived the resize.
@@ -740,10 +750,10 @@ def test_resize_redraw_carries_a_readiness_marker() -> None:
     swallows the *next* input's marker and shifts every epoch after it.
     """
     keyed = FakePort([])
-    run_editor(keyed, source=ScriptedSource(keys("a", "\x07")))
+    run_editor(keyed, events=scripted(keys("a", "\x07")))
 
     resized = FakePort([])
-    run_editor(resized, source=ScriptedSource([Key("a"), Resize(30, 6), Key("\x07")]))
+    run_editor(resized, events=scripted([Key("a"), Resize(30, 6), Key("\x07")]))
 
     written = "".join(resized.outputs)
     baseline = "".join(keyed.outputs)
@@ -760,7 +770,7 @@ def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
     port = FakePort([])
     run_editor(
         port,
-        source=ScriptedSource(
+        events=scripted(
             [
                 Key("\x18"),
                 Key("\x06"),  # C-x C-f
@@ -815,17 +825,17 @@ class _GatedPort(FakePort):
         return size
 
 
-def _next_within(source: ThreadedTerminalSource, timeout: float = 5.0) -> InputEvent:
+def _next_within(stream: EventQueue, timeout: float = 5.0) -> InputEvent:
     """`next_event` once an event is known to be queued.
 
     The wait is a test-harness deadline, not a semantic one: it keeps a
     regression from hanging CI forever instead of failing.
     """
     deadline = time.monotonic() + timeout
-    while source._events.empty() and time.monotonic() < deadline:
+    while stream._events.empty() and time.monotonic() < deadline:
         time.sleep(0.005)
-    assert not source._events.empty(), "no event arrived within the deadline"
-    return source.next_event()
+    assert not stream._events.empty(), "no event arrived within the deadline"
+    return stream.next_event()
 
 
 def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
@@ -845,84 +855,92 @@ def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
         # Seed, then one unchanged poll, then the change.
         sizes=[(10, 3), (10, 3), (20, 5)],
     )
-    source = ThreadedTerminalSource(port, poll_interval=0.01)
+    stream = EventQueue()
+    readers = TerminalReaders(port, stream, poll_interval=0.01)
     try:
         # Keys arrive in the order the port produced them...
-        assert _next_within(source) == Key("a")
-        assert _next_within(source) == Key("b")
+        assert _next_within(stream) == Key("a")
+        assert _next_within(stream) == Key("b")
         # ...and the size change arrives as a Resize on the same queue. The
         # unchanged poll in between queued nothing, or this would be (10, 3).
-        assert _next_within(source) == Resize(20, 5)
+        assert _next_within(stream) == Resize(20, 5)
     finally:
-        source.close()
+        readers.close()
 
     # close() stopped the watcher.
-    assert not source._sizes.is_alive()
+    assert not readers._sizes.is_alive()
     # The key reader is parked in read_key and cannot be interrupted; it
     # notices the stop flag only when one more key arrives. Release it and
     # it delivers that key, then exits rather than looping again.
     assert port.parked.wait(timeout=5)
     port.release.set()
-    source._keys.join(timeout=5)
-    assert not source._keys.is_alive()
-    assert _next_within(source) == Key("z")
-    assert source._events.empty()
+    readers._keys.join(timeout=5)
+    assert not readers._keys.is_alive()
+    assert _next_within(stream) == Key("z")
+    assert stream._events.empty()
 
 
-def test_run_editor_defaults_to_the_threaded_source() -> None:
-    """The shipped editor gets the threaded source without being asked: the
+def test_run_editor_starts_the_terminal_readers_by_default() -> None:
+    """The shipped editor gets the reader threads without being asked: the
     default is production behavior and tests opt out, rather than production
     having to opt in.
 
     Substitutes the class rather than starting it, so this stays a test about
-    wiring and the thread count of the suite stays at one.
+    wiring and the thread count of the suite stays where the failure tests
+    below put it.
     """
-    built: list[TerminalPort] = []
+    built: list[tuple[TerminalPort, EventQueue]] = []
 
-    class RecordingSource(InputSource):
-        def __init__(self, port: TerminalPort) -> None:
-            built.append(port)
-            self.closed = False
-            self._events = [Key("\x07")]
-
-        def next_event(self) -> InputEvent:
-            return self._events.pop(0)
+    class RecordingReaders:
+        def __init__(self, port: TerminalPort, events: EventQueue) -> None:
+            built.append((port, events))
+            events.put(Key("\x07"))
 
         def close(self) -> None:
-            self.closed = True
+            pass
 
     port = FakePort([])
-    with patch.object(drei.terminal, "ThreadedTerminalSource", RecordingSource):
+    with patch.object(drei.terminal, "TerminalReaders", RecordingReaders):
         run_editor(port)
-    assert built == [port]
+    assert [pair[0] for pair in built] == [port]
+    # The readers were handed the very queue the loop consumes — the property
+    # that makes "one totally ordered input stream" true rather than a phrase,
+    # and the one the agent's reader will rely on in §C.2.
+    assert isinstance(built[0][1], EventQueue)
 
 
-class TestThreadedSourceFailures:
+class TestReaderFailures:
     """A dead reader thread must not look like a quiet one.
 
-    Found by adversarial review. A thread cannot raise into the loop, so
-    before this the loop blocked in `next_event` forever with the terminal
-    still in raw mode — and `C-g` could not reach it, because the thread that
-    would have delivered the `C-g` was the one that had died. On `main` the
-    same failure propagated out of a synchronous `read_key()` straight into
-    `port.restore()`, so this was a regression the seam introduced.
+    Found by adversarial review of slice 15. A thread cannot raise into the
+    loop, so before this the loop blocked in `next_event` forever with the
+    terminal still in raw mode — and `C-g` could not reach it, because the
+    thread that would have delivered the `C-g` was the one that had died. On
+    `main` the same failure propagated out of a synchronous `read_key()`
+    straight into `port.restore()`, so this was a regression the seam
+    introduced.
 
     These tests start threads, which the plan wanted confined to one test.
     Correctness wins: each failure is immediate and deterministic, and the
     alternative is an unquittable editor with no test naming it.
     """
 
+    @staticmethod
+    def _readers(port: TerminalPort) -> tuple[EventQueue, TerminalReaders]:
+        stream = EventQueue()
+        return stream, TerminalReaders(port, stream, poll_interval=0.01)
+
     def test_a_reader_exception_reaches_the_loop_instead_of_wedging_it(self) -> None:
         class BoomPort(FakePort):
             def read_key(self) -> str:
                 raise OSError(5, "Input/output error")
 
-        source = ThreadedTerminalSource(BoomPort([]), poll_interval=0.01)
+        stream, readers = self._readers(BoomPort([]))
         try:
             with pytest.raises(OSError, match="Input/output error"):
-                source.next_event()
+                stream.next_event()
         finally:
-            source.close()
+            readers.close()
 
     def test_end_of_input_ends_the_run_instead_of_spinning(self) -> None:
         """`read(1)` returns "" at EOF and keeps returning it.
@@ -937,12 +955,12 @@ class TestThreadedSourceFailures:
             def read_key(self) -> str:
                 return ""
 
-        source = ThreadedTerminalSource(EofPort([]), poll_interval=0.01)
+        stream, readers = self._readers(EofPort([]))
         try:
             with pytest.raises(EOFError):
-                source.next_event()
+                stream.next_event()
         finally:
-            source.close()
+            readers.close()
 
     def test_a_size_watcher_exception_reaches_the_loop(self) -> None:
         """A dead watcher silently loses every later resize, which is
@@ -960,25 +978,25 @@ class TestThreadedSourceFailures:
             def get_size(self) -> tuple[int, int]:
                 raise OSError("no tty")
 
-        source = ThreadedTerminalSource(UnsizeablePort([]), poll_interval=0.01)
+        stream, readers = self._readers(UnsizeablePort([]))
         try:
             with pytest.raises(OSError, match="no tty"):
-                source.next_event()
+                stream.next_event()
         finally:
             parked.set()
-            source.close()
+            readers.close()
 
-    def test_the_terminal_is_restored_when_the_source_cannot_be_built(self) -> None:
-        """`enter_raw()` has already happened by the time the default source
-        is constructed, so a failure there (a thread that will not start)
-        must still hand the terminal back."""
+    def test_the_terminal_is_restored_when_the_readers_cannot_be_started(self) -> None:
+        """`enter_raw()` has already happened by the time the readers are
+        started, so a failure there (a thread that will not start) must still
+        hand the terminal back."""
 
-        def explode(port: TerminalPort) -> InputSource:
+        def explode(port: TerminalPort, events: EventQueue) -> None:
             raise RuntimeError("can't start new thread")
 
         port = FakePort([])
         with (
-            patch.object(drei.terminal, "ThreadedTerminalSource", explode),
+            patch.object(drei.terminal, "TerminalReaders", explode),
             pytest.raises(RuntimeError, match="can't start new thread"),
         ):
             run_editor(port)

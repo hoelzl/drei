@@ -15,7 +15,8 @@ loop, one at a time, before the loop decides which command it becomes.
 
 from __future__ import annotations
 
-import abc
+import queue
+import threading
 from dataclasses import dataclass
 
 
@@ -52,18 +53,90 @@ class Resize:
 InputEvent = Key | Resize
 
 
-class InputSource(abc.ABC):
-    """A blocking, totally ordered stream of input events.
+class EndOfInput(Exception):
+    """The stream is closed and drained: there will be no more input.
 
-    The seam that replaces `port.read_key()` in the loop. Implementations may
-    own threads, queues, and clocks — all of which are adapter concerns and
-    all of which stay on this side of the boundary.
+    Not an error — it is how a run ends when nothing is left to consume. The
+    loop's own exit is a quit key; this is the backstop for a stream that ran
+    out from underneath it.
     """
 
-    @abc.abstractmethod
-    def next_event(self) -> InputEvent:
-        """Block until the next event is available, then return it."""
 
-    @abc.abstractmethod
+@dataclass(frozen=True, slots=True)
+class _ProducerFailed:
+    """Queued by a producer that is about to die, carrying why.
+
+    A thread cannot raise into the loop, and a dead producer must not look
+    like a quiet one: without this the loop blocks in `next_event` forever
+    holding the terminal in raw mode, and `C-g` cannot reach it because the
+    thread that would have delivered it is the one that died. It rides the
+    queue rather than jumping it, so input the producer already delivered is
+    still consumed first.
+    """
+
+    error: BaseException
+
+
+class _Closed:
+    """End-of-stream marker. Queued by `close`, never consumed."""
+
+
+_CLOSED = _Closed()
+
+
+class EventQueue:
+    """The blocking, totally ordered stream: the seam that replaced
+    `port.read_key()` in the loop.
+
+    Design 0005 D2 places asynchrony here and nowhere else: producer threads
+    own the blocking, the queue owns the ordering, and the loop below it sees
+    one event at a time. The queue itself owns no thread and no clock — it is
+    the meeting point, not a participant, which is why it can live in this
+    module and be shared by the terminal side and the agent side without
+    either importing the other.
+
+    Slice 15 made the *source* the abstraction and let each implementation own
+    its own queue. Adding a second producer showed that was the wrong seam:
+    what varies is the producers, and what must be singular is the mailbox —
+    "one totally ordered input stream" is only true if there is exactly one
+    queue. So the abstract source is gone and this is the concrete seam.
+    """
+
+    def __init__(self) -> None:
+        self._events: queue.Queue[InputEvent | _ProducerFailed | _Closed] = (
+            queue.Queue()
+        )
+        self._closing = threading.Event()
+
+    def put(self, event: InputEvent) -> None:
+        """Enqueue one event. Dropped once the queue is closed."""
+        if not self._closing.is_set():
+            self._events.put(event)
+
+    def fail(self, error: BaseException) -> None:
+        """Report that a producer died; `next_event` re-raises it in turn."""
+        if not self._closing.is_set():
+            self._events.put(_ProducerFailed(error))
+
+    def next_event(self) -> InputEvent:
+        event = self._events.get()
+        if isinstance(event, _Closed):
+            # Put it back: the end of input is a state, not a one-shot signal
+            # that the next call would forget.
+            self._events.put(event)
+            raise EndOfInput("the input stream is closed")
+        if isinstance(event, _ProducerFailed):
+            # Re-raised on the loop's thread, which restores the terminal on
+            # the way out — the same end state a synchronous read failure
+            # produced before any thread existed.
+            raise event.error
+        return event
+
     def close(self) -> None:
-        """Release whatever the source owns. Idempotent."""
+        """Stop accepting events and release a consumer already waiting.
+
+        The marker goes to the *back* of the queue, so whatever a producer
+        already delivered is still consumed before the run ends.
+        """
+        self._closing.set()
+        self._events.put(_CLOSED)
