@@ -1,6 +1,8 @@
 # 0004: Agent buffer identity
 
-**Status:** proposed — decision committed, drives the slice that fixes TD-1
+**Status:** accepted — implemented in full by plan
+`0014-agent-buffer-identity.md`, which paid TD-1. D6 (editability) is
+deliberately still open and belongs to §A.3.
 **Builds on:** `0003-hermes-drei-integration.md`
 **Does not revise:** 0001/0002/0003. It supplies a binding 0003 named but never
 defined.

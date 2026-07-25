@@ -1,38 +1,30 @@
 # Fourteenth slice: agent buffer identity
 
-**Status:** claimed (issue #34); plan merged (PR #35). **V1 landed** on
-`feat/agent-buffer-identity` as `7a0bd3b` — see the D1 amendment below, which
-corrects the plan as drafted. V2–V6 outstanding.
+**Status:** implemented (issue #34); plan merged (PR #35). V1–V5 landed on
+`feat/agent-buffer-identity` (`7a0bd3b`, `2886d58`, `f1a357a`, `bf34fea`,
+`b5e83a4`); V6 is the review and the code PR. Design 0004 is accepted.
 
-**Resuming here?** Read the D1 amendment first (the drafted rule was wrong),
-then *Where V1 left off*, then continue at V2 in *Implementation order*.
+**Reading this later?** The D1 amendment below corrects the plan as drafted —
+target resolution is *pinned for a delivery, re-resolved after the arm for
+everything else* — and that distinction is the one thing here a future reader
+must not lose.
 
-## Where V1 left off
+**How the shipped code differs from the plan as written:**
 
-- `dispatch` resolves a target: `pinned_id = self._target_of(command)` at the
-  top, `commit_id = pinned_id or self._current_id` after the match arm. The
-  four bookkeeping blocks and the write-back use `commit_id`; the focused
-  window's `WindowValue` is refreshed only when `commit_id` is the focused
-  buffer. No `self._state` remains in `dispatch`'s own body — that grep is an
-  acceptance check.
-- Both delivery commands carry `buffer_id: BufferId`; both delivery events
-  carry `buffer_id: str`. `apply_session_effects(effects, buffer_id=None)`
-  defaults to the focused buffer so pre-0004 callers still work — V2 is where
-  an unnamed or non-generated target becomes an error.
-- `tests/test_agent_buffer_identity.py` is the new home for this slice's
-  tests: four on targeting, five on the bookkeeping arm.
-- Nothing yet creates an agent buffer, so every production path still targets
-  the focused buffer. Behavior is unchanged; the full suite is the gate.
-
-**Two facts V1 turned up that V2 needs:**
-
-1. An unknown target currently raises `KeyError` from a plain dict lookup
-   (`self._buffers[pinned_id]`). V2's `ValueError` replaces it; until then the
-   property strategy in `test_session_properties.py` pins `buffer_id` to
-   `scratch` rather than generating ids, with a comment saying why.
-2. The *decisions* behind D3 (`kind` on the private `_BufferState`) and D4
-   (`CreateAgentBuffer` as a command, not a plain method) were confirmed by
-   the owner after the plan merged. They are not open questions.
+- `_target_of` became `_pinned_target(command, events)`, which also mints the
+  agent buffer for `CreateAgentBuffer`. Resolution is where creation happens,
+  so creation is pinned to its own buffer and cannot break the human's chains
+  — the plan did not say where creation would sit.
+- The minibuffer gate moved *above* target resolution. It has to: resolution
+  now has an effect (it can create a buffer), and a gated command must leave
+  no trace. Behavior-preserving, since every pinned command is gate-exempt.
+- Pin 1 is asserted in `test_agent_buffer_identity.py` (where the human's
+  buffer and the agent buffer are distinct) rather than rewritten in place;
+  `test_agent_delivery.py` focuses its agent buffer, so both halves are not
+  expressible there.
+- The V5 property runs deliveries through `apply_session_effects`, not raw
+  `DeliverSessionEffects` dispatches: a raw dispatch records the fold without
+  appending (the TD-2 seam), so the oracle is stated over whole deliveries.
 
 **Architecture gate:** design `0004-agent-buffer-identity.md`, which this slice
 implements in full. No new ports, no I/O, no protocol change, no new
