@@ -232,6 +232,72 @@ class CreateAgentBuffer:
 
 
 @dataclass(frozen=True, slots=True)
+class DisplayBuffer:
+    """Show a buffer in a window the user is not focused on (design 0005 D6).
+
+    Emacs's ``display-buffer``, reduced to what one slice needs. A turn's
+    transcript that exists but is nowhere on screen is a feature the user
+    cannot use: `C-c a` would send a prompt and nothing visible would happen.
+
+    The rule: split once if the frame holds a single window and the split gate
+    permits, then put the buffer in the window after the focused one. **Focus
+    never moves** — that is design 0004 D1's constraint, and it is why this is
+    a separate command from ``CreateAgentBuffer`` rather than part of it: the
+    buffer's *identity* is bound when the ACP session is established, and where
+    it is *shown* is a presentation decision the caller makes.
+
+    A frame too small to split is a silent no-op. The buffer still exists and
+    `C-x b` still reaches it; what it does not do is destroy the user's only
+    window to make room.
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: the
+    session is established on the peer's schedule, and swallowing this because
+    a prompt happened to be open would leave the transcript invisible for the
+    rest of the run.
+    """
+
+    buffer_id: BufferId
+
+
+@dataclass(frozen=True, slots=True)
+class PromptAgent:
+    """Open the minibuffer to compose a prompt for the agent (design 0005 D6).
+
+    A user command like ``FindFile``, not a delivery: it opens a text prompt
+    and nothing else. What the accepted text *means* is not the session's
+    business — it emits ``AgentPromptSubmitted`` and the pump decides whether
+    that requires spawning a child, waiting for a session, or holding the
+    prompt behind a turn already in flight. The session holds no
+    ``AcpMachine`` and learns nothing about ACP from this (0005 D7).
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class CreateGeneratedBuffer:
+    """Mint a generated buffer that no ACP session owns (design 0005 D6).
+
+    ``CreateAgentBuffer`` binds one buffer *per ACP session* because a
+    transcript belongs to a session. The agent's diagnostics do not: stderr is
+    a property of the child process, it arrives before any session exists, and
+    it must survive the session ending. So it gets a plain generated buffer,
+    named rather than bound.
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: the
+    first thing a misconfigured agent writes to stderr is why it is about to
+    die, and swallowing that because a prompt happened to be open would hide
+    the one message that explains the failure.
+
+    Idempotent by requested name, like ``CreateAgentBuffer`` is by session id:
+    a second dispatch returns the existing buffer and records nothing. The
+    *minted* id is not the requested name, though — the collision rule may
+    have produced ``*agent-log*<2>`` — so a caller reads it back with
+    ``generated_buffer_id`` rather than guessing.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
 class PromptPermission:
     """Open the choice minibuffer for a ``session/request_permission`` (B.8).
 
@@ -439,6 +505,28 @@ class PermissionDecided:
 
 
 @dataclass(frozen=True, slots=True)
+class BufferDisplayed:
+    """A buffer was shown in ``window`` without focus moving there."""
+
+    buffer_id: str
+    window: int
+
+
+@dataclass(frozen=True, slots=True)
+class AgentPromptSubmitted:
+    """The human accepted an agent prompt (design 0005 D6).
+
+    An event, not a call: the session records what the user asked for and the
+    pump reads it out of the outcome, exactly as it reads
+    ``PermissionDecided``. Both directions across that seam are events, which
+    is what keeps the protocol out of the session and the transcript a
+    complete record of what the user did.
+    """
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentTranscriptUpdated:
     """One session-effects delivery, recorded for the transcript oracle.
 
@@ -617,6 +705,8 @@ class CommandOutcome:
         | WindowsCollapsed
         | FrameResized
         | OpenFailed
+        | AgentPromptSubmitted
+        | BufferDisplayed
         | AgentTranscriptUpdated
         | AgentTextInserted,
         ...,

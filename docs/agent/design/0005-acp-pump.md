@@ -1,11 +1,11 @@
 # 0005: The ACP pump (design 0003 §C)
 
-**Status:** partially implemented — **D2** (the injection point) and **D4**
-(atomic delivery) shipped in plan `0015-input-events-and-resize.md` (slice
-15). D1 (streaming port), D3 (fairness over two live sources), D5
-(cancellation), and D6 (launcher and keymap) remain proposed and drive §C.2
-onward. Where slice 15 departed from this record, the departure is noted in
-place below.
+**Status:** implemented except **D5** (cancellation). D2 (the injection point)
+and D4 (atomic delivery) shipped in plan `0015-input-events-and-resize.md`;
+D1 (streaming port), D3 (fairness), D6 (launcher and lifecycle) and D7 (the
+pump owns the machine) shipped in plan `0016-acp-pump.md`. D5 stays proposed
+and is blocked on the `C-g` overload recorded in it. Where a slice departed
+from this record, the departure is noted in place below.
 **Builds on:** `0003-hermes-drei-integration.md`, `0004-agent-buffer-identity.md`
 **Does not revise:** 0001/0002/0003. It supplies the §C boundary 0003 assumed
 but never placed, and amends one 0003 §A.1 sentence (see *Amendments*).
@@ -69,6 +69,16 @@ Bytes, not lines: the codec (`JsonRpcDecoder`) is already chunk-safe and
 explicitly documents that the pump feeds it "whatever the pipe delivered".
 The port does no framing.
 
+**Amended by plan 0016 V1: `read` blocks.** The shape above was illustrative
+and this record left the signatures to the slice with tests. A never-blocking
+`read_available` has no way to *wait*, so every caller must invent a poll
+interval — and the caller is a reader thread that is allowed to block. The
+shipped port is `read(size) -> bytes`, blocking until at least one byte or end
+of stream, which is the contract `TerminalPort.read_key` already has and is
+read by the same kind of thread. `terminate()` is cooperative-then-hard, and
+the escalation is driven by a fake `Popen` because a child that survives a
+signal is platform-dependent to provoke and must not go untested.
+
 ### D2. The injection point: one event queue, not two blocking reads
 
 `run_editor` stops blocking on `read_key()` and instead consumes a single
@@ -121,6 +131,14 @@ a home now rather than inventing a second mechanism later.
 - **Keys are never starved.** When both a key and agent bytes are ready, the
   key goes first. A human's keystroke must not queue behind a paragraph of
   streamed text; agent output is by nature bursty and the human is not.
+
+  **Sharpened by plan 0016.** The priority lane is not "keys": it is
+  `Key | Resize`, which is *exactly* the set of events a verifier dispatches
+  and therefore exactly the set that carries a readiness marker. An event in
+  the lane is one somebody is waiting on; an event outside it arrived on the
+  peer's schedule and belongs to no input epoch. Fairness and evidence are the
+  same distinction, so a later slice adding an event kind answers both
+  questions at once by asking "does the verifier dispatch it?".
 - **Deliveries bypass the minibuffer gate** — already true and unchanged; a
   swallowed delivery would desync the fold, and a swallowed permission request
   would hang the agent.
@@ -169,7 +187,17 @@ question for the cancellation slice.
   `port.restore()`. A leaked child holding a pipe is worse than a garbled
   terminal.
 - **Stderr** never enters the wire decoder. It goes to a diagnostics buffer —
-  a second generated buffer in 0004's sense.
+  a second generated buffer in 0004's sense, `*agent-log*`, minted by a
+  `CreateGeneratedBuffer` command. Launch failures land there too, as the
+  normalized token `run_process` reports rather than as a traceback.
+- **The transcript is displayed** (plan 0016). A buffer that exists and is
+  nowhere on screen is a feature the user cannot use: `C-c a` would send a
+  prompt and nothing visible would happen. `DisplayBuffer` splits once if the
+  frame holds a single window and the split gate permits, then shows the
+  buffer in the window *after* the focused one. Focus never moves — 0004 D1's
+  constraint — which is why it is a command of its own rather than part of
+  `CreateAgentBuffer`: 0004 owns the buffer's identity, this owns where it is
+  seen. A frame too small to split shows nothing and breaks nothing.
 - **Unexpected exit** (`AgentExited`) mid-turn is a peer failure, not a crash:
   it is rendered into the transcript in the same shape as a `ProtocolError`,
   the machine returns to `DISCONNECTED`, and any pending permission prompt is
@@ -201,6 +229,18 @@ Layered, so that almost nothing depends on a real agent or a real thread:
    this should run in the ordinary suite.
 4. **Real `hermes acp`** — one smoke scenario behind an availability check,
    skipped when the binary is absent, mirroring the pinned-Emacs pattern.
+
+**The gap below is now reached, and the concrete test exists.**
+`tests/termverify/test_shipped_agent.py` drives a fake 0.9.0 agent through the
+shipped executable, and it is the one scenario in the suite whose wait is
+bounded by wall clock rather than by quiescence — because an agent delivery is
+a redraw the verifier did not dispatch, so there is no marker to wait on. The
+obligation `AGENTS.md` sets is discharged as far as Drei can discharge it: the
+gap is reduced to that test, and what remains is to take a second marker kind
+for non-input-driven quiescence to TermVerify as its own issue. Plan 0016
+deliberately did **not** invent a private marker; one the verifier's epoch
+counter does not know about would corrupt every epoch after it, which is the
+failure slice 15 demonstrated from the opposite direction.
 
 **One known evidence gap, recorded rather than glossed.** Readiness markers
 (OSC 7791) currently mark quiescence after each *dispatched key*, and

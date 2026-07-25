@@ -42,14 +42,21 @@ Direct/in-process and terminal profiles must exercise the same production comman
 
 Native filesystem, process, and terminal access is mediated by narrow explicit
 ports — Protocol definitions in the core, `System*` implementations at the
-edge, injected by the harness or `run_editor`. Two have shipped:
+edge, injected by the harness or `run_editor`. Four have shipped:
 
 - **`FilePort`** (`src/drei/files.py`) — `read`/`write` over text. It
   translates nothing: newline handling is the session's, per buffer, so a
   save cannot silently rewrite a file's line endings.
 - **`ProcessPort`** (`src/drei/process.py`) — blocking run-to-completion
   (`run(argv) -> ProcessResult`), with launch failures normalized to tokens
-  rather than raised. Deliberately not streaming; see the ACP subsystem below.
+  rather than raised. Deliberately not streaming: a conversation with a
+  long-lived child is a different port, not a wider version of this one.
+- **`StreamingProcessPort`** (`src/drei/streaming.py`) — `spawn(argv) ->
+  AgentProcess`, with blocking `read`/`read_stderr`, `write`, `poll` and a
+  cooperative-then-hard `terminate`. Bytes in and bytes out; framing belongs
+  to the codec, which is chunk-safe by construction.
+- **`TerminalPort`** (`src/drei/terminal.py`) — raw mode, one input unit,
+  writes, size, restore.
 
 Errors cross a port as **normalized tokens** (`not-found`,
 `permission-denied`, `io-error`, `no-file`), never as a locale-dependent OS
@@ -75,24 +82,42 @@ No module in `drei.acp` imports `subprocess`, `asyncio`, or does I/O. A
 and dispatched, so the transcript of events stays the oracle for agent-produced
 text exactly as it is for typed text.
 
-**Not yet built (§C):** the pump that owns a long-lived `hermes acp` child.
-Until it exists the subsystem is unreachable from the shipped editor: nothing
-constructs a machine, no key binds an agent command, and a `PermissionDecided`
-response is returned by the session but sent by nobody
-(`docs/technical-debt.md` TD-2). Its boundaries are decided in
-[design 0005](../agent/design/0005-acp-pump.md): a streaming port distinct
-from `ProcessPort`, one totally ordered `InputEvent` queue as the injection
-point in `run_editor` (adapter-side reader threads; the core still sees only
-an ordered command sequence), keys ahead of agent bytes, one delivery per
-loop iteration, and cancellation calling the machine's sweep before clearing
-the UI.
+**The pump (§C, `src/drei/pump.py`)** is the adapter that reaches all of it
+from the shipped editor, along the boundaries
+[design 0005](../agent/design/0005-acp-pump.md) placed:
+
+- **One totally ordered `InputEvent` queue** (`src/drei/input.py`) is the
+  injection point. Reader threads live in adapters — `TerminalReaders` for the
+  keyboard and the size watcher, `AgentReaders` for the child's two pipes —
+  and the loop pops one event at a time, so the core still sees nothing but an
+  ordered command sequence. The queue has **two lanes**: `Key | Resize` ahead
+  of everything else. That set is exactly the events a verifier dispatches,
+  which is also exactly the set that carries a readiness marker, so fairness
+  and evidence are one distinction.
+- **The pump owns the machine**, and `EditorSession` never does. Protocol
+  phase is transport state; putting it in the session would mean replay had to
+  reproduce it.
+- **Drain, then deliver once**: every frame a read completed is folded, and
+  the accumulated effects become a single dispatch and a single redraw.
+- **Lazy launch, visible failure**: the child spawns on the first `C-c a`, its
+  stderr and any launch failure go to an `*agent-log*` buffer as normalized
+  tokens, and `run_editor`'s `finally` terminates it.
+
+What remains unwired is turn **cancellation** — the machine's sweep and
+`AbortPendingPermissions` both exist and nothing triggers them, because the
+trigger design 0005 wants is `C-g` and `C-g` currently exits the editor
+(`docs/technical-debt.md` TD-2).
 
 Where a transcript lands is decided separately in
 [design 0004](../agent/design/0004-agent-buffer-identity.md): one **agent
 buffer** per ACP session, named `*agent*`, created when the session is
 established. Deliveries carry their target buffer id in both command and
 event — focus is never consulted — and only a *generated* buffer (one that
-visits no file) may receive one.
+visits no file) may receive one. Where it is *shown* is a separate command,
+`DisplayBuffer`: another window, never the focused one, splitting once if the
+frame permits. A transcript nowhere on screen would be a feature the user
+cannot use; a transcript that stole focus would be the interruption design
+0004 forbids.
 
 ## Session-scoped vs buffer-scoped state
 

@@ -14,6 +14,7 @@ from drei.commands import (
     KillLine,
     KillRegion,
     OtherWindow,
+    PromptAgent,
     SaveBuffer,
     SetMark,
     SplitWindow,
@@ -40,7 +41,13 @@ _META_KEYS: dict[str, Command] = {
     "M-y": YankPop(),
 }
 
+# Emacs reserves C-c for the user and the major mode, which is exactly where
+# an editor-specific command like "talk to the agent" belongs. C-x is the
+# global prefix and stays that.
+_PREFIXES = frozenset({"C-x", "C-c"})
+
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
+    ("C-c", "a"): PromptAgent(),
     ("C-x", "C-s"): SaveBuffer(),
     ("C-x", "C-x"): ExchangePointAndMark(),
     ("C-x", "u"): Undo(),
@@ -79,8 +86,8 @@ def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingK
         # silent unresolved key: no quit, no echo, and the mark survives.
         # Emacs cancels the prefix and quits. See docs/technical-debt.md.
         return UnresolvedKey(f"{pending} {key}")
-    if key == "C-x":
-        return PendingKey("C-x")
+    if key in _PREFIXES:
+        return PendingKey(key)
     if key in _CONTROL_KEYS:
         return _CONTROL_KEYS[key]
     if key in _META_KEYS:

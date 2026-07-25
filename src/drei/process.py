@@ -40,11 +40,12 @@ class ProcessTimedOut(Exception):
 class ProcessPort(Protocol):
     """Effect port for launching a child process and capturing its output.
 
-    TODO: [tech-debt] TD-2 — run-to-completion only (plan 0008's deliberate
-    scoping). It cannot speak to a long-lived ``hermes acp`` child. Design
-    0005 D1 keeps this port exactly as it is and adds a separate
-    ``StreamingProcessPort`` rather than widening it. See
-    docs/technical-debt.md.
+    Run-to-completion by design, not by omission (plan 0008's deliberate
+    scoping). The long-lived ``hermes acp`` child is spoken to through
+    :class:`~drei.streaming.StreamingProcessPort`, a separate port at the same
+    architectural level: conflating "run a tool and collect its output" with
+    "hold a conversation with a child process" would make this simple,
+    heavily-used port carry lifecycle concerns it does not need.
     """
 
     def run(

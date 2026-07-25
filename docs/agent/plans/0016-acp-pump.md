@@ -1,6 +1,93 @@
 # Sixteenth slice: the ACP pump (§C.2)
 
-**Status:** ready (issue #40).
+**Status:** implemented (issue #40).
+
+Six things this plan did not anticipate, corrected in place where they appear:
+
+- **V2 and V3 could not be separated.** Widening `InputEvent` made mypy reject
+  `event.char` in the loop, which is slice 15's promise working exactly as
+  intended ("an addition to a union, not a second rewrite of the loop") — but
+  it does mean the kinds, their producer, and their consumer are one change.
+  A typed union forces its consumer to be total; that is a feature, and it is
+  also a constraint on how a slice can be cut.
+- **`InputSource` and `SynchronousTerminalSource` are gone** (D4). The plan
+  said the queue would move out of `ThreadedTerminalSource`; it did not
+  follow that through. With the queue as the seam, the abstract source had one
+  implementation and no polymorphic consumer, and the synchronous source was a
+  test-only class living in `src/` because tests needed something to pull
+  from. Tests script the queue directly now, which is what production does.
+- **`DisplayBuffer` was missing, and the evidence found it.** See the section
+  below.
+- **`--agent-command` takes one occurrence per argument**, not one
+  space-separated string (D8). An interpreter path with a space in it is
+  routine on Windows and shell quoting rules differ between platforms.
+- **`EditorSession.apply_permission_decision` is deleted.** Its whole body was
+  "call the pure `resolve_permission`", and its docstring carried a TODO
+  saying no pump existed to call it. The pump calls the function directly,
+  which is what 0005 D7 actually asks for: the machine is transport state, and
+  a session method that takes one only looked like ownership.
+- **Effects produced before the agent buffer exists are held, not dropped**
+  (D5). The handshake is two round trips long, and a child that dies inside it
+  produces the only account of the failure there will ever be.
+
+**The gap the end-to-end scenario found.** The agent buffer was created and
+never displayed, so `C-c a` sent a prompt and *nothing visible happened*. The
+TermVerify scenario could not observe its own subject without `C-x b *agent*`
+— and switching before the buffer existed would have created a decoy buffer of
+that name, so the scenario was not merely awkward but unwritable. A feature the
+evidence cannot see is a feature the user cannot see. `DisplayBuffer` is the
+answer: split once if the frame holds a single window and the split gate
+permits, then show the buffer in the window *after* the focused one, never
+moving focus. It is a separate command from `CreateAgentBuffer` because design
+0004 D1 owns the buffer's *identity* and this owns its *presentation*; folding
+it in would have changed a contract slice 14 pinned.
+
+**What D7's owned risk turned out to be:** nothing. `C-c` reaches the editor
+through ConPTY, because raw mode has already cleared `ENABLE_PROCESSED_INPUT`.
+No fallback to `C-x a`, no parity row for an abbrev-prefix collision.
+
+**What the adversarial review found (V6).** Two merge-blockers and seven
+assertions that could not fail, all confirmed by mutation and all fixed:
+
+- **A pipe write blocked the loop thread.** `SystemAgentProcess.write` runs on
+  `run_editor`'s thread, and a pipe write blocks once the kernel buffer fills
+  and the peer is not draining — measured at a *single 4 KB chunk* against a
+  child that never reads. The editor would stop consuming input with the
+  terminal still raw and `C-g` unable to reach it: exactly the wedge slice
+  15's review found in the reader, arriving from the other direction. Drei's
+  own writes are small, but how many it makes is peer-driven — the machine
+  answers every `fs/*` and `terminal/*` request the agent sends. Fixed with a
+  writer thread (`AgentIo`); the loop now hands bytes to a queue and never
+  blocks. The test-side channel stays synchronous, so the write-to-a-dead-child
+  path is still observable where it is raised.
+- **`_send_pending` bypassed the `OSError` guard**, so a child that died
+  between `session/new` and `session/prompt` raised `BrokenPipeError` out of
+  the pump and took the editor with it. It writes through `_write` now.
+- **A second prompt typed during one turn was silently discarded** — the held
+  prompt was a slot, not a queue, so `"second"` vanished between `"first"` and
+  `"third"`. That is the same silence the slot exists to prevent, at n > 1. It
+  is a list now, sent one per completed turn, and prompts still unsent when the
+  child dies are reported rather than dropped.
+- **`after_command` was the one entry point with no error containment**:
+  answering a permission the machine no longer tracks raised `AcpStateError`.
+  Every other entry point degrades a peer problem to a transcript line; this
+  one does too now.
+- **Seven tests could not fail.** Two asserted an ordering they never
+  observed ("in the transcript *before* the prompt opens", "answered
+  *immediately*"); one asserted an outcome the bug also produced; one built its
+  own passing answer (`order.insert(0, "close" ...)`) and passed with the two
+  calls reversed; two left `_reset`'s decoder and transcript clearing
+  unpinned; and **nothing outside the Windows-only ConPTY scenario asserted
+  that the pump displays the transcript at all**, so a Linux CI leg would
+  never have noticed it going away. Each is now mutation-verified.
+
+Also fixed: a `TerminalReaders` thread leak inherited from slice 15 (if the
+second thread fails to start, the first ran on with no owner), and two
+docstrings that claimed the opposite of the code — `CreateGeneratedBuffer`
+said "not idempotent" after it was made idempotent, and `_ProducerFailed`
+said it never jumps the queue when it deliberately jumps the agent lanes.
+
+TD-2 is **edited, not removed**: cancellation is what remains of it.
 
 **Architecture gate:** design `0005-acp-pump.md` — **D1** (the streaming port),
 **D3** (serialization and fairness), **D6** (child lifecycle and failure), and

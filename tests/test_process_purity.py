@@ -1,10 +1,12 @@
 """Architectural guard: process/subprocess access stays behind the port.
 
-The deterministic command path must never launch or signal a child. Only
-``drei.process`` (the effect port module) may import ``subprocess``; and no
-core module may launch via ``os`` either — ``import os`` is allowed only for
-non-process uses (``os.get_terminal_size``), so a separate attribute check
-flags ``os.<launch>`` calls. This pins design 0001/0003's effect-port rule.
+The deterministic command path must never launch or signal a child. Only the
+two process *ports* — ``drei.process`` (run-to-completion) and
+``drei.streaming`` (the long-lived ACP child, design 0005 D1) — may import
+``subprocess``; and no core module may launch via ``os`` either — ``import
+os`` is allowed only for non-process uses (``os.get_terminal_size``), so a
+separate attribute check flags ``os.<launch>`` calls. This pins design
+0001/0003's effect-port rule.
 """
 
 from __future__ import annotations
@@ -56,15 +58,23 @@ def _os_launch_calls(source: str) -> set[str]:
     return hits
 
 
+# The port modules, which exist precisely to hold this import. Two, not one,
+# because design 0005 D1 keeps the blocking run-to-completion port exactly as
+# it is and adds the streaming one beside it rather than widening it: the
+# boundary this guard pins is "only a port spawns a child", not "only one
+# file does".
+_PORT_MODULES = {"process.py", "streaming.py"}
+
+
 def _core_sources() -> list[tuple[str, str]]:
-    """(filename, source) for every core module except the process port.
+    """(filename, source) for every core module except the process ports.
 
     Recursive (``**/*.py``) so subpackages like ``drei.acp`` are covered.
     """
     return [
         (str(path.relative_to(_SRC)), path.read_text(encoding="utf-8"))
         for path in sorted(_SRC.glob("**/*.py"))
-        if path.name != "process.py"
+        if path.name not in _PORT_MODULES
     ]
 
 
@@ -106,9 +116,11 @@ def test_os_launch_detector_catches_each_launch_family() -> None:
     assert "os.get_terminal_size" not in hits
 
 
-def test_process_module_is_the_port_boundary() -> None:
-    # Sanity: the port module does import subprocess (it's the whole point),
-    # so the import guard can't be trivially satisfied by an empty allowlist.
-    assert "subprocess" in _imported_modules(
-        (_SRC / "process.py").read_text(encoding="utf-8")
-    )
+def test_the_port_modules_are_the_boundary() -> None:
+    # Sanity: the port modules do import subprocess (it is the whole point),
+    # so the import guard cannot be trivially satisfied by an allowlist that
+    # names files which never needed the exemption.
+    for name in sorted(_PORT_MODULES):
+        assert "subprocess" in _imported_modules(
+            (_SRC / name).read_text(encoding="utf-8")
+        ), name

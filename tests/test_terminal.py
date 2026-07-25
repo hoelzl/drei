@@ -10,13 +10,21 @@ import pytest
 
 import drei.terminal
 from drei.files import SystemFilePort
-from drei.input import InputEvent, InputSource, Key, Resize
+from drei.input import (
+    AgentBytes,
+    AgentExited,
+    AgentStderr,
+    EndOfInput,
+    EventQueue,
+    InputEvent,
+    Key,
+    Resize,
+)
 from drei.terminal import (
     _CLEAR_SCREEN,
     READINESS_MARKER,
-    SynchronousTerminalSource,
     TerminalPort,
-    ThreadedTerminalSource,
+    TerminalReaders,
     run_editor,
 )
 
@@ -47,15 +55,30 @@ class FakePort(TerminalPort):
         self.restored = True
 
 
-def run_with_keys(port: FakePort, **kwargs: object) -> None:
-    """Drive the loop over the port's scripted bytes, synchronously.
+def scripted(events: list[InputEvent]) -> EventQueue:
+    """A queue holding exactly these events, closed behind them.
 
-    The production default is the threaded source (plan 0015 V4). These tests
-    pin the *loop*, not the threads, so they inject the synchronous source —
-    which is exactly the `read_key()` the loop used to call inline, making
-    them the unchanged regression gate they were before the seam existed.
+    Design 0005's verification layer 1: no thread, no clock, no port. Closing
+    it means a run that forgets to quit ends in `EndOfInput` rather than
+    blocking the suite forever — the safety the old scripted source got from
+    popping an empty list.
     """
-    run_editor(port, source=SynchronousTerminalSource(port), **kwargs)  # type: ignore[arg-type]
+    stream = EventQueue()
+    for event in events:
+        stream.put(event)
+    stream.close()
+    return stream
+
+
+def run_with_keys(port: FakePort, **kwargs: object) -> None:
+    """Drive the loop over the port's scripted characters.
+
+    The port's `inputs` are turned into `Key` events rather than read through
+    `read_key`, because production keys arrive the same way: a reader thread
+    puts them on the queue. These tests pin the *loop*, so they skip the
+    thread and script the queue directly.
+    """
+    run_editor(port, events=scripted(keys(*port.inputs)), **kwargs)  # type: ignore[arg-type]
 
 
 def test_editor_writes_readiness_and_exits_on_quit() -> None:
@@ -74,13 +97,20 @@ def test_editor_inserts_text_and_renders() -> None:
 
 
 def test_editor_restores_on_exception() -> None:
+    """A terminal that cannot be read hands the terminal back.
+
+    Driven through the *production* path — real reader threads over a port
+    whose `read_key` raises — because that is now the only way a port failure
+    can reach the loop at all. Deterministic: the failure is immediate.
+    """
+
     class BoomPort(FakePort):
         def read_key(self) -> str:
             raise RuntimeError("boom")
 
     port = BoomPort([])
     with pytest.raises(RuntimeError, match="boom"):
-        run_with_keys(port)
+        run_editor(port)
     assert port.restored
 
 
@@ -319,25 +349,6 @@ def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
     assert port.restored
 
 
-class ScriptedSource(InputSource):
-    """A list of input events, in order (plan 0015 D2, verification layer 1).
-
-    Every test but V4's touches the loop through one of these: no thread, no
-    port, no clock. Exhaustion raises like a closed stream would, which is how
-    the existing suite already ends a run that forgets to quit.
-    """
-
-    def __init__(self, events: list[InputEvent]) -> None:
-        self.events = list(events)
-        self.closed = False
-
-    def next_event(self) -> InputEvent:
-        return self.events.pop(0)
-
-    def close(self) -> None:
-        self.closed = True
-
-
 def keys(*chars: str) -> list[InputEvent]:
     return [Key(char) for char in chars]
 
@@ -354,20 +365,28 @@ def test_loop_consumes_events_and_never_reads_the_port() -> None:
             raise AssertionError("run_editor read the port instead of the source")
 
     port = UnreadablePort([])
-    source = ScriptedSource(keys("a", "\x07"))
-    run_editor(port, source=source)
+    run_editor(port, events=scripted(keys("a", "\x07")))
     assert "a" in "".join(port.outputs)
 
 
-def test_loop_closes_the_source_even_when_the_body_raises() -> None:
-    class BoomSource(ScriptedSource):
-        def next_event(self) -> InputEvent:
-            raise RuntimeError("boom")
-
-    source = BoomSource([])
+def test_a_producer_failure_leaves_the_terminal_restored() -> None:
+    """The failure a reader thread reports is raised on the loop's thread, so
+    it unwinds through the same `finally` a synchronous read failure did."""
+    stream = EventQueue()
+    stream.fail(RuntimeError("boom"))
+    port = FakePort([])
     with pytest.raises(RuntimeError, match="boom"):
-        run_editor(FakePort([]), source=source)
-    assert source.closed
+        run_editor(port, events=stream)
+    assert port.restored
+
+
+def test_a_stream_that_runs_dry_ends_the_run_rather_than_blocking() -> None:
+    """A closed, drained queue is the end of input: the loop does not sit in
+    `next_event` waiting for a producer that has already stopped."""
+    port = FakePort([])
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted(keys("a")))
+    assert port.restored
 
 
 def test_cli_rejects_non_tty(capsys: pytest.CaptureFixture[str]) -> None:
@@ -406,6 +425,34 @@ def test_cli_launches_editor_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     main([])  # must not raise
     assert len(called) == 1
     assert isinstance(called[0], drei.terminal.SystemTerminalPort)
+
+
+def test_cli_agent_command_defaults_and_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One occurrence per argument, not one space-separated string: an agent
+    path with a space in it is ordinary on both platforms, and shell-style
+    quoting rules differ between them."""
+    import sys
+
+    import drei.terminal
+    from drei.cli import main
+    from drei.pump import DEFAULT_AGENT_ARGV
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        drei.terminal,
+        "run_editor",
+        lambda port, **kw: seen.append(kw["agent_argv"]),
+    )
+
+    main([])
+    assert seen[-1] == DEFAULT_AGENT_ARGV
+
+    main(["--agent-command", "C:/Program Files/py.exe", "--agent-command", "agent.py"])
+    assert seen[-1] == ("C:/Program Files/py.exe", "agent.py")
 
 
 def test_cli_opens_existing_file(
@@ -719,7 +766,7 @@ def test_resize_event_redraws_at_the_new_size() -> None:
     """V3 wiring: a Resize on the stream reaches the session as a command and
     every later frame is drawn at the new size. FakePort starts at 10x3."""
     port = FakePort([])
-    run_editor(port, source=ScriptedSource([Key("a"), Resize(30, 6), Key("\x07")]))
+    run_editor(port, events=scripted([Key("a"), Resize(30, 6), Key("\x07")]))
     frames = _frame_rows(port)
     # Frames before the resize are 10 wide, after it 30 — and the buffer
     # content survived the resize.
@@ -740,10 +787,10 @@ def test_resize_redraw_carries_a_readiness_marker() -> None:
     swallows the *next* input's marker and shifts every epoch after it.
     """
     keyed = FakePort([])
-    run_editor(keyed, source=ScriptedSource(keys("a", "\x07")))
+    run_editor(keyed, events=scripted(keys("a", "\x07")))
 
     resized = FakePort([])
-    run_editor(resized, source=ScriptedSource([Key("a"), Resize(30, 6), Key("\x07")]))
+    run_editor(resized, events=scripted([Key("a"), Resize(30, 6), Key("\x07")]))
 
     written = "".join(resized.outputs)
     baseline = "".join(keyed.outputs)
@@ -760,7 +807,7 @@ def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
     port = FakePort([])
     run_editor(
         port,
-        source=ScriptedSource(
+        events=scripted(
             [
                 Key("\x18"),
                 Key("\x06"),  # C-x C-f
@@ -783,6 +830,146 @@ def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
     assert any(len(row) == 30 for row in prompts), prompts
     # ...and the "x" went into that same prompt rather than the buffer.
     assert any(row.rstrip() == "Find file: x" for row in prompts), prompts
+
+
+class TestLoopAgentArms:
+    """The loop's half of §C.2: agent events become pump calls and redraws.
+
+    The pump itself is proved in `test_pump.py`; what these pin is the wiring
+    — that each event kind reaches the right entry point, and that an agent
+    redraw carries no readiness marker.
+    """
+
+    @staticmethod
+    def _recording(
+        journal: list[tuple[str, object]] | None = None,
+    ) -> tuple[list[tuple[str, object]], type]:
+        """A stand-in pump that records what the loop asked of it.
+
+        ``journal`` lets a caller share one ordered log with the port, so a
+        test can assert *when* the pump was called relative to terminal I/O
+        rather than only that it was.
+        """
+        calls: list[tuple[str, object]] = journal if journal is not None else []
+
+        class RecordingPump:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def receive(self, data: bytes, harness: object) -> None:
+                calls.append(("receive", data))
+
+            def diagnostics(self, data: bytes, harness: object) -> None:
+                calls.append(("diagnostics", data))
+
+            def exited(self, status: int | None, harness: object) -> None:
+                calls.append(("exited", status))
+
+            def after_command(self, outcome: object, harness: object) -> None:
+                calls.append(("after_command", None))
+
+            def close(self) -> None:
+                calls.append(("close", None))
+
+        return calls, RecordingPump
+
+    def test_each_agent_event_reaches_its_entry_point(self) -> None:
+        """No quit key in the script: a `Key` sits in the priority lane and
+        would preempt every agent event queued behind it (design 0005 D3), so
+        this run ends by running out of input instead."""
+        calls, recording = self._recording()
+        port = FakePort([])
+        with (
+            patch.object(drei.terminal, "AgentPump", recording),
+            pytest.raises(EndOfInput),
+        ):
+            run_editor(
+                port,
+                events=scripted(
+                    [
+                        AgentBytes(b"{}\n"),
+                        AgentStderr(b"warning\n"),
+                        AgentExited(3),
+                    ]
+                ),
+            )
+        assert calls[:3] == [
+            ("receive", b"{}\n"),
+            ("diagnostics", b"warning\n"),
+            ("exited", 3),
+        ]
+        assert calls[-1] == ("close", None)
+
+    def test_a_key_preempts_agent_output_the_loop_has_not_reached(self) -> None:
+        """The fairness rule, visible from the loop: a `C-g` queued *after* a
+        burst of agent bytes still quits first. A human's keystroke must not
+        wait behind a paragraph of streamed text."""
+        calls, recording = self._recording()
+        port = FakePort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            run_editor(
+                port,
+                events=scripted([AgentBytes(b"a lot of text\n"), Key("\x07")]),
+            )
+
+        assert ("receive", b"a lot of text\n") not in calls
+
+    def test_an_agent_redraw_carries_no_readiness_marker(self) -> None:
+        """The one deliberate gap in the cooperation protocol. An agent
+        delivery is a redraw the verifier did not dispatch, so it belongs to
+        no input epoch — a marker here would be counted against the *next*
+        keystroke and shift every epoch after it. Design 0005 records the cost:
+        an end-to-end agent scenario waits on frame content, not quiescence.
+        """
+        _, recording = self._recording()
+        baseline = FakePort([])
+        streamed = FakePort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            with pytest.raises(EndOfInput):
+                run_editor(baseline, events=scripted([]))
+            with pytest.raises(EndOfInput):
+                run_editor(streamed, events=scripted([AgentBytes(b"{}\n")]))
+
+        written = "".join(streamed.outputs)
+        quiet = "".join(baseline.outputs)
+        # The agent event added a frame...
+        assert written.count(_CLEAR_SCREEN) == quiet.count(_CLEAR_SCREEN) + 1
+        # ...and no marker with it.
+        assert written.count(READINESS_MARKER) == quiet.count(READINESS_MARKER)
+
+    def test_every_key_outcome_is_offered_to_the_pump(self) -> None:
+        """`after_command` is how a permission answer and a submitted prompt
+        get out of the session, so it has to run after every key that produced
+        an outcome — not only the ones that look agent-related."""
+        calls, recording = self._recording()
+        port = FakePort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            run_editor(port, events=scripted(keys("a", "\x07")))
+
+        assert [name for name, _ in calls].count("after_command") == 2
+
+    def test_the_child_is_terminated_before_the_terminal_is_restored(self) -> None:
+        """A leaked `hermes acp` holding a pipe outlives a garbled terminal,
+        and terminating it is what releases the agent reader threads.
+
+        One shared journal, written by both the pump and the port, so the
+        assertion is about *order* — an earlier version appended "close" to
+        the front unconditionally and passed with the two calls reversed.
+        """
+        journal: list[tuple[str, object]] = []
+        _, recording = self._recording(journal)
+
+        class TrackingPort(FakePort):
+            def restore(self) -> None:
+                journal.append(("restore", None))
+                super().restore()
+
+        port = TrackingPort([])
+        with patch.object(drei.terminal, "AgentPump", recording):
+            run_editor(port, events=scripted(keys("\x07")))
+
+        names = [name for name, _ in journal]
+        assert names[-2:] == ["close", "restore"]
 
 
 class _GatedPort(FakePort):
@@ -815,17 +1002,21 @@ class _GatedPort(FakePort):
         return size
 
 
-def _next_within(source: ThreadedTerminalSource, timeout: float = 5.0) -> InputEvent:
+def _next_within(stream: EventQueue, timeout: float = 5.0) -> InputEvent:
     """`next_event` once an event is known to be queued.
 
     The wait is a test-harness deadline, not a semantic one: it keeps a
     regression from hanging CI forever instead of failing.
     """
     deadline = time.monotonic() + timeout
-    while source._events.empty() and time.monotonic() < deadline:
+    while _empty(stream) and time.monotonic() < deadline:
         time.sleep(0.005)
-    assert not source._events.empty(), "no event arrived within the deadline"
-    return source.next_event()
+    assert not _empty(stream), "no event arrived within the deadline"
+    return stream.next_event()
+
+
+def _empty(stream: EventQueue) -> bool:
+    return not stream._priority and not stream._background
 
 
 def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
@@ -845,84 +1036,92 @@ def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
         # Seed, then one unchanged poll, then the change.
         sizes=[(10, 3), (10, 3), (20, 5)],
     )
-    source = ThreadedTerminalSource(port, poll_interval=0.01)
+    stream = EventQueue()
+    readers = TerminalReaders(port, stream, poll_interval=0.01)
     try:
         # Keys arrive in the order the port produced them...
-        assert _next_within(source) == Key("a")
-        assert _next_within(source) == Key("b")
+        assert _next_within(stream) == Key("a")
+        assert _next_within(stream) == Key("b")
         # ...and the size change arrives as a Resize on the same queue. The
         # unchanged poll in between queued nothing, or this would be (10, 3).
-        assert _next_within(source) == Resize(20, 5)
+        assert _next_within(stream) == Resize(20, 5)
     finally:
-        source.close()
+        readers.close()
 
     # close() stopped the watcher.
-    assert not source._sizes.is_alive()
+    assert not readers._sizes.is_alive()
     # The key reader is parked in read_key and cannot be interrupted; it
     # notices the stop flag only when one more key arrives. Release it and
     # it delivers that key, then exits rather than looping again.
     assert port.parked.wait(timeout=5)
     port.release.set()
-    source._keys.join(timeout=5)
-    assert not source._keys.is_alive()
-    assert _next_within(source) == Key("z")
-    assert source._events.empty()
+    readers._keys.join(timeout=5)
+    assert not readers._keys.is_alive()
+    assert _next_within(stream) == Key("z")
+    assert _empty(stream)
 
 
-def test_run_editor_defaults_to_the_threaded_source() -> None:
-    """The shipped editor gets the threaded source without being asked: the
+def test_run_editor_starts_the_terminal_readers_by_default() -> None:
+    """The shipped editor gets the reader threads without being asked: the
     default is production behavior and tests opt out, rather than production
     having to opt in.
 
     Substitutes the class rather than starting it, so this stays a test about
-    wiring and the thread count of the suite stays at one.
+    wiring and the thread count of the suite stays where the failure tests
+    below put it.
     """
-    built: list[TerminalPort] = []
+    built: list[tuple[TerminalPort, EventQueue]] = []
 
-    class RecordingSource(InputSource):
-        def __init__(self, port: TerminalPort) -> None:
-            built.append(port)
-            self.closed = False
-            self._events = [Key("\x07")]
-
-        def next_event(self) -> InputEvent:
-            return self._events.pop(0)
+    class RecordingReaders:
+        def __init__(self, port: TerminalPort, events: EventQueue) -> None:
+            built.append((port, events))
+            events.put(Key("\x07"))
 
         def close(self) -> None:
-            self.closed = True
+            pass
 
     port = FakePort([])
-    with patch.object(drei.terminal, "ThreadedTerminalSource", RecordingSource):
+    with patch.object(drei.terminal, "TerminalReaders", RecordingReaders):
         run_editor(port)
-    assert built == [port]
+    assert [pair[0] for pair in built] == [port]
+    # The readers were handed the very queue the loop consumes — the property
+    # that makes "one totally ordered input stream" true rather than a phrase,
+    # and the one the agent's reader will rely on in §C.2.
+    assert isinstance(built[0][1], EventQueue)
 
 
-class TestThreadedSourceFailures:
+class TestReaderFailures:
     """A dead reader thread must not look like a quiet one.
 
-    Found by adversarial review. A thread cannot raise into the loop, so
-    before this the loop blocked in `next_event` forever with the terminal
-    still in raw mode — and `C-g` could not reach it, because the thread that
-    would have delivered the `C-g` was the one that had died. On `main` the
-    same failure propagated out of a synchronous `read_key()` straight into
-    `port.restore()`, so this was a regression the seam introduced.
+    Found by adversarial review of slice 15. A thread cannot raise into the
+    loop, so before this the loop blocked in `next_event` forever with the
+    terminal still in raw mode — and `C-g` could not reach it, because the
+    thread that would have delivered the `C-g` was the one that had died. On
+    `main` the same failure propagated out of a synchronous `read_key()`
+    straight into `port.restore()`, so this was a regression the seam
+    introduced.
 
     These tests start threads, which the plan wanted confined to one test.
     Correctness wins: each failure is immediate and deterministic, and the
     alternative is an unquittable editor with no test naming it.
     """
 
+    @staticmethod
+    def _readers(port: TerminalPort) -> tuple[EventQueue, TerminalReaders]:
+        stream = EventQueue()
+        return stream, TerminalReaders(port, stream, poll_interval=0.01)
+
     def test_a_reader_exception_reaches_the_loop_instead_of_wedging_it(self) -> None:
         class BoomPort(FakePort):
             def read_key(self) -> str:
                 raise OSError(5, "Input/output error")
 
-        source = ThreadedTerminalSource(BoomPort([]), poll_interval=0.01)
+        stream, readers = self._readers(BoomPort([]))
         try:
             with pytest.raises(OSError, match="Input/output error"):
-                source.next_event()
+                stream.next_event()
         finally:
-            source.close()
+            readers.close()
 
     def test_end_of_input_ends_the_run_instead_of_spinning(self) -> None:
         """`read(1)` returns "" at EOF and keeps returning it.
@@ -937,12 +1136,12 @@ class TestThreadedSourceFailures:
             def read_key(self) -> str:
                 return ""
 
-        source = ThreadedTerminalSource(EofPort([]), poll_interval=0.01)
+        stream, readers = self._readers(EofPort([]))
         try:
             with pytest.raises(EOFError):
-                source.next_event()
+                stream.next_event()
         finally:
-            source.close()
+            readers.close()
 
     def test_a_size_watcher_exception_reaches_the_loop(self) -> None:
         """A dead watcher silently loses every later resize, which is
@@ -960,25 +1159,59 @@ class TestThreadedSourceFailures:
             def get_size(self) -> tuple[int, int]:
                 raise OSError("no tty")
 
-        source = ThreadedTerminalSource(UnsizeablePort([]), poll_interval=0.01)
+        stream, readers = self._readers(UnsizeablePort([]))
         try:
             with pytest.raises(OSError, match="no tty"):
-                source.next_event()
+                stream.next_event()
         finally:
             parked.set()
-            source.close()
+            readers.close()
 
-    def test_the_terminal_is_restored_when_the_source_cannot_be_built(self) -> None:
-        """`enter_raw()` has already happened by the time the default source
-        is constructed, so a failure there (a thread that will not start)
-        must still hand the terminal back."""
+    def test_a_half_started_reader_pair_stops_the_thread_that_did_start(
+        self,
+    ) -> None:
+        """The threads start one after the other. If the second will not
+        start, the first is running with no owner — `run_editor` never gets
+        its `readers` back, so nothing closes it and it goes on filling a
+        queue nobody reads."""
+        stream = EventQueue()
+        real_start = threading.Thread.start
+        started: list[threading.Thread] = []
 
-        def explode(port: TerminalPort) -> InputSource:
+        def once(self: threading.Thread) -> None:
+            if started:
+                raise RuntimeError("can't start new thread")
+            started.append(self)
+            real_start(self)
+
+        parked = threading.Event()
+
+        class ParkedPort(FakePort):
+            def read_key(self) -> str:
+                parked.wait(timeout=5)
+                return "\x07"
+
+        with (
+            patch.object(threading.Thread, "start", once),
+            pytest.raises(RuntimeError, match="can't start new thread"),
+        ):
+            TerminalReaders(ParkedPort([]), stream, poll_interval=0.01)
+
+        parked.set()
+        started[0].join(timeout=5)
+        assert not started[0].is_alive()
+
+    def test_the_terminal_is_restored_when_the_readers_cannot_be_started(self) -> None:
+        """`enter_raw()` has already happened by the time the readers are
+        started, so a failure there (a thread that will not start) must still
+        hand the terminal back."""
+
+        def explode(port: TerminalPort, events: EventQueue) -> None:
             raise RuntimeError("can't start new thread")
 
         port = FakePort([])
         with (
-            patch.object(drei.terminal, "ThreadedTerminalSource", explode),
+            patch.object(drei.terminal, "TerminalReaders", explode),
             pytest.raises(RuntimeError, match="can't start new thread"),
         ):
             run_editor(port)
