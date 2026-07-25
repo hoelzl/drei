@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import abc
 import os
+import queue
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Literal
 
@@ -169,6 +171,76 @@ class SynchronousTerminalSource(InputSource):
         """Nothing to release: the source owns no thread and no queue."""
 
 
+class ThreadedTerminalSource(InputSource):
+    """The production source: two reader threads feeding one queue.
+
+    Design 0005 D2 — there is no portable `select` over a Windows console
+    handle, so each input is read by a thread that is allowed to block, and
+    the threads meet on a `queue.Queue`. **The threads live entirely here.**
+    The loop pops one event at a time and the session sees only commands, so
+    the nondeterministic interleaving is serialized before it can reach
+    anything that has to be deterministic — and it is *recorded*, because
+    every event that changes state becomes a command in the transcript.
+
+    The size watcher polls instead of using SIGWINCH / the Windows console's
+    `WINDOW_BUFFER_SIZE_EVENT`: those share no shape across the two
+    platforms, and this is not the place to grow two platform paths. Polling
+    is a clock dependency in an *adapter*, which is where the rules allow one
+    — no editor semantics depend on the interval, only how soon a resize is
+    noticed (parity registry: presentation-only lag).
+
+    Startup race, owned and small: the watcher seeds its baseline with its own
+    `get_size()` call, while `run_editor` reads the size separately to build
+    the harness. A resize landing between the two is not reported, and the
+    frame keeps the size the loop read until the *next* resize. Closing it
+    would mean threading the initial size in and adding a construction-order
+    branch for a window of microseconds at startup.
+    """
+
+    def __init__(self, port: TerminalPort, *, poll_interval: float = 0.2) -> None:
+        self._port = port
+        self._events: queue.Queue[InputEvent] = queue.Queue()
+        self._stopped = threading.Event()
+        self._poll_interval = poll_interval
+        self._keys = threading.Thread(
+            target=self._read_keys, name="drei-input-keys", daemon=True
+        )
+        self._sizes = threading.Thread(
+            target=self._watch_size, name="drei-input-size", daemon=True
+        )
+        self._keys.start()
+        self._sizes.start()
+
+    def next_event(self) -> InputEvent:
+        return self._events.get()
+
+    def close(self) -> None:
+        """Stop the watcher and let the key reader go.
+
+        Only the watcher can be joined. The key reader is parked inside a
+        blocking `read_key()` that nothing portable can interrupt, so it is a
+        daemon: it notices the stop flag only if one more key ever arrives,
+        and otherwise dies with the process. Joining it would hang until the
+        user pressed a key.
+        """
+        self._stopped.set()
+        self._sizes.join(timeout=self._poll_interval * 10)
+
+    def _read_keys(self) -> None:
+        while not self._stopped.is_set():
+            self._events.put(Key(self._port.read_key()))
+
+    def _watch_size(self) -> None:
+        last = self._port.get_size()
+        # `wait` returns True only when the flag is set, so this both paces
+        # the poll and exits promptly on close — no sleep-then-check race.
+        while not self._stopped.wait(self._poll_interval):
+            size = self._port.get_size()
+            if size != last:
+                last = size
+                self._events.put(Resize(*size))
+
+
 def run_editor(
     port: TerminalPort,
     *,
@@ -182,19 +254,17 @@ def run_editor(
     Input arrives as one totally ordered stream of :class:`InputEvent` from
     ``source`` (design 0005 D2). ``port`` remains the output side and the
     source of the initial frame size; when ``source`` is omitted the loop
-    builds the default terminal source over the same port.
+    builds the production :class:`ThreadedTerminalSource` over the same port,
+    so the shipped editor observes resizes as they happen. Tests inject
+    either a scripted source or :class:`SynchronousTerminalSource`.
     """
     port.write("DREI:READY\n")
     port.flush()
     port.enter_raw()
-    events = SynchronousTerminalSource(port) if source is None else source
+    events = ThreadedTerminalSource(port) if source is None else source
     try:
-        # TODO: [tech-debt] TD-6 — the size is still read once here. The seam
-        # that fixes it now exists (a resize is an event on this stream), but
-        # no source produces one yet: V3/V4 of plan 0015. Until then frames
-        # after a resize wrap against a stale width and the C-x 2
-        # minimum-height gate tests a height the terminal no longer has.
-        # See docs/technical-debt.md.
+        # The size is read once here to build the first frame; from then on
+        # the source reports every change as a Resize event (plan 0015 V4).
         width, height = port.get_size()
         harness = EditorHarness(
             width=width,
@@ -209,14 +279,13 @@ def run_editor(
             event = events.next_event()
             if isinstance(event, Resize):
                 harness.resize(event.width, event.height)
-                # No readiness marker: markers mark quiescence *after an
-                # input epoch*, and a resize is not one the verifier drove
-                # with a key. Emitting one here would let a verifier waiting
-                # on its keystroke's marker be satisfied by an unrelated
-                # terminal event. Plan 0015 deviation 2 owns the cost — a
-                # TermVerify resize scenario waits on frame content with a
-                # deadline instead.
-                _write_frame(port, harness, mark_ready=False)
+                # Marked, like any other consumed input. A resize is an input
+                # epoch under the cooperation protocol itself: TermVerify
+                # dispatches it on the same ordered input stream as a key and
+                # reads until exactly one marker. Leaving it unmarked would
+                # not make the epoch quiet — it would make this epoch consume
+                # the *next* input's marker and shift every epoch after it.
+                _write_frame(port, harness)
                 continue
             assembler, resolved = assembler.feed(event.char)
             # No keys: the character was consumed mid-sequence, so the

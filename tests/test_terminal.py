@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import sys
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import drei.terminal
 from drei.files import SystemFilePort
 from drei.input import InputEvent, InputSource, Key, Resize
 from drei.terminal import (
     _CLEAR_SCREEN,
     READINESS_MARKER,
+    SynchronousTerminalSource,
     TerminalPort,
+    ThreadedTerminalSource,
     run_editor,
 )
 
@@ -42,9 +47,20 @@ class FakePort(TerminalPort):
         self.restored = True
 
 
+def run_with_keys(port: FakePort, **kwargs: object) -> None:
+    """Drive the loop over the port's scripted bytes, synchronously.
+
+    The production default is the threaded source (plan 0015 V4). These tests
+    pin the *loop*, not the threads, so they inject the synchronous source —
+    which is exactly the `read_key()` the loop used to call inline, making
+    them the unchanged regression gate they were before the seam existed.
+    """
+    run_editor(port, source=SynchronousTerminalSource(port), **kwargs)  # type: ignore[arg-type]
+
+
 def test_editor_writes_readiness_and_exits_on_quit() -> None:
     port = FakePort(["\x07"])
-    run_editor(port)
+    run_with_keys(port)
     assert port.outputs[0] == "DREI:READY\n"
     assert port.restored
     assert port.raw_entered
@@ -52,7 +68,7 @@ def test_editor_writes_readiness_and_exits_on_quit() -> None:
 
 def test_editor_inserts_text_and_renders() -> None:
     port = FakePort(["a", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     written = "".join(port.outputs)
     assert "a" in written
 
@@ -64,7 +80,7 @@ def test_editor_restores_on_exception() -> None:
 
     port = BoomPort([])
     with pytest.raises(RuntimeError, match="boom"):
-        run_editor(port)
+        run_with_keys(port)
     assert port.restored
 
 
@@ -72,7 +88,7 @@ def test_unresolved_key_marks_quiescence_without_frame_rewrite() -> None:
     # DEL is not bound to any command; the loop must still emit the
     # readiness marker (quiescence) but must not rewrite the frame.
     port = FakePort(["\x7f", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     written = "".join(port.outputs)
     # Two markers: one after the initial frame, one after the unresolved key.
     assert written.count("\x1b]7791;ready\x1b\\") == 2
@@ -85,7 +101,7 @@ def test_editor_meta_chord_yank_pop_through_byte_loop() -> None:
     # ESC y assembles to M-y: with an empty ring it is a silent no-op, so the
     # loop treats it like any other no-state-change input and then quits.
     port = FakePort(["\x1b", "y", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     assert port.restored
 
 
@@ -102,7 +118,7 @@ def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
 
     # C-k C-f C-k C-y ESC y C-g over "one\ntwo\nthree"
     port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x07"])
-    run_editor(port, initial_text="one\ntwo\nthree")
+    run_with_keys(port, initial_text="one\ntwo\nthree")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     pop_frame = frames[-2]  # last frame before the quit frame
     buffer_line = pop_frame.split("\r\n")[1]  # first buffer row (row 0 is blank)
@@ -141,7 +157,7 @@ def test_editor_region_commands_through_byte_loop() -> None:
             "\x07",
         ]
     )
-    run_editor(port, initial_text="hello world")
+    run_with_keys(port, initial_text="hello world")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     rows = [f.split("\r\n")[0] for f in frames[1:]]  # row 0 = buffer line
     # After C-w: "llo world"; after C-y: "hello world" again; M-w and
@@ -168,7 +184,7 @@ def test_editor_undo_through_byte_loop() -> None:
             "\x07",
         ]
     )
-    run_editor(port)
+    run_with_keys(port)
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     rows = [f.split("\r\n")[0] for f in frames[1:]]
     assert any(r.startswith("ab") for r in rows)
@@ -203,7 +219,7 @@ def test_editor_find_file_through_byte_loop(tmp_path: Path) -> None:
             "\x07",  # C-g: quit
         ]
     )
-    run_editor(port, file_port=SystemFilePort(), initial_text="scratch")
+    run_with_keys(port, file_port=SystemFilePort(), initial_text="scratch")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     rows = [f.split("\r\n") for f in frames[1:]]
     # Prompt visible with the typed path prefix echoed on the echo row.
@@ -231,7 +247,7 @@ def test_editor_arrow_keys_leave_the_buffer_untouched() -> None:
 
     # Up, Down, Right, Left, Home (ESC [ H), Delete (ESC [ 3 ~), then quit.
     port = TallPort(list("\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[3~") + ["\x07"])
-    run_editor(port, initial_text="hi")
+    run_with_keys(port, initial_text="hi")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     rows = [f.split("\r\n")[0] for f in frames[1:]]
     assert rows, frames
@@ -241,7 +257,7 @@ def test_editor_arrow_keys_leave_the_buffer_untouched() -> None:
 def test_editor_arrow_key_does_not_rewrite_the_frame() -> None:
     """An arrow is one unresolved key: one readiness marker, no frame."""
     port = FakePort(list("\x1b[A") + ["\x07"])
-    run_editor(port)
+    run_with_keys(port)
     written = "".join(port.outputs)
     # Markers: initial frame + the arrow (unresolved). The quit frame has none.
     assert written.count("\x1b]7791;ready\x1b\\") == 2
@@ -257,7 +273,7 @@ def test_editor_arrow_keys_do_not_reach_the_minibuffer() -> None:
             return (60, 10)
 
     port = TallPort(["\x18", "\x06", *list("\x1b[A"), "\x07", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     prompts = [
         line.split("\x1b")[0]  # the echo row is last: trailing writes ride along
@@ -273,7 +289,7 @@ def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.
     port = FakePort(["\x1b", "1", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     written = "".join(port.outputs)
     assert "1" in written
 
@@ -288,7 +304,7 @@ def test_editor_esc_non_letter_marks_quiescence_for_both_inputs() -> None:
     and correctly emits no marker until the chord resolves.
     """
     port = FakePort(["\x1b", "1", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     written = "".join(port.outputs)
     # Markers: initial frame, ESC (unresolved, no frame), "1" (frame), and
     # the final C-g quit frame carries none.
@@ -299,7 +315,7 @@ def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
     # ESC followed by C-g: bare ESC reported (unresolved), C-g reprocessed
     # and quits the loop.
     port = FakePort(["\x1b", "\x07"])
-    run_editor(port)
+    run_with_keys(port)
     assert port.restored
 
 
@@ -713,10 +729,16 @@ def test_resize_event_redraws_at_the_new_size() -> None:
     assert len(frames[-1]) == 6
 
 
-def test_resize_redraw_carries_no_readiness_marker() -> None:
-    """Plan 0015 deviation 2: markers stay bound to input epochs, so the
-    spontaneous redraw a resize causes is unmarked. A verifier waiting on a
-    keystroke's marker must not have it satisfied by a terminal resize."""
+def test_resize_redraw_carries_a_readiness_marker() -> None:
+    """One marker per consumed input, and a resize is one.
+
+    Plan 0015 originally deviated here — deviation 2 said a resize redraw was
+    "spontaneous" and so unmarked. Reading TermVerify's epoch model showed
+    that is wrong: `dispatch` accepts a `Resize` on the same ordered input
+    stream as a key and then reads until it sees exactly one marker. An
+    unmarked resize would not be a quieter epoch, it would be an epoch that
+    swallows the *next* input's marker and shifts every epoch after it.
+    """
     keyed = FakePort([])
     run_editor(keyed, source=ScriptedSource(keys("a", "\x07")))
 
@@ -725,10 +747,9 @@ def test_resize_redraw_carries_no_readiness_marker() -> None:
 
     written = "".join(resized.outputs)
     baseline = "".join(keyed.outputs)
-    # The resize added a frame...
+    # The resize added exactly one frame and exactly one marker with it.
     assert written.count(_CLEAR_SCREEN) == baseline.count(_CLEAR_SCREEN) + 1
-    # ...but not a marker.
-    assert written.count(READINESS_MARKER) == baseline.count(READINESS_MARKER)
+    assert written.count(READINESS_MARKER) == baseline.count(READINESS_MARKER) + 1
 
 
 def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
@@ -762,3 +783,115 @@ def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
     assert any(len(row) == 30 for row in prompts), prompts
     # ...and the "x" went into that same prompt rather than the buffer.
     assert any(row.rstrip() == "Find file: x" for row in prompts), prompts
+
+
+class _GatedPort(FakePort):
+    """A port whose two inputs are driven independently by the test.
+
+    `read_key` serves scripted characters and then parks on an event, the way
+    a real terminal parks waiting for a keystroke; `get_size` walks a scripted
+    list and repeats its last value.
+    """
+
+    def __init__(self, chars: list[str], sizes: list[tuple[int, int]]) -> None:
+        super().__init__([])
+        self._chars = list(chars)
+        self._sizes = list(sizes)
+        self._size_index = 0
+        self.parked = threading.Event()
+        self.release = threading.Event()
+        self.after_release = "z"
+
+    def read_key(self) -> str:
+        if self._chars:
+            return self._chars.pop(0)
+        self.parked.set()
+        self.release.wait(timeout=5)
+        return self.after_release
+
+    def get_size(self) -> tuple[int, int]:
+        size = self._sizes[min(self._size_index, len(self._sizes) - 1)]
+        self._size_index += 1
+        return size
+
+
+def _next_within(source: ThreadedTerminalSource, timeout: float = 5.0) -> InputEvent:
+    """`next_event` once an event is known to be queued.
+
+    The wait is a test-harness deadline, not a semantic one: it keeps a
+    regression from hanging CI forever instead of failing.
+    """
+    deadline = time.monotonic() + timeout
+    while source._events.empty() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not source._events.empty(), "no event arrived within the deadline"
+    return source.next_event()
+
+
+def test_threaded_source_merges_keys_and_sizes_onto_one_queue() -> None:
+    """The only test in the suite that starts a thread (plan 0015 V4).
+
+    Everything else feeds scripted events, which is design 0005's
+    verification layer 1. This one proves the adapter itself: both readers
+    reach the same queue, keys keep their relative order, a size change
+    becomes a Resize, an unchanged size produces nothing, and close() stops
+    the watcher.
+
+    It asserts ordering and content, never timing — the poll interval is an
+    adapter concern no editor semantics depend on.
+    """
+    port = _GatedPort(
+        chars=["a", "b"],
+        # Seed, then one unchanged poll, then the change.
+        sizes=[(10, 3), (10, 3), (20, 5)],
+    )
+    source = ThreadedTerminalSource(port, poll_interval=0.01)
+    try:
+        # Keys arrive in the order the port produced them...
+        assert _next_within(source) == Key("a")
+        assert _next_within(source) == Key("b")
+        # ...and the size change arrives as a Resize on the same queue. The
+        # unchanged poll in between queued nothing, or this would be (10, 3).
+        assert _next_within(source) == Resize(20, 5)
+    finally:
+        source.close()
+
+    # close() stopped the watcher.
+    assert not source._sizes.is_alive()
+    # The key reader is parked in read_key and cannot be interrupted; it
+    # notices the stop flag only when one more key arrives. Release it and
+    # it delivers that key, then exits rather than looping again.
+    assert port.parked.wait(timeout=5)
+    port.release.set()
+    source._keys.join(timeout=5)
+    assert not source._keys.is_alive()
+    assert _next_within(source) == Key("z")
+    assert source._events.empty()
+
+
+def test_run_editor_defaults_to_the_threaded_source() -> None:
+    """The shipped editor gets the threaded source without being asked: the
+    default is production behavior and tests opt out, rather than production
+    having to opt in.
+
+    Substitutes the class rather than starting it, so this stays a test about
+    wiring and the thread count of the suite stays at one.
+    """
+    built: list[TerminalPort] = []
+
+    class RecordingSource(InputSource):
+        def __init__(self, port: TerminalPort) -> None:
+            built.append(port)
+            self.closed = False
+            self._events = [Key("\x07")]
+
+        def next_event(self) -> InputEvent:
+            return self._events.pop(0)
+
+        def close(self) -> None:
+            self.closed = True
+
+    port = FakePort([])
+    with patch.object(drei.terminal, "ThreadedTerminalSource", RecordingSource):
+        run_editor(port)
+    assert built == [port]

@@ -60,8 +60,9 @@ per ACP session rather than a decision to make.
 
 **Suggested approach:** design 0005 decides all five — a `StreamingProcessPort`
 separate from `ProcessPort`, one ordered `InputEvent` queue fed by adapter-side
-reader threads (which also closes TD-6), one event per loop iteration with keys
-ahead of agent bytes, a single-dispatch delivery, and cancellation calling
+reader threads (resize included — the old TD-6, paid by plan 0015 V4), one
+event per loop iteration with keys ahead of agent bytes, a single-dispatch
+delivery, and cancellation calling
 `cancel()` then `AbortPendingPermissions`. Implement it in that order; the
 first slice needs neither cancellation nor a real agent. Note 0005's two open
 blockers before starting the cancellation slice: `C-g` currently exits the
@@ -124,25 +125,6 @@ special-casing `C-g`.
 **Suggested approach:** handle `C-g` in the pending branch as
 `KeyboardQuit()`, and register the resulting behavior. Then decide whether
 any *other* non-completing key should echo something rather than vanish.
-
-## TD-6 (finding 21) — terminal size is read once; resize is never observed
-
-**Location:** `src/drei/terminal.py` — `run_editor` reads `port.get_size()`
-once before the loop; there is no SIGWINCH / `WINDOW_BUFFER_SIZE_EVENT` path.
-**Severity:** medium in real use, invisible in tests.
-
-After a resize, frames wrap or truncate against the stale width, and the
-split-window minimum-height gate tests a height the terminal no longer has —
-so `C-x 2` can be refused in a window that is now tall enough, or allowed in
-one that is not.
-
-**Why deferred:** hardening, and it is the first genuinely asynchronous input
-the editor would accept. That is the same injection-point question TD-2 owns,
-so building a one-off signal path first would likely be thrown away.
-
-**Suggested approach:** land it with, or after, the §C pump's injection
-point; a resize is then just another external delivery. Keep the size an
-explicit session input rather than something the renderer reads ambiently.
 
 ## TD-7 (finding 22) — frozen dataclasses over aliased mutable dicts
 
