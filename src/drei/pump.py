@@ -53,6 +53,7 @@ from drei.commands import (
     CreateAgentBuffer,
     CreateGeneratedBuffer,
     DeliverSessionEffects,
+    DisplayBuffer,
     InsertAgentText,
     PermissionDecided,
     PromptPermission,
@@ -351,6 +352,11 @@ class AgentPump:
     def _bind(self, session_id: str, harness: EditorHarness) -> None:
         harness.apply(CreateAgentBuffer(session_id))
         self._transcript = harness.agent_buffer_id(session_id)
+        assert self._transcript is not None  # the command just minted it
+        # Show it. A transcript that exists but is nowhere on screen is a
+        # feature the user cannot use — `C-c a` would send a prompt and
+        # nothing visible would happen. Focus stays where the user put it.
+        harness.apply(DisplayBuffer(self._transcript))
         held, self._backlog = self._backlog, []
         self._deliver(held, harness)
         self._send_pending()

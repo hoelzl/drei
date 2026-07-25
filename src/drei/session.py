@@ -19,6 +19,7 @@ from drei.commands import (
     AgentTranscriptUpdated,
     BackwardChar,
     BufferCreated,
+    BufferDisplayed,
     BufferObservation,
     BufferOpened,
     BufferSaved,
@@ -30,6 +31,7 @@ from drei.commands import (
     DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
+    DisplayBuffer,
     ExchangePointAndMark,
     FindFile,
     ForwardChar,
@@ -114,6 +116,7 @@ Command = (
     | InsertAgentText
     | CreateAgentBuffer
     | CreateGeneratedBuffer
+    | DisplayBuffer
     | PromptAgent
     | PromptPermission
     | AbortPendingPermissions
@@ -156,6 +159,7 @@ Event = (
     | FrameResized
     | OpenFailed
     | AgentPromptSubmitted
+    | BufferDisplayed
     | AgentTranscriptUpdated
     | AgentTextInserted
 )
@@ -640,6 +644,7 @@ class EditorSession:
             | InsertAgentText
             | CreateAgentBuffer
             | CreateGeneratedBuffer
+            | DisplayBuffer
             | PromptPermission
             | AbortPendingPermissions,
         ):
@@ -733,6 +738,9 @@ class EditorSession:
                 # Still a command in its own right: appending agent text
                 # without advancing a transcript fold is a real thing to want.
                 new_value = self._append_agent_text(current, text, target, events)
+            case DisplayBuffer(buffer_id=shown):
+                self._display_buffer(shown, events)
+                new_value = current
             case CreateAgentBuffer() | CreateGeneratedBuffer():
                 # The buffer (and its BufferCreated event) came out of target
                 # resolution above; creation edits nothing. `current` is the
@@ -1218,6 +1226,35 @@ class EditorSession:
         self._windows = tuple(windows)
         events.append(WindowSplit(len(self._windows)))
         return self.buffer.current
+
+    def _display_buffer(self, buffer_id: BufferId, events: list[Event]) -> None:
+        """Show ``buffer_id`` somewhere other than the focused window.
+
+        Splits once if the frame holds a single window and the split gate
+        permits, then replaces the *next* window's contents. Focus never
+        moves, so the buffer appearing never takes the user out of what they
+        were doing (design 0004 D1's constraint, honoured by a command that
+        design 0004 does not own).
+
+        A frame too small to split leaves everything alone: the buffer exists
+        and `C-x b` reaches it. Destroying the user's only window to make room
+        for agent output would be a worse answer than not showing it.
+        """
+        if buffer_id not in self._buffers:
+            raise ValueError(f"display target: no such buffer {buffer_id.value!r}")
+        if len(self._windows) == 1:
+            before = len(self._windows)
+            self._split_window(events)
+            if len(self._windows) == before:
+                return  # the frame cannot hold two windows
+        target = (self._focused + 1) % len(self._windows)
+        windows = list(self._windows)
+        # A fresh view: point at the start, no mark. The window is being
+        # repurposed, so carrying the previous buffer's point into it would
+        # be meaningless.
+        windows[target] = WindowValue(buffer_id, 0, None)
+        self._windows = tuple(windows)
+        events.append(BufferDisplayed(buffer_id.value, target))
 
     def _other_window(self, events: list[Event]) -> BufferValue:
         """C-x o (plan 0012 D3): cycle focus. The departing window keeps its

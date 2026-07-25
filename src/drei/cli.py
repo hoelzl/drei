@@ -19,11 +19,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--agent-command",
+        action="append",
         default=None,
-        metavar="ARGV",
+        metavar="ARG",
         help=(
-            "command to launch the ACP agent, space-separated "
-            "(default: 'hermes acp'); spawned lazily on the first C-c a"
+            "one argument of the command that launches the ACP agent; repeat "
+            "once per argument (default: 'hermes acp'). The child is spawned "
+            "lazily on the first C-c a, so this costs nothing unused."
         ),
     )
     parser.add_argument(
@@ -66,9 +68,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     from drei.pump import DEFAULT_AGENT_ARGV
     from drei.terminal import SystemTerminalPort, run_editor
 
-    agent_argv = (
-        tuple(args.agent_command.split()) if args.agent_command else DEFAULT_AGENT_ARGV
-    )
+    # One flag occurrence per argument rather than one space-separated string:
+    # an agent path with a space in it is ordinary on both platforms, and
+    # splitting would break it while shell-style quoting rules differ between
+    # them. `--agent-command` is repeated instead, which has no quoting rules.
+    agent_argv = tuple(args.agent_command) if args.agent_command else DEFAULT_AGENT_ARGV
     run_editor(
         SystemTerminalPort(),
         file_port=file_port,

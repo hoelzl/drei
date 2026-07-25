@@ -427,6 +427,34 @@ def test_cli_launches_editor_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(called[0], drei.terminal.SystemTerminalPort)
 
 
+def test_cli_agent_command_defaults_and_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One occurrence per argument, not one space-separated string: an agent
+    path with a space in it is ordinary on both platforms, and shell-style
+    quoting rules differ between them."""
+    import sys
+
+    import drei.terminal
+    from drei.cli import main
+    from drei.pump import DEFAULT_AGENT_ARGV
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        drei.terminal,
+        "run_editor",
+        lambda port, **kw: seen.append(kw["agent_argv"]),
+    )
+
+    main([])
+    assert seen[-1] == DEFAULT_AGENT_ARGV
+
+    main(["--agent-command", "C:/Program Files/py.exe", "--agent-command", "agent.py"])
+    assert seen[-1] == ("C:/Program Files/py.exe", "agent.py")
+
+
 def test_cli_opens_existing_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

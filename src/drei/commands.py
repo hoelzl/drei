@@ -232,6 +232,34 @@ class CreateAgentBuffer:
 
 
 @dataclass(frozen=True, slots=True)
+class DisplayBuffer:
+    """Show a buffer in a window the user is not focused on (design 0005 D6).
+
+    Emacs's ``display-buffer``, reduced to what one slice needs. A turn's
+    transcript that exists but is nowhere on screen is a feature the user
+    cannot use: `C-c a` would send a prompt and nothing visible would happen.
+
+    The rule: split once if the frame holds a single window and the split gate
+    permits, then put the buffer in the window after the focused one. **Focus
+    never moves** — that is design 0004 D1's constraint, and it is why this is
+    a separate command from ``CreateAgentBuffer`` rather than part of it: the
+    buffer's *identity* is bound when the ACP session is established, and where
+    it is *shown* is a presentation decision the caller makes.
+
+    A frame too small to split is a silent no-op. The buffer still exists and
+    `C-x b` still reaches it; what it does not do is destroy the user's only
+    window to make room.
+
+    Delivery-class (agent-initiated), exempt from the minibuffer gate: the
+    session is established on the peer's schedule, and swallowing this because
+    a prompt happened to be open would leave the transcript invisible for the
+    rest of the run.
+    """
+
+    buffer_id: BufferId
+
+
+@dataclass(frozen=True, slots=True)
 class PromptAgent:
     """Open the minibuffer to compose a prompt for the agent (design 0005 D6).
 
@@ -474,6 +502,14 @@ class PermissionDecided:
 
 
 @dataclass(frozen=True, slots=True)
+class BufferDisplayed:
+    """A buffer was shown in ``window`` without focus moving there."""
+
+    buffer_id: str
+    window: int
+
+
+@dataclass(frozen=True, slots=True)
 class AgentPromptSubmitted:
     """The human accepted an agent prompt (design 0005 D6).
 
@@ -667,6 +703,7 @@ class CommandOutcome:
         | FrameResized
         | OpenFailed
         | AgentPromptSubmitted
+        | BufferDisplayed
         | AgentTranscriptUpdated
         | AgentTextInserted,
         ...,
