@@ -1,3 +1,5 @@
+from typing import NamedTuple
+
 from conftest import FakeFilePort, FakeProcessPort
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -32,6 +34,7 @@ from drei.commands import (
     RegionKilled,
     SaveBuffer,
     SetMark,
+    SwitchBuffer,
     TextKilled,
     TextRedone,
     TextUndone,
@@ -186,6 +189,142 @@ def agent_history(draw: st.DrawFn) -> list[object]:
         )
         for _ in range(size)
     ]
+
+
+AGENT2 = BufferId("*agent*<2>")
+_SWITCHABLE = ("scratch", AGENT.value, AGENT2.value)
+
+
+def _two_agent_session() -> EditorSession:
+    """Two ACP sessions, two agent buffers, focused on the user's buffer."""
+    session = _session()
+    session.dispatch(CreateAgentBuffer(ACP_SESSION))
+    session.dispatch(CreateAgentBuffer("acp-2"))
+    assert session.agent_buffer_id("acp-2") == AGENT2
+    return session
+
+
+@st.composite
+def _switch_to(draw: st.DrawFn) -> list[object]:
+    """The real ``C-x b`` path, spelled out: open, type, accept."""
+    name = draw(st.sampled_from(_SWITCHABLE))
+    return [SwitchBuffer(), *(MinibufferInput(c) for c in name), MinibufferAccept()]
+
+
+class _Delivery(NamedTuple):
+    """One ``apply_session_effects`` call — the whole delivery, fold *and*
+    append. A bare ``DeliverSessionEffects`` dispatch records the fold without
+    appending (the two-dispatch seam, TD-2), so the fold oracle is stated over
+    complete deliveries."""
+
+    effects: tuple[object, ...]
+    buffer_id: BufferId
+
+
+@st.composite
+def _agent_effect(draw: st.DrawFn) -> object:
+    from drei.acp.machine import AgentTextChunk, PromptCompleted, ThoughtChunk
+
+    return draw(
+        st.one_of(
+            st.builds(AgentTextChunk, st.text(min_size=0, max_size=4)),
+            st.builds(ThoughtChunk, st.text(min_size=0, max_size=4)),
+            st.builds(
+                PromptCompleted, st.sampled_from(["end_turn", "refusal", "cancelled"])
+            ),
+        )
+    )
+
+
+@st.composite
+def multi_buffer_agent_history(draw: st.DrawFn) -> list[object]:
+    """Edits, buffer switches, and deliveries to **two** agent buffers.
+
+    The history the fold oracle needed all along (design 0004 §consequences):
+    before this slice a switch between two deliveries split one transcript
+    across two buffers, and no single-buffer history could see it.
+    """
+    size = draw(st.integers(min_value=0, max_value=12))
+    history: list[object] = []
+    for _ in range(size):
+        step = draw(
+            st.one_of(
+                st.builds(InsertText, st.text(min_size=0, max_size=4)),
+                st.just(KillLine()),
+                _switch_to(),
+                st.builds(
+                    _Delivery,
+                    st.lists(_agent_effect(), min_size=1, max_size=3).map(tuple),
+                    st.sampled_from([AGENT, AGENT2]),
+                ),
+            )
+        )
+        if isinstance(step, list):
+            history.extend(step)
+        else:
+            history.append(step)
+    return history
+
+
+def _run(session: EditorSession, history: list[object], *, skip_edits: bool) -> None:
+    """Replay a multi-buffer history.
+
+    ``skip_edits`` drops user edits while a generated buffer is focused: a
+    human typing into an agent buffer is the owned divergence (design 0004 D6;
+    §A.3 owns the fix), and the fold oracle is not claimed to survive it.
+    """
+    for item in history:
+        if isinstance(item, _Delivery):
+            session.apply_session_effects(item.effects, item.buffer_id)  # type: ignore[arg-type]
+            continue
+        if (
+            skip_edits
+            and isinstance(item, (InsertText, KillLine))
+            and session._states[session.buffer.buffer_id].kind == "generated"
+        ):
+            continue
+        session.dispatch(item)  # type: ignore[arg-type]
+
+
+@given(multi_buffer_agent_history())
+def test_every_buffers_agent_text_is_its_own_transcript_fold(
+    history: list[object],
+) -> None:
+    """The per-buffer fold oracle (design 0004 §consequences), as a property.
+
+    For every buffer B, B's text equals the concatenation of ``rendered`` over
+    the ``AgentTranscriptUpdated`` events targeting B — whatever else the
+    history did in between, including switching buffers mid-stream. Strictly
+    stronger than the pre-0004 oracle, which described no buffer at all once
+    more than one could receive a delivery.
+    """
+    session = _two_agent_session()
+    _run(session, history, skip_edits=True)
+
+    for buffer_id in (AGENT, AGENT2):
+        rendered = "".join(
+            e.rendered
+            for e in session.transcript
+            if isinstance(e, AgentTranscriptUpdated) and e.buffer_id == buffer_id.value
+        )
+        assert session._buffers[buffer_id].current.text == rendered
+
+
+@given(multi_buffer_agent_history())
+def test_no_ordinary_buffer_ever_receives_agent_text(history: list[object]) -> None:
+    """The other half, and it holds even when the human *does* type into an
+    agent buffer: agent text lands only in generated buffers, so a transcript
+    being written into the user's file (review 0001 finding 5, hazard 2)
+    cannot recur."""
+    session = _two_agent_session()
+    _run(session, history, skip_edits=False)
+
+    for event in session.transcript:
+        if isinstance(event, AgentTextInserted):
+            assert session._states[BufferId(event.buffer_id)].kind == "generated"
+    assert session._buffers[BufferId("scratch")].current.file_path is not None
+    for buffer_id in (AGENT, AGENT2):
+        assert session._buffers[buffer_id].current.file_path is None
 
 
 @given(command_history())

@@ -100,16 +100,26 @@ class TestApplySessionEffects:
         assert [type(e) for e in outcome.events] == [AgentTranscriptUpdated]
         assert outcome.observation.text == ""
 
-    def test_fold_cache_reconstructible_from_events(self) -> None:
+    def test_fold_cache_reconstructible_across_a_buffer_switch(self) -> None:
+        """Plan 0014 pin 4. This test used to run both deliveries with the
+        same buffer focused, and its silence about the other case is exactly
+        what let review 0001 finding 5 ship: with `C-x b` between them the
+        transcript split across two buffers and the oracle described neither.
+        The switch is now part of the pin."""
         session = make_session()
         session.apply_session_effects((AgentTextChunk(text="x"),), AGENT)
+
+        session._select_buffer(BufferId("scratch"), [])  # C-x b, mid-stream
         session.apply_session_effects((ThoughtChunk(text="t"),), AGENT)
+
         rendered = "".join(
             e.rendered
             for e in session.transcript
-            if isinstance(e, AgentTranscriptUpdated)
+            if isinstance(e, AgentTranscriptUpdated) and e.buffer_id == AGENT.value
         )
-        assert session.buffer.current.text == rendered
+        assert session._buffers[AGENT].current.text == rendered
+        assert session.buffer.buffer_id == BufferId("scratch")
+        assert session.buffer.current.text == ""  # the user's buffer: untouched
 
     def test_audit_lines_land_in_buffer(self) -> None:
         session = make_session()
