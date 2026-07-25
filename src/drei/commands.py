@@ -117,6 +117,25 @@ class DeleteOtherWindows:
 
 
 @dataclass(frozen=True, slots=True)
+class ResizeFrame:
+    """The frame changed size (plan 0015 D3). Not a user command: it binds to
+    no key and is dispatched by the loop when the input stream carries a
+    resize.
+
+    A command rather than a setter because frame size is *semantic*: it gates
+    ``C-x 2`` (see ``_split_window``), so a transcript that omitted the resize
+    would not reproduce a later split-or-no-op decision on replay.
+
+    Shrinking below the size that would have permitted an existing split does
+    **not** delete windows (D7): the layout survives and the frame renders
+    what fits, so the operation is reversible.
+    """
+
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
 class MinibufferInput:
     char: str
 
@@ -502,6 +521,19 @@ class WindowsCollapsed:
 
 
 @dataclass(frozen=True, slots=True)
+class FrameResized:
+    """The frame's size changed to ``width`` x ``height`` (plan 0015 D3).
+
+    Recorded on every resize, including one that changes nothing about the
+    window layout, because the size is an input to a later command's outcome
+    and replay must see it.
+    """
+
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
 class OpenFailed:
     """A find-file read that failed at the file port.
 
@@ -577,6 +609,7 @@ class CommandOutcome:
         | WindowSplit
         | WindowFocusChanged
         | WindowsCollapsed
+        | FrameResized
         | OpenFailed
         | AgentTranscriptUpdated
         | AgentTextInserted,

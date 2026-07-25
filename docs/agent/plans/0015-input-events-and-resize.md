@@ -147,11 +147,14 @@ Why keep rather than delete, given Emacs deletes windows that no longer fit:
   lose their layout. A resize is a *clumsy, frequent, accidental* gesture in a
   way `C-x 0` is not, so the destructive reading is the wrong default for the
   same input.
-- **It keeps `ResizeFrame` a size update.** Deletion would put window-lifecycle
-  machinery (a deletion event, a focus-reassignment rule when the focused
-  window is the one that no longer fits, a point-salvage rule) into a slice
-  whose subject is the input boundary. No user command needs that machinery
-  yet; `C-x 0` and `C-x 1` are not in the shipped keymap.
+- **It keeps `ResizeFrame` a size update.** Deletion would put a window
+  *lifecycle* decision into a slice whose subject is the input boundary: which
+  window dies, and what happens when the dying one is focused. Note this is
+  **not** an argument from implementation cost — `C-x 1` is bound and
+  `DeleteOtherWindows`/`WindowsCollapsed` already exist, so collapsing to the
+  focused window would have been cheap to build. It is an argument about which
+  slice owns the decision. Cheapness is not a reason to make a resize
+  destructive.
 - **The semantic gate still holds.** While shrunk, `C-x 2` correctly refuses —
   that is D3 working, evaluated at the new size, and it is the property V2
   actually pins.

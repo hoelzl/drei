@@ -207,3 +207,41 @@ arm.
 **Suggested approach:** have the CLI hand the path to the session and let
 `_visit` produce the outcome, so there is exactly one open path and one
 vocabulary of failures. The CLI then reports the normalized token.
+
+## TD-10 (plan 0015 V2) — the frame cap drops the echo row before a window pane
+
+**Location:** `src/drei/render.py` — `rows = rows[:height]` at the end of
+`render_session`.
+**Severity:** low; reachable only at absurd frame heights, but newly
+reachable *in production* rather than only from a hand-built observation.
+
+`render_session` builds every pane, appends the shared echo row last, then
+truncates the row list to the frame height. Truncation therefore cuts from
+the bottom, and the echo row is the bottom. With two windows in a
+two-row frame the result is two modelines and **no echo row**: the minibuffer
+prompt is invisible while the minibuffer is open, and the cursor — placed at
+`height - 1` for an open minibuffer — lands on a modeline instead of on the
+prompt it is supposed to be editing.
+
+Emacs prioritizes the other way round: the echo area is the last thing it
+gives up, and windows are deleted to make room.
+
+This was found while implementing plan 0015 D7. Before `ResizeFrame` existed,
+the truncation branch was reachable only by constructing a `SessionObservation`
+by hand, because the `C-x 2` gate prevented a real session from over-
+subscribing its frame. A resize can now shrink a live split frame to any
+height, so the path ships.
+
+**Why deferred:** fixing it is a *rendering priority* decision (which row
+wins when rows are scarce: echo, modeline, or body), not a resize decision.
+It deserves its own reasoning and a parity row of its own, and slice 15's
+subject is the input boundary. Pinning the wrong-but-current behavior is
+deliberate: `test_shrink_below_the_split_minimum_degrades_in_stages` asserts
+the echo row is the first casualty, so the fix will show up as a failing
+test rather than as a silent change.
+
+**Suggested approach:** reserve the echo row before distributing body rows —
+compute pane heights against `height - 1` and let the *panes* absorb the
+shortfall, dropping whole panes from the bottom while the echo row is
+retained. Then decide, with a parity row, whether a frame too short for even
+one pane keeps the echo row or renders empty.

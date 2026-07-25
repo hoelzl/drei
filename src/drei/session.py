@@ -31,6 +31,7 @@ from drei.commands import (
     ExchangePointAndMark,
     FindFile,
     ForwardChar,
+    FrameResized,
     InsertAgentText,
     InsertText,
     KeyboardQuit,
@@ -53,6 +54,7 @@ from drei.commands import (
     PromptPermission,
     RegionCopied,
     RegionKilled,
+    ResizeFrame,
     SaveBuffer,
     SaveFailed,
     SessionObservation,
@@ -115,6 +117,7 @@ Command = (
     | SplitWindow
     | OtherWindow
     | DeleteOtherWindows
+    | ResizeFrame
     | MinibufferInput
     | MinibufferBackspace
     | MinibufferAccept
@@ -145,6 +148,7 @@ Event = (
     | WindowSplit
     | WindowFocusChanged
     | WindowsCollapsed
+    | FrameResized
     | OpenFailed
     | AgentTranscriptUpdated
     | AgentTextInserted
@@ -719,6 +723,15 @@ class EditorSession:
                 new_value = self._other_window(events)
             case DeleteOtherWindows():
                 new_value = self._delete_other_windows(events)
+            case ResizeFrame(width, height):
+                # Plan 0015 D7: the size changes and nothing else. Windows are
+                # never deleted to make them fit — the renderer drops the
+                # panes that do not, so growing the frame back restores the
+                # layout with its points intact. `C-x 2` is gated at the new
+                # size from here on, which is why this is a command.
+                self._frame_size = (width, height)
+                events.append(FrameResized(width, height))
+                new_value = current
             case KeyboardQuit():
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())

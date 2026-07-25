@@ -107,9 +107,16 @@ def render_session(
         row_offset += pane_height
 
     rows.append(echo_row)
-    # The Frame contract caps rows at `height`: with more windows than rows
-    # (only possible via a hand-built observation — the session's split gate
-    # prevents it when the frame size is known), drop lower panes.
+    # TODO: [tech-debt] TD-10 — this cap cuts from the bottom, so the shared
+    # echo row is the first casualty and a two-row split frame renders two
+    # modelines and no minibuffer prompt. Rendering priority is its own
+    # decision; see docs/technical-debt.md.
+    # The Frame contract caps rows at `height`: with more windows than rows,
+    # drop the lower panes. A live session reaches this since plan 0015 D7 —
+    # the split gate only refuses *new* splits at the current size, and a
+    # resize can shrink a frame below the size its existing split needed.
+    # Dropping a pane is how that shrink stays non-destructive: the window is
+    # still in the session, so growing the frame back renders it again.
     rows = rows[:height]
     cursor_row = min(cursor_row, max(len(rows) - 1, 0))
     return Frame(
