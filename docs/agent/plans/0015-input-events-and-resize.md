@@ -1,6 +1,9 @@
 # Fifteenth slice: input events and resize (§C.1)
 
-**Status:** claimed (issue #37); plan not yet merged. No code written.
+**Status:** approved at the plan gate (issue #37). Three decisions were taken
+at that gate and are recorded inline below: the threaded source stays in this
+slice (V4, risk 3), resize stays a command rather than a setter (D3), and a
+shrink never destroys windows (D7). No code written before this point.
 
 **Architecture gate:** design `0005-acp-pump.md` D2 (the injection point) and
 D4 (atomic delivery). This slice places the boundary and proves it with the
@@ -76,7 +79,8 @@ if a resize did not enter the transcript, replaying a transcript containing a
 "deterministic and replayable" rule, and it is what makes this a command
 rather than a setter.
 
-`ResizeFrame` is not a user command and binds to no key.
+`ResizeFrame` is not a user command and binds to no key. What it does to an
+*already split* frame that no longer fits is D7.
 
 ### D4. The threaded terminal source, and what it owns
 
@@ -118,6 +122,46 @@ moves *where* the append happens, not *what* it does.
   A `Resize` *is* such a redraw — see *Owned deviations* — so this slice names
   the gap concretely rather than deferring it abstractly.
 
+### D7. A shrink never destroys windows (plan-gate decision)
+
+The split gate (D3) answers "may I split at this size?". It does not answer
+the converse: a frame split at `height=10` and then shrunk to `height=5` is
+below `(2 + 1) * MIN_WINDOW_ROWS + 1` and holds more windows than the size
+would now permit. `ResizeFrame` **updates `_frame_size` and nothing else**.
+The windows survive; the frame renders what fits.
+
+That is not new rendering work. `render_session` already distributes body rows
+with `_window_heights` (each pane keeps at least its modeline row), then caps
+`rows` at the frame height, dropping the lower panes. What changes is the
+*reachability* of that path: `render.py`'s comment on the cap says it is "only
+possible via a hand-built observation — the session's split gate prevents it
+when the frame size is known". After this slice a live session reaches it, and
+that comment must be corrected in the same change (`AGENTS.md`: fix stale
+prose in the change that staled it).
+
+Why keep rather than delete, given Emacs deletes windows that no longer fit:
+
+- **Reversible.** Growing the frame back restores every pane with its point
+  and mark intact. Deletion is one-way — the window values are gone, and a
+  user who drags a terminal corner past a threshold and back would silently
+  lose their layout. A resize is a *clumsy, frequent, accidental* gesture in a
+  way `C-x 0` is not, so the destructive reading is the wrong default for the
+  same input.
+- **It keeps `ResizeFrame` a size update.** Deletion would put window-lifecycle
+  machinery (a deletion event, a focus-reassignment rule when the focused
+  window is the one that no longer fits, a point-salvage rule) into a slice
+  whose subject is the input boundary. No user command needs that machinery
+  yet; `C-x 0` and `C-x 1` are not in the shipped keymap.
+- **The semantic gate still holds.** While shrunk, `C-x 2` correctly refuses —
+  that is D3 working, evaluated at the new size, and it is the property V2
+  actually pins.
+
+The cost is owned as a parity row (deviation 3) and as a bounded hazard: while
+shrunk, a window exists that the user cannot see. It is not lost, and it
+reappears on growth, but it is unreachable *visually* — `C-x o` still cycles
+focus into it. V3 pins that focus-into-an-invisible-window case rather than
+leaving it to be discovered.
+
 ## Pins that change
 
 1. Every test constructing `EditorHarness(width=…, height=…)` keeps working —
@@ -150,6 +194,12 @@ moves *where* the append happens, not *what* it does.
    quiescence. This is weaker evidence than Drei uses elsewhere and is the
    first concrete instance of 0005's recorded gap: the row exists so that the
    TermVerify issue for a second marker kind has something to cite.
+3. **Shrinking below the split minimum keeps the windows** (D7). Emacs deletes
+   windows that no longer fit and the deletion is permanent. Drei keeps them
+   and renders what fits, so growing the frame back restores the layout with
+   points intact. Intentional deviation: a resize is an accidental gesture and
+   should not be destructive. Hazard owned: while shrunk, a window exists that
+   is not visible but is still reachable by `C-x o`.
 
 ## Implementation order (vertical slices, strict TDD)
 
@@ -161,10 +211,17 @@ moves *where* the append happens, not *what* it does.
 2. **V2 — `ResizeFrame` command.** `FrameResized` event, session
    `_frame_size` update, harness width/height update, the `C-x 2` gate
    re-evaluated at the new size. Dispatch-level tests; no source involvement.
+   Includes D7's round trip: split at a permitting height, shrink below the
+   minimum, assert the window count is unchanged and `C-x 2` now refuses, then
+   grow back and assert both panes render again with their points intact.
+   Correct `render.py`'s "only possible via a hand-built observation" comment
+   in this step, since this is the step that makes it false.
 3. **V3 — `Resize` event end to end.** The loop turns a `Resize` event into
    the V2 command and redraws. Scripted-source tests, including resize
    *while the minibuffer is open* (delivery-class? no — it is not user input;
-   pin the answer either way) and a resize that makes a split illegal.
+   pin the answer either way), a resize that makes a split illegal, and D7's
+   visible consequence: `C-x o` into a window the shrunk frame does not
+   render still moves focus and still edits the right buffer.
 4. **V4 — the threaded source.** Two reader threads, one queue, `close()`.
    The one test that touches concurrency: bytes/sizes pushed through a fake
    port appear as events in order, and the queue closes cleanly. Plus a
@@ -184,6 +241,9 @@ moves *where* the append happens, not *what* it does.
 - A `Resize` event changes the rendered frame width **and** the `C-x 2`
   minimum-height decision, and `FrameResized` appears in the transcript, so a
   replay of split-after-resize reproduces the same outcome.
+- Shrinking a split frame below the split minimum changes no window state:
+  the window count, points, and marks survive, and growing the frame back
+  renders every pane as before (D7).
 - The threaded source is exercised by exactly one test that starts a thread;
   every other test feeds scripted events.
 - One `apply_session_effects` call produces exactly **one** `CommandOutcome`
@@ -208,13 +268,18 @@ moves *where* the append happens, not *what* it does.
   why V4 is in scope. If V4 slips, TD-6 must be re-scoped in
   `docs/technical-debt.md` rather than marked done — the rules say entries are
   removed when paid, not when re-scoped.
-- **Is the threaded source in the right slice?** The alternative is to defer
-  every thread to §C.2 and ship a synchronous source here, accepting that
-  resize lags a keystroke. That is a smaller, safer slice with a visibly worse
-  outcome, and it moves the only concurrency test next to the only agent test
-  — two risky things in one slice instead of one each. This plan takes the
-  threads now; **this is the decision most worth overriding at the plan
-  gate.**
+- ~~**Is the threaded source in the right slice?**~~ **Settled at the plan
+  gate: yes, V4 stays in slice 15.** The alternative was to defer every thread
+  to §C.2 and ship a synchronous source here, accepting that resize lags a
+  keystroke — smaller and safer, but with a visibly worse outcome, and it
+  would put the only concurrency test next to the only agent test. One risky
+  thing per slice stands. TD-6 is therefore expected to be paid, not
+  re-scoped; the re-scope clause below survives only as the contingency if V4
+  fails on a CI platform.
+- ~~**Resize as a command may look heavier than a setter.**~~ **Settled at the
+  plan gate: the weight is accepted.** Frame size is semantic in two directions
+  — it gates `C-x 2` (D3) and it determines what a split frame can show (D7) —
+  so it belongs in the transcript.
 - **`Resize` while the minibuffer is open** has no obviously right answer. It
   is not user input, so the gate arguably should not swallow it; but it is
   also not a delivery. V3 must pin one answer with a reason.
