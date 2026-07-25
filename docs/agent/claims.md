@@ -18,9 +18,18 @@ GitHub issue before its plan PR exists.**
    loudly — use it to inspect local state, never as the basis for a claim.
 2. **Claim** — open a slice issue from the *Slice claim* template. Do not
    start the plan PR without it.
-3. **Progress** — the issue body links the plan PR (user gate) and then
-   the code PR. The code PR body carries `Closes #<issue>` so the claim
-   auto-closes on merge.
+3. **Plan** — write the plan from `plan-template.md` and open its PR. The
+   issue body links it (user gate) and then the code PR; the code PR body
+   carries `Closes #<issue>` so the claim auto-closes on merge.
+
+   The template's first section is the **acceptance scenario** — a
+   keystroke-level script ending in "then what appears, and where?" — and it
+   is written before anything else in the plan. The plan PR is the only
+   review that can catch a feature that is *missing*: the adversarial review
+   at the end of a slice reads the code that exists and cannot tell you that
+   nothing puts the result on screen. Plan 0016 shipped a transport in full
+   detail with no answer to that question, and the gap surfaced only when the
+   end-to-end scenario could not observe its own subject.
 4. **Authority** — git/GitHub history is authoritative for what *shipped*;
    slice issues are authoritative for *intent* (claimed but not yet
    committed). When the two disagree (an abandoned claim), close the issue
