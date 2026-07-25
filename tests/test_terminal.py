@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from drei.files import SystemFilePort
+from drei.input import InputEvent, InputSource, Key
 from drei.terminal import TerminalPort, run_editor
 
 
@@ -295,6 +296,57 @@ def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
     port = FakePort(["\x1b", "\x07"])
     run_editor(port)
     assert port.restored
+
+
+class ScriptedSource(InputSource):
+    """A list of input events, in order (plan 0015 D2, verification layer 1).
+
+    Every test but V4's touches the loop through one of these: no thread, no
+    port, no clock. Exhaustion raises like a closed stream would, which is how
+    the existing suite already ends a run that forgets to quit.
+    """
+
+    def __init__(self, events: list[InputEvent]) -> None:
+        self.events = list(events)
+        self.closed = False
+
+    def next_event(self) -> InputEvent:
+        return self.events.pop(0)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def keys(*chars: str) -> list[InputEvent]:
+    return [Key(char) for char in chars]
+
+
+def test_loop_consumes_events_and_never_reads_the_port() -> None:
+    """The seam is real: with a source injected, `read_key` is dead code.
+
+    The port's `read_key` raises, so any surviving call fails the test rather
+    than silently falling back to the old path.
+    """
+
+    class UnreadablePort(FakePort):
+        def read_key(self) -> str:
+            raise AssertionError("run_editor read the port instead of the source")
+
+    port = UnreadablePort([])
+    source = ScriptedSource(keys("a", "\x07"))
+    run_editor(port, source=source)
+    assert "a" in "".join(port.outputs)
+
+
+def test_loop_closes_the_source_even_when_the_body_raises() -> None:
+    class BoomSource(ScriptedSource):
+        def next_event(self) -> InputEvent:
+            raise RuntimeError("boom")
+
+    source = BoomSource([])
+    with pytest.raises(RuntimeError, match="boom"):
+        run_editor(FakePort([]), source=source)
+    assert source.closed
 
 
 def test_cli_rejects_non_tty(capsys: pytest.CaptureFixture[str]) -> None:

@@ -1,8 +1,14 @@
 """Raw-terminal adapter over the production editor session.
 
 All platform-specific I/O lives behind :class:`TerminalPort`. The editor loop
-itself is platform-independent: it reads symbolic keys, dispatches them
-through the production session via the harness, and writes rendered frames.
+itself is platform-independent: it consumes one ordered stream of
+:class:`~drei.input.InputEvent` from an injected :class:`~drei.input.
+InputSource`, dispatches the resulting commands through the production
+session via the harness, and writes rendered frames.
+
+The sources defined here are the terminal-backed ones. They are adapters:
+they may block, own threads, and consult a clock, none of which the loop or
+the session may do.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from typing import Literal
 from drei.commands import KeyboardQuitEvent
 from drei.files import FilePort
 from drei.harness import EditorHarness
+from drei.input import InputEvent, InputSource, Key
 
 _CLEAR_SCREEN = "\x1b[2J\x1b[H"
 _CURSOR_HOME = "\x1b[H"
@@ -142,24 +149,52 @@ def _restart(char: str, *emitted: str) -> tuple[KeyAssembler, tuple[str, ...]]:
 READINESS_MARKER = "\x1b]7791;ready\x1b\\"
 
 
+class SynchronousTerminalSource(InputSource):
+    """The events of one terminal, produced on demand by blocking in the port.
+
+    The behavior-preserving default (plan 0015 V1): `next_event` is exactly
+    the `read_key()` the loop used to call inline, so the whole shipped
+    terminal suite gates the loop rewrite before any new event kind exists.
+    It produces `Key` and nothing else — a terminal size is not observable
+    without either a signal handler or a watcher, and this source has neither.
+    """
+
+    def __init__(self, port: TerminalPort) -> None:
+        self._port = port
+
+    def next_event(self) -> InputEvent:
+        return Key(self._port.read_key())
+
+    def close(self) -> None:
+        """Nothing to release: the source owns no thread and no queue."""
+
+
 def run_editor(
     port: TerminalPort,
     *,
+    source: InputSource | None = None,
     file_port: FilePort | None = None,
     file_path: str | None = None,
     initial_text: str = "",
 ) -> None:
-    """Run the editor loop over an explicit terminal port."""
+    """Run the editor loop over an explicit terminal port.
+
+    Input arrives as one totally ordered stream of :class:`InputEvent` from
+    ``source`` (design 0005 D2). ``port`` remains the output side and the
+    source of the initial frame size; when ``source`` is omitted the loop
+    builds the default terminal source over the same port.
+    """
     port.write("DREI:READY\n")
     port.flush()
     port.enter_raw()
+    events = SynchronousTerminalSource(port) if source is None else source
     try:
-        # TODO: [tech-debt] TD-6 — read once, never again: there is no
-        # SIGWINCH / WINDOW_BUFFER_SIZE_EVENT path, so after a resize frames
-        # wrap against a stale width and the C-x 2 minimum-height gate tests
-        # a height the terminal no longer has. Closes as a side effect of
-        # design 0005 D2: a resize is one more InputEvent kind on the queue
-        # that TD-2's pump needs anyway. See docs/technical-debt.md.
+        # TODO: [tech-debt] TD-6 — the size is still read once here. The seam
+        # that fixes it now exists (a resize is an event on this stream), but
+        # no source produces one yet: V3/V4 of plan 0015. Until then frames
+        # after a resize wrap against a stale width and the C-x 2
+        # minimum-height gate tests a height the terminal no longer has.
+        # See docs/technical-debt.md.
         width, height = port.get_size()
         harness = EditorHarness(
             width=width,
@@ -171,13 +206,14 @@ def run_editor(
         _write_frame(port, harness)
         assembler = KeyAssembler()
         while True:
-            assembler, keys = assembler.feed(port.read_key())
+            event = events.next_event()
+            assembler, resolved = assembler.feed(event.char)
             # No keys: the character was consumed mid-sequence, so the
             # subject is mid-chord and not quiescent — no marker until the
             # sequence resolves. Two keys: an abandoned escape prefix plus
             # the character that broke it, each marking quiescence of its
             # own (symmetric with the C-x prefix path).
-            for key in keys:
+            for key in resolved:
                 outcome = harness.send(key)
                 quit_requested = outcome is not None and any(
                     isinstance(e, KeyboardQuitEvent) for e in outcome.events
@@ -194,6 +230,7 @@ def run_editor(
                 if quit_requested:
                     return
     finally:
+        events.close()
         port.restore()
 
 
