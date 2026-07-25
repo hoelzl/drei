@@ -35,8 +35,9 @@ class EditorHarness:
     ) -> None:
         # TODO: [tech-debt] TD-2 — no process port is accepted here, and no
         # key binds an agent command: the whole ACP subsystem (slices
-        # 0008-0011, 0013) is unreachable from the shipped editor until the
-        # §C pump design record lands. See docs/technical-debt.md.
+        # 0008-0011, 0013) is unreachable from the shipped editor. Design
+        # 0005 decides the wiring; the slices are unwritten. See
+        # docs/technical-debt.md.
         buffer_id = BufferId(
             file_path.replace("\\", "/").rsplit("/", 1)[-1] if file_path else "scratch"
         )

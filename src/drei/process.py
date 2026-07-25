@@ -41,9 +41,10 @@ class ProcessPort(Protocol):
     """Effect port for launching a child process and capturing its output.
 
     TODO: [tech-debt] TD-2 — run-to-completion only (plan 0008's deliberate
-    scoping). It cannot speak to a long-lived ``hermes acp`` child, which is
-    what design 0003 §A.1 describes; the streaming shape is the §C pump's
-    design record. See docs/technical-debt.md.
+    scoping). It cannot speak to a long-lived ``hermes acp`` child. Design
+    0005 D1 keeps this port exactly as it is and adds a separate
+    ``StreamingProcessPort`` rather than widening it. See
+    docs/technical-debt.md.
     """
 
     def run(

@@ -157,9 +157,9 @@ def run_editor(
         # TODO: [tech-debt] TD-6 — read once, never again: there is no
         # SIGWINCH / WINDOW_BUFFER_SIZE_EVENT path, so after a resize frames
         # wrap against a stale width and the C-x 2 minimum-height gate tests
-        # a height the terminal no longer has. Wants the same asynchronous
-        # injection point the §C pump needs (TD-2); see
-        # docs/technical-debt.md.
+        # a height the terminal no longer has. Closes as a side effect of
+        # design 0005 D2: a resize is one more InputEvent kind on the queue
+        # that TD-2's pump needs anyway. See docs/technical-debt.md.
         width, height = port.get_size()
         harness = EditorHarness(
             width=width,

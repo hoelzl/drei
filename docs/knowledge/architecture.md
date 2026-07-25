@@ -75,13 +75,24 @@ No module in `drei.acp` imports `subprocess`, `asyncio`, or does I/O. A
 and dispatched, so the transcript of events stays the oracle for agent-produced
 text exactly as it is for typed text.
 
-**Not yet built (§C):** the pump that owns a long-lived `hermes acp` child —
-a streaming port, an event-injection point in `run_editor`'s synchronous read
-loop, serialization of deliveries against keystrokes, and cancellation wiring.
+**Not yet built (§C):** the pump that owns a long-lived `hermes acp` child.
 Until it exists the subsystem is unreachable from the shipped editor: nothing
 constructs a machine, no key binds an agent command, and a `PermissionDecided`
-response is returned by the session but sent by nobody. See
-`docs/technical-debt.md`.
+response is returned by the session but sent by nobody
+(`docs/technical-debt.md` TD-2). Its boundaries are decided in
+[design 0005](../agent/design/0005-acp-pump.md): a streaming port distinct
+from `ProcessPort`, one totally ordered `InputEvent` queue as the injection
+point in `run_editor` (adapter-side reader threads; the core still sees only
+an ordered command sequence), keys ahead of agent bytes, one delivery per
+loop iteration, and cancellation calling the machine's sweep before clearing
+the UI.
+
+Where a transcript lands is decided separately in
+[design 0004](../agent/design/0004-agent-buffer-identity.md): one **agent
+buffer** per ACP session, named `*agent*`, created when the session is
+established. Deliveries carry their target buffer id in both command and
+event — focus is never consulted — and only a *generated* buffer (one that
+visits no file) may receive one.
 
 ## Session-scoped vs buffer-scoped state
 

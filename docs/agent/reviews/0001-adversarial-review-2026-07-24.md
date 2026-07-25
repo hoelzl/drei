@@ -478,7 +478,12 @@ focused pass; full gates (`AGENTS.md` §Validation) at the end.
 tech-debt entry. RET semantics (9) deliberately changes a pinned test; the old
 pin was itself the finding.
 
-**Follow-up after remediation:** write the two design records (agent-buffer
-identity; §C pump — streaming port, injection point in `run_editor`,
-delivery/key serialization, cancellation wiring), then re-run an adversarial
-pass over clusters A-D.
+**Follow-up after remediation:** ~~write the two design records~~ **done
+2026-07-25** — `docs/agent/design/0004-agent-buffer-identity.md` (one agent
+buffer per ACP session, deliveries carrying their target, a generated buffer
+kind, tail-follow point) and `0005-acp-pump.md` (streaming port separate from
+`ProcessPort`, one ordered `InputEvent` queue as the injection point, keys
+ahead of agent bytes, single-dispatch delivery, cancellation wiring). Both
+amend design 0003 where it described code that never shipped. Remaining:
+the slices that implement them, then a fresh adversarial pass over clusters
+A-D.

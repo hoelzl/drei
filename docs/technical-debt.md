@@ -26,7 +26,8 @@ that review's.
 
 ## TD-1 (finding 5) — "the agent buffer" does not exist
 
-**Deferred to:** a design record (agent-buffer identity), with TD-2.
+**Deferred to:** a design record — **written**, `agent/design/0004-agent-buffer-identity.md`.
+The debt now is the slice that implements it, not the missing decision.
 **Location:** `src/drei/session.py` — `InsertAgentText` in `dispatch`,
 `apply_session_effects`.
 **Severity:** high once the §C pump lands; latent today because nothing
@@ -48,22 +49,22 @@ Cluster A made the modified-flag hazard *more* visible rather than less: the
 flag is now derived from the buffer's last-saved text, so an undo after an
 agent delivery reports the divergence that the append itself hid.
 
-**Why deferred:** the fix is a decision, not a patch — what does a transcript
-bind to? Candidates: a dedicated buffer id created at session start; a
-per-ACP-session buffer; an explicit `agent_buffer_id` on the session. Each
-interacts with §A.3 (read-only/generated buffers) and with what a delivery
-into a file buffer should even mean. Choosing inside a bug fix would smuggle
-a design decision past review.
+**Why deferred:** the fix was a decision, not a patch — what does a transcript
+bind to? Choosing inside a bug fix would have smuggled a design decision past
+review.
 
-**Suggested approach:** write the design record first; then bind deliveries
-to a resolved buffer id rather than the focused buffer, decide the modified
-and point-motion rules explicitly, and make
+**Suggested approach:** implement design 0004 — one agent buffer per ACP
+session created on `SessionEstablished`, deliveries carrying their target
+`BufferId` in both command and event, a generated buffer kind that only
+agent buffers satisfy, no file path (so the modified question dissolves), and
+tail-follow point motion. Make
 `test_fold_cache_reconstructible_from_events` dispatch a buffer switch
-between deliveries so the oracle actually covers the case.
+between deliveries so the oracle actually covers the case that broke.
 
-## TD-2 (finding 11) — the ACP subsystem is unreachable; the §C pump has no design record
+## TD-2 (finding 11) — the ACP subsystem is unreachable from the shipped editor
 
-**Deferred to:** a design record (§C pump).
+**Deferred to:** a design record — **written**, `agent/design/0005-acp-pump.md`.
+The debt now is the slices that implement it.
 **Location:** `src/drei/harness.py` (`EditorHarness.__init__` takes no process
 port), `src/drei/terminal.py` (`run_editor`'s synchronous `read_key` loop has
 no injection point), `src/drei/keys.py` (no agent command is bound),
@@ -76,8 +77,9 @@ editor.
 Slices 0008–0011 and 0013 built the port, codec, machine, translation, and
 approval bridge. Nothing wires them: the shipped editor cannot launch or
 speak to a long-lived `hermes acp` child, and the A.1 port is blocking
-run-to-completion by design (plan 0008 deferred the pump deliberately, but
-design 0003 §A.1 was never amended to say so).
+run-to-completion by design (plan 0008 deferred the pump deliberately;
+design 0003 §A.1 carried the unamended streaming description until design
+0005 split it).
 
 Two related inaccuracies live in the code: `apply_session_effects` documents
 its delivery as "atomic", but it is **two** dispatches
@@ -85,16 +87,20 @@ its delivery as "atomic", but it is **two** dispatches
 the fold advances in the first whether or not the second runs. And design
 0003's consequence 2 claims that atomicity as a property.
 
-**Why deferred:** the pump is a slice, not a fix. It needs a streaming port
-shape, an event-injection point in a loop that currently blocks on
-`read_key()`, a serialization rule for deliveries against keystrokes,
-cancellation wiring (the machine's sweep and the session's
-`AbortPendingPermissions` both exist but nothing calls them), and TD-1's
-buffer binding.
+**Why deferred:** the pump is several slices, not a fix. It needed a streaming
+port shape, an event-injection point in a loop that blocks on `read_key()`, a
+serialization rule for deliveries against keystrokes, cancellation wiring (the
+machine's sweep and the session's `AbortPendingPermissions` both exist but
+nothing calls them), and TD-1's buffer binding.
 
-**Suggested approach:** the design record covers all five. Until it lands,
-prefer *not* to add more §C-shaped surface area; the existing pure layers are
-the right place for behavior that does not need the transport.
+**Suggested approach:** design 0005 decides all five — a `StreamingProcessPort`
+separate from `ProcessPort`, one ordered `InputEvent` queue fed by adapter-side
+reader threads (which also closes TD-6), one event per loop iteration with keys
+ahead of agent bytes, a single-dispatch delivery, and cancellation calling
+`cancel()` then `AbortPendingPermissions`. Implement it in that order; the
+first slice needs neither cancellation nor a real agent. Note 0005's two open
+blockers before starting the cancellation slice: `C-g` currently exits the
+editor, and readiness markers have no epoch for a spontaneous delivery.
 
 ## TD-3 (finding 18) — trailing-slash find-file creates an unreachable `""` buffer
 

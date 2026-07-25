@@ -604,9 +604,9 @@ class EditorSession:
                 # buffer, so a C-x b between two deliveries splits one
                 # transcript across two buffers; it also leaves `modified`
                 # untouched (a later C-x C-s writes agent text into the
-                # user's file) and moves point to end-of-buffer. Fix needs
-                # the agent-buffer identity design record; see
-                # docs/technical-debt.md.
+                # user's file) and moves point to end-of-buffer. Design 0004
+                # decides the fix (target in the command, generated buffer
+                # kind, tail-follow point); see docs/technical-debt.md.
                 if text:
                     before = len(current.text)
                     after = before + len(text)
@@ -1183,7 +1183,8 @@ class EditorSession:
         delivery *atomic*; it is two dispatches with an observable seam. The
         fold advances in the first whether or not the second runs. Nothing
         drives it concurrently today (there is no §C pump), so the seam is
-        unobservable in practice; see docs/technical-debt.md.
+        unobservable in practice. Design 0005 D4 collapses it to one
+        dispatch emitting both events; see docs/technical-debt.md.
         """
         delivery = DeliverSessionEffects(tuple(effects))
         outcome = self.dispatch(delivery)
