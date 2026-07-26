@@ -730,13 +730,13 @@ def test_an_unrecognized_key_rides_the_standing_prompt() -> None:
 
 
 def test_del_at_an_exit_prompt_leaves_it_standing() -> None:
-    """The fourth minibuffer arm (review 0002 finding 2).
+    """DEL at an exit prompt speaks and changes nothing (row 130).
 
-    `MinibufferBackspace` has no exit branch: DEL falls through to text mode
-    and is harmless only because an exit prompt's input is `""`, which the
-    `elif self._minibuffer:` guard reads as falsy. That is a real property of
-    the current design, but it was holding by accident — pinned here so a
-    prompt that ever carries text cannot silently start eating it.
+    Like every non-`y`/`n` key at an exit prompt, DEL is met with
+    `Please answer y or n` and the prompt stands. The deeper pin from
+    review 0002 finding 2 is unchanged: an exit prompt's input is `""`,
+    and DEL must leave it that way — a prompt that ever carries text
+    cannot silently start eating it.
     """
     session = _session()
     session.dispatch(InsertText("x"))
@@ -781,7 +781,10 @@ def test_the_question_survives_clipping_when_a_note_is_present() -> None:
     `/tmp/notes.txt: permission-denied. Modif`, a truncated error with no
     visible question, on the row where `y` is the key that discards the
     buffer. A suffix guarantees the opposite sacrifice: the annotation is what
-    gets cut, and the question and its answer set always survive.
+    gets cut, and the question always survives. The answer *set* does not —
+    the gate's parity string is 46 characters, so `(y or n)` clips at 40 too;
+    the question is the half that must survive (plan 0019 D3/status, slice-19
+    review finding 3).
     """
     from drei.render import _clip
 
