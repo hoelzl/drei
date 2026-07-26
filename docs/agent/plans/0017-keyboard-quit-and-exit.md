@@ -1,6 +1,26 @@
 # Seventeenth slice: `C-g` is keyboard-quit, `C-x C-c` exits
 
-**Status:** ready (issue #45).
+**Status:** implemented (issue #45). D3 was confirmed at the gate: `C-x C-c`
+discards modified buffers for one slice, and TD-11 stays open.
+
+What the plan got wrong or did not foresee:
+
+- **V1 and V2 could not be separate commits.** The change that frees `C-g` is
+  the change that breaks every script ending in it, so splitting them would
+  have meant committing a red tree. The plan's V-numbering is the order the
+  work was done, not the commit boundary.
+- **Exiting costs one readiness marker more than quitting did.** `C-x` is an
+  unresolved prefix in an epoch of its own, so three marker-count assertions
+  moved by one. Obvious in hindsight; not foreseen, and it is the kind of
+  thing a blind sweep would have "fixed" by loosening the assertion.
+- **`Quit` does not survive to the final frame.** Every command sets the echo
+  and `ExitEditor` has no message, so the exit frame clears it. Correct
+  (Emacs messages are transient) but it falsified the first assertion written
+  for the acceptance scenario.
+- **The plan said `C-c` might need a precedence test.** It does not need a new
+  one — `test_cx_cc_resolves_to_exit` covers it — but the risk was worth
+  writing down, and §7's mutation check confirmed the loop was the only
+  consumer of `KeyboardQuitEvent` before anything relied on it.
 
 **Architecture gate:** none — no design record owns the keymap, and this slice
 does not need one. It is a binding decision plus the parity rows that govern

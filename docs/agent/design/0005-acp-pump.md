@@ -169,13 +169,12 @@ pump calls both, in that order, on turn cancellation: answer the agent first
 Trigger: `C-g` **while a turn is in flight** cancels the turn. Otherwise `C-g`
 keeps its current meaning.
 
-That current meaning is itself a problem this record must name rather than
-inherit silently: `C-g` presently *exits the editor*, a slice-1 shortcut that
-Emacs does not share (`C-g` is `keyboard-quit`; `C-x C-c` exits). Overloading
-an exit key with turn cancellation is a bad end state. The pump slice should
-not fix it by accident either — it is a keymap decision that deserves its own
-change, with the registry row it will falsify. Recorded here as the blocking
-question for the cancellation slice.
+**Unblocked by slice 17.** This record used to name `C-g` as the blocking
+question: it *exited the editor*, a slice-1 shortcut Emacs does not share, and
+overloading an exit key with turn cancellation would have been a bad end
+state. Plan `0017-keyboard-quit-and-exit.md` took that as its own change, with
+the registry rows it falsified. `C-g` is now `keyboard-quit` and `C-x C-c`
+exits, so the trigger above is available and means what it says.
 
 ### D6. Child lifecycle and failure
 

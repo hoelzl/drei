@@ -104,9 +104,10 @@ from the shipped editor, along the boundaries
   tokens, and `run_editor`'s `finally` terminates it.
 
 What remains unwired is turn **cancellation** — the machine's sweep and
-`AbortPendingPermissions` both exist and nothing triggers them, because the
-trigger design 0005 wants is `C-g` and `C-g` currently exits the editor
-(`docs/technical-debt.md` TD-2).
+`AbortPendingPermissions` both exist and nothing triggers them
+(`docs/technical-debt.md` TD-2). Slice 17 removed the blocker: `C-g` is
+`keyboard-quit` now rather than the exit key, so it is free to mean "cancel
+the turn in flight".
 
 Where a transcript lands is decided separately in
 [design 0004](../agent/design/0004-agent-buffer-identity.md): one **agent

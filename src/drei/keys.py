@@ -87,9 +87,17 @@ def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingK
         completed = _PREFIX_COMMANDS.get((pending, key))
         if completed is not None:
             return completed
-        # TODO: [tech-debt] TD-5 — C-g lands here too, so "C-x C-g" is one
-        # silent unresolved key: no quit, no echo, and the mark survives.
-        # Emacs cancels the prefix and quits. See docs/technical-debt.md.
+        if key == "C-g":
+            # Cancel the prefix and quit, as Emacs does. Dropping the pending
+            # prefix is implicit: the caller clears it for anything that is
+            # not a `PendingKey`. A user who has half-typed a chord and wants
+            # out presses this key, so something has to happen — it used to
+            # become one silent `UnresolvedKey("C-x C-g")`.
+            return KeyboardQuit()
+        # Every *other* unbound key after a prefix is still swallowed
+        # silently, where Emacs echoes "C-x <key> is undefined". That needs
+        # the echo mechanism TD-4 tracks, and it is a question about prefix
+        # semantics rather than about this key.
         return UnresolvedKey(f"{pending} {key}")
     if key in _PREFIXES:
         return PendingKey(key)
