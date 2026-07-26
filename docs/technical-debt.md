@@ -17,10 +17,10 @@ Rules for this file:
   plan or a design record; this is for behavior that is wrong, misleading, or
   unowned in code that already ships.
 
-Everything below was found by [adversarial review
+TD-2 through TD-9 were found by [adversarial review
 0001](agent/reviews/0001-adversarial-review-2026-07-24.md) (2026-07-24) and
-deferred in that review's triage on the same date. The finding numbers are
-that review's.
+deferred in that review's triage on the same date; their finding numbers are
+that review's. Later entries name the slice that found them instead.
 
 ---
 
@@ -217,3 +217,50 @@ compute pane heights against `height - 1` and let the *panes* absorb the
 shortfall, dropping whole panes from the bottom while the echo row is
 retained. Then decide, with a parity row, whether a frame too short for even
 one pane keeps the echo row or renders empty.
+
+## TD-11 (2026-07-26) — quitting discards unsaved work, on one keystroke, with no prompt
+
+**Location:** `src/drei/keys.py` — `C-g` is bound to `KeyboardQuit`;
+`src/drei/terminal.py` — the loop returns on `KeyboardQuitEvent`, ending the
+run.
+**Severity:** high — silent, unrecoverable data loss reachable by habit.
+
+`C-g` exits the editor, and exiting drops every modified buffer without
+asking. There is no confirmation, no prompt, and no way back.
+
+This is worse than an ordinary missing feature, because of *which* key it is.
+In GNU Emacs `C-g` is `keyboard-quit` — the key you press when you do not know
+what is happening, and the one key guaranteed to destroy nothing. Exiting is
+`C-x C-c`, which offers to save each modified buffer first. Drei inverted the
+safest key in the reference editor into its most destructive one, so muscle
+memory carried over from Emacs actively causes data loss. It shipped in slice
+1 as a shortcut and went unregistered in the parity registry for sixteen
+slices (now recorded — see `knowledge/emacs-parity.md`).
+
+**Why deferred:** it is two behavior changes, not one, and they have different
+risk profiles.
+
+1. *The binding.* `C-g` becomes `keyboard-quit` (clears the mark, echoes
+   `Quit`, changes nothing else) and `C-x C-c` exits. The loop needs its own
+   exit event so `KeyboardQuitEvent` can go back to meaning "the user aborted
+   something". Roughly 113 `C-g` references across 15 test files plus every
+   TermVerify scenario end with "C-g quits" and have to be rewritten — wide,
+   mechanical, and exactly the kind of sweep where an assertion quietly stops
+   asserting what it used to.
+2. *The prompt.* `C-x C-c` with modified buffers should offer to save them.
+
+Doing both at once puts two behavior changes and a 15-file test sweep in one
+slice. Doing (1) first is a large safety win on its own — quitting stops being
+a single keystroke and becomes a sequence the user has to mean — but it does
+**not** close this entry, and taking (1) as licence to close it is the failure
+this entry exists to prevent.
+
+**Suggested approach:** the choice minibuffer built for the approval bridge
+(B.8) already presents options and maps a key to a decision, so the
+save-buffers prompt is a use of existing machinery rather than new machinery.
+Per-buffer `y`/`n`, plus an escape that quits without saving, matching
+`save-buffers-kill-terminal`.
+
+**This entry is edited, not removed, by the binding slice.** After (1) it
+reads "`C-x C-c` discards unsaved work with no prompt"; it is removed when the
+prompt ships.
