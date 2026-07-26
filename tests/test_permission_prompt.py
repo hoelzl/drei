@@ -387,10 +387,20 @@ class TestPermissionQueue:
         assert session.minibuffer is not None
         assert session.pending_permission_count() == 1
         # Resolve the first; the second is presented next (FIFO drain).
-        session.dispatch(MinibufferInput("y"))
+        first = session.dispatch(MinibufferInput("y"))
         assert session.minibuffer is not None  # second prompt now open
         assert session.pending_permission_count() == 0
-        session.dispatch(MinibufferInput("n"))
+        # *Which* one is presented, not merely that one is: the requests are
+        # otherwise indistinguishable, so a LIFO drain used to pass this test
+        # unchanged. Since the queue drains through one shared helper, the
+        # ordering is now carried for four call sites at once.
+        assert [
+            e.request_id for e in first.events if isinstance(e, PermissionDecided)
+        ] == [1]
+        second = session.dispatch(MinibufferInput("n"))
+        assert [
+            e.request_id for e in second.events if isinstance(e, PermissionDecided)
+        ] == [2]
         assert session.minibuffer is None  # all resolved
 
     def test_request_during_text_prompt_presented_after(self) -> None:

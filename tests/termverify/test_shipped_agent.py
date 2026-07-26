@@ -49,6 +49,7 @@ from termverify import (
 )
 from termverify.conpty import ConptyAdapter, ConptyBinding
 from termverify.cooperation import CooperationConstraintPorts
+from test_shipped_terminal import _exit_through_the_gate
 
 pytestmark = [
     pytest.mark.termverify,
@@ -234,8 +235,5 @@ def test_shipped_editor_survives_an_agent_that_will_not_start(tmp_path: Path) ->
         logged = _chord(adapter, "Enter")
         assert any("not-found" in line for line in logged), logged
 
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        final = _exit_through_the_gate(adapter)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final

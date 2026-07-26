@@ -1,6 +1,45 @@
 # Eighteenth slice: the save-buffers prompt on exit
 
-**Status:** ready (issue #48).
+**Status:** implemented (issue #48). Two places the code diverged from this
+plan, both recorded rather than quietly absorbed:
+
+- **§5's sweep was measured low.** 9 in-process sites in `test_terminal.py`
+  (not 11 — several predicted sites end on a *clean* buffer and never reach a
+  prompt) and **9** ConPTY scenarios, not 5: `navigation`, the two in
+  `test_shipped_windows.py`, and `survives_an_agent_that_will_not_start` all
+  type into `scratch` and so meet the stage-2 gate. The self-checking property
+  §5 claims held exactly as described — every miss was a hard failure, none
+  was a test that kept passing while asserting less.
+- **V1 landed stage 1 and the direct exit; the gate arrived in V2**, as
+  planned — but `_advance_exit` reached its final three-way shape in V2 rather
+  than being extended, because the "after the last offer, exit" placeholder
+  and the real gate are the same branch point.
+
+Two ConPTY scenarios exit *through* stage 1 rather than around it
+(`kill_yank` answers `y` and the file is written; `yank_pop` answers `n` and
+then confirms), which is more than §9 asked for and is where the acceptance
+criterion "proven through the shipped executable" is met.
+
+**One behavior arrived that this plan did not specify.** The adversarial
+review found that a stage-1 save which *fails* was completely silent: the
+`SaveFailed` event is one of the three `_echo_for` renders, but the same
+outcome opens the next exit prompt, and an open minibuffer owns the echo row —
+so the message was drawn over unread. The user had asked to save, saw no
+failure, and was then asked `Modified buffers exist; exit anyway?`, which
+reads as being about some *other* buffer. D3's "On screen" line described the
+control flow and mistook it for the message. The fix carries the failure in
+the next prompt rather than building the message mechanism §4 defers, and it
+is registry row 8.
+
+A second review round then caught the fix's own defect: the note started as a
+**prefix**, and the echo row is hard-clipped (`render._clip` — no wrap, no
+scroll) at a shipped width of 40 columns, so it pushed the question off the
+screen. At 40 the gate read `<path>: permission-denied. Modif` — a truncated
+error with no visible question, on the row where `y` discards the buffer — and
+the stage-1 offer lost the filename it was asking about. The note is a suffix
+now: one half of that string is always going to be sacrificed, and it must not
+be the question. That ordering is a decision this plan never made, and it is
+the kind a plan is supposed to make.
 
 **Architecture gate:** none — no design record owns the keymap or the exit
 path, and this slice does not need one. It is `docs/technical-debt.md` **TD-11

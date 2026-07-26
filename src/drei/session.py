@@ -298,6 +298,12 @@ def _visit(value: BufferValue) -> tuple[BufferValue, _BufferState]:
     return value, _BufferState(None if value.modified else value.text, eol)
 
 
+# The `_minibuffer_kind` values that put the minibuffer in exit mode (plan
+# 0018 D4). Kind-based dispatch is the extension point the text prompts already
+# use; generalizing B.8's `_choice` instead would have refactored the
+# fail-closed approval path for no behavior.
+_EXIT_KINDS = frozenset({"save-buffer", "exit-anyway"})
+
 KILL_RING_CAPACITY = 60
 UNDO_CAPACITY = 100
 # A window needs a modeline row plus at least two text rows (plan 0012 D4).
@@ -458,6 +464,16 @@ class EditorSession:
         # is in choice mode (MinibufferInput maps a key to an option rather
         # than appending text). None in text mode / when inactive.
         self._choice: PermissionRequested | None = None
+        # Exit-prompt state (plan 0018 D4): the file-visiting modified buffers
+        # `C-x C-c` has still to offer to save, head first, in creation order.
+        # Non-empty only while an exit sequence is in flight; `_minibuffer_kind`
+        # ("save-buffer" / "exit-anyway") is what puts the minibuffer in exit
+        # mode, so `_choice` stays None throughout and B.8's permission path is
+        # untouched. The path is carried alongside the id rather than re-read
+        # at prompt time: it is what made the buffer eligible, so pairing them
+        # makes "a pending buffer always has a path" a type rather than an
+        # invariant a later slice could quietly break (review 0002 finding 10).
+        self._exit_pending: list[tuple[BufferId, str]] = []
         # Permission requests that arrived while a prompt was open, in order.
         # Grows only while a prompt is open and drains on resolution; in
         # practice bounded by the agent's concurrent in-flight requests (a
@@ -693,7 +709,7 @@ class EditorSession:
                 new_value = replace(current, point=new_point)
                 events.append(PointMoved(-1, actual))
             case SaveBuffer():
-                new_value = self._save(current, events)
+                new_value = self._save(current, self._current_id, events)
             case KillLine():
                 new_value = self._kill_line(current, events)
             case Yank():
@@ -776,7 +792,11 @@ class EditorSession:
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
             case ExitEditor():
-                events.append(EditorExited())
+                # The session decides whether the run may end (plan 0018 D1):
+                # either nothing is at risk and `EditorExited` goes out now, or
+                # the first question opens and only an answer ends the run. The
+                # loop and the harness are untouched.
+                self._begin_exit(events)
                 new_value = current
             case FindFile():
                 self._minibuffer = ""
@@ -797,6 +817,7 @@ class EditorSession:
                 events.append(MinibufferOpened(self._minibuffer_prompt))
                 new_value = current
             case MinibufferInput(char=char):
+                new_value = current
                 if self._choice is not None:
                     # Choice mode: map a key to an option kind, resolve, close.
                     decision = self._choice_key_to_decision(self._choice, char)
@@ -804,9 +825,15 @@ class EditorSession:
                         request_id = self._choice.request_id
                         events.append(PermissionDecided(request_id, decision))
                         self._close_choice(events)
+                elif self._minibuffer_kind in _EXIT_KINDS:
+                    self._exit_prompt_key(char, events)
+                    # Re-read: a stage-1 save writes into its target buffer
+                    # directly, and `current` was captured before the arm ran
+                    # (D6). Saving the focused buffer would otherwise be undone
+                    # by the trailing write-back.
+                    new_value = self.buffer.current
                 elif self._minibuffer is not None:
                     self._minibuffer += char
-                new_value = current
             case MinibufferBackspace():
                 if self._choice is not None:
                     pass  # no text to delete in choice mode
@@ -826,6 +853,17 @@ class EditorSession:
 
                     events.append(PermissionDecided(request_id, Cancelled()))
                     self._close_choice(events)
+                elif self._minibuffer_kind in _EXIT_KINDS:
+                    # `C-g` abandons the whole exit, not just this question
+                    # (D5). Buffers already saved during the sequence stay
+                    # saved; the editor keeps running. Draining the permission
+                    # queue is D7: the exit is abandoned, so a request that
+                    # queued behind it must be presented rather than left to
+                    # hang the agent for the rest of the run.
+                    self._exit_pending.clear()
+                    self._close_exit_prompt()
+                    events.append(MinibufferAborted())
+                    self._drain_permission_queue(events)
                 elif self._minibuffer is not None:
                     self._minibuffer = None
                     self._minibuffer_prompt = ""
@@ -833,9 +871,7 @@ class EditorSession:
                     events.append(MinibufferAborted())
                     # Draining here too: a queued permission request must not
                     # wait forever behind an aborted text prompt.
-                    if self._permission_queue:
-                        nxt = self._permission_queue.pop(0)
-                        self._open_choice(nxt, events)
+                    self._drain_permission_queue(events)
                 new_value = current
             case MinibufferAccept():
                 if self._choice is not None:
@@ -845,6 +881,11 @@ class EditorSession:
                     request_id = self._choice.request_id
                     events.append(PermissionDecided(request_id, decision))
                     self._close_choice(events)
+                    new_value = current
+                elif self._minibuffer_kind in _EXIT_KINDS:
+                    # `RET` is not a default `y` (D5): the exit prompts are the
+                    # last guard before losing work, and a habitual `RET` must
+                    # not answer them. Silent no-op; the prompt stays up.
                     new_value = current
                 elif self._minibuffer is not None:
                     text = self._minibuffer
@@ -889,9 +930,7 @@ class EditorSession:
                     # A permission request queued behind this text prompt is
                     # presented next — otherwise it would wait forever and
                     # hang the agent.
-                    if self._permission_queue:
-                        nxt = self._permission_queue.pop(0)
-                        self._open_choice(nxt, events)
+                    self._drain_permission_queue(events)
                 else:
                     new_value = current
             case PromptPermission(request=request):
@@ -994,6 +1033,148 @@ class EditorSession:
         return CommandOutcome(tuple(events), self._observation(self.buffer.current))
 
     # ------------------------------------------------------------------
+    # Exit sequence (plan 0018 D1-D5): save-buffers-kill-terminal
+    # ------------------------------------------------------------------
+
+    def _begin_exit(self, events: list[Event]) -> None:
+        """Start `C-x C-c`: collect what is at risk, then ask or exit.
+
+        Only *file-visiting* modified buffers are offered, because a buffer
+        with no path cannot be saved at all — Drei has no `write-file`, so
+        offering would be offering something the editor cannot do. A modified
+        pathless buffer is not forgotten: it is counted by the stage-2 gate
+        (D2, parity row 4).
+        """
+        self._exit_pending = [
+            (buffer_id, buffer.current.file_path)
+            for buffer_id, buffer in self._buffers.items()
+            if buffer.current.modified and buffer.current.file_path is not None
+        ]
+        self._advance_exit(events)
+
+    def _advance_exit(self, events: list[Event], note: str = "") -> None:
+        """Offer the next buffer at risk, or fall through to the exit gate.
+
+        ``note`` carries a failure the user has to know about before
+        answering. It rides the prompt because the minibuffer owns the echo
+        row while a prompt is open, so a message left to `_echo_for` would be
+        drawn over unread (review 0002 finding 1).
+
+        It is a **suffix**, and that ordering is the decision. The echo row is
+        hard-clipped — `render._clip` does not wrap or scroll, and the shipped
+        ConPTY scenarios run at 40 columns — so one half of this string is
+        going to be sacrificed. Prefixing sacrificed the question: at 40 the
+        gate read `<path>: permission-denied. Modif`, a truncated error with
+        no visible question, on the row where `y` discards the buffer, and the
+        stage-1 offer lost the filename it was asking about. A suffix
+        sacrifices the annotation instead, which is the right way round: the
+        question and its answer set must be readable at every width, and a
+        cut-off reason is still a visible sign that something went wrong.
+        """
+        if self._exit_pending:
+            _, path = self._exit_pending[0]
+            self._open_exit_prompt(
+                "save-buffer", f"Save file {path}? (y or n) {note}", events
+            )
+        elif any(buffer.current.modified for buffer in self._buffers.values()):
+            # Stage 2 (D3): the question is "does any buffer currently report
+            # modified", asked of the buffers rather than tallied from the
+            # answers. A `y` whose write failed leaves its buffer modified and
+            # therefore still blocks; a `y` that succeeded stops blocking. A
+            # tally would have to model failure separately to get the
+            # read-only case right, and Emacs re-checks `buffer-modified-p`
+            # the same way.
+            self._open_exit_prompt(
+                "exit-anyway",
+                f"Modified buffers exist; exit anyway? (y or n) {note}",
+                events,
+            )
+        else:
+            events.append(EditorExited())
+
+    def _open_exit_prompt(self, kind: str, prompt: str, events: list[Event]) -> None:
+        self._minibuffer = ""  # exit mode: no text, but minibuffer active
+        self._minibuffer_prompt = prompt
+        self._minibuffer_kind = kind
+        events.append(MinibufferOpened(prompt))
+
+    def _close_exit_prompt(self) -> None:
+        """Take down an exit prompt without draining the permission queue.
+
+        Deliberately not `_close_choice` (D7): a request that arrived behind an
+        exit prompt must be presented only if the exit is *abandoned*. Advancing
+        the sequence is not abandonment, and the process may be about to end.
+        """
+        self._minibuffer = None
+        self._minibuffer_prompt = ""
+        self._minibuffer_kind = None
+
+    def _exit_prompt_key(self, char: str, events: list[Event]) -> None:
+        """One key at an exit prompt (D5).
+
+        `y` and `n` advance the sequence; every other key is a silent no-op and
+        the prompt stays up — deliberately including `RET`, which must not
+        resolve a question about losing work by reflex (B.8 finding 9's
+        reasoning). Emacs echoes `Please answer y or n` there; Drei has no
+        message mechanism (TD-4, deviation row 6).
+        """
+        if char not in ("y", "n"):
+            return
+        if self._minibuffer_kind == "exit-anyway":
+            self._close_exit_prompt()
+            if char == "y":
+                events.append(EditorExited())
+            else:
+                # Refusing the gate abandons *this* exit, not the ability to
+                # exit: `C-x C-c` asks again from the top. Same abandonment
+                # path as `C-g`, so the permission queue drains here too (D7).
+                events.append(MinibufferAborted())
+                self._drain_permission_queue(events)
+            return
+        buffer_id, _ = self._exit_pending.pop(0)
+        # A `y` whose write fails must not read as a save. `n` is an answer
+        # rather than an error and reports nothing.
+        note = self._save_buffer(buffer_id, events) if char == "y" else ""
+        self._close_exit_prompt()
+        self._advance_exit(events, note)
+
+    def _drain_permission_queue(self, events: list[Event]) -> None:
+        """Present the next request that queued behind a prompt, if any.
+
+        Called on every path that *abandons* an exit (D7). Advancing the
+        sequence deliberately does not call it: the next question is about to
+        take the echo row, and a completed exit is a process that is ending —
+        `pump.close()` terminates the child, so nothing is left waiting.
+        """
+        if self._permission_queue:
+            nxt = self._permission_queue.pop(0)
+            self._open_choice(nxt, events)
+
+    def _save_buffer(self, buffer_id: BufferId, events: list[Event]) -> str:
+        """Save one buffer in place; return a note for the next exit prompt.
+
+        The write-back is direct rather than through `dispatch`'s trailing
+        `replace` (D6): the command being dispatched is a `MinibufferInput`,
+        whose commit target is the *focused* buffer. The arm re-reads
+        `self.buffer.current` afterwards so a save of the focused buffer is not
+        overwritten by the value captured before the arm ran.
+
+        The note is empty on success and `"[<path>: <token>]"` on failure,
+        wrapping `_echo_for`'s own `SaveFailed` shape — the same failure, so a
+        second vocabulary for it would be one more thing to keep in agreement.
+        """
+        buffer = self._buffers[buffer_id]
+        # Only what this save appends. `events` is in fact empty at the single
+        # call site today, so the window is belt-and-braces rather than a
+        # tested guarantee — it costs a line and removes the question.
+        before = len(events)
+        buffer.replace(self._save(buffer.current, buffer_id, events))
+        for event in events[before:]:
+            if isinstance(event, SaveFailed):
+                return f"[{event.path}: {event.error}]"
+        return ""
+
+    # ------------------------------------------------------------------
     # B.8 choice-minibuffer helpers
     # ------------------------------------------------------------------
 
@@ -1009,9 +1190,7 @@ class EditorSession:
         self._choice = None
         self._minibuffer = None
         self._minibuffer_prompt = ""
-        if self._permission_queue:
-            nxt = self._permission_queue.pop(0)
-            self._open_choice(nxt, events)
+        self._drain_permission_queue(events)
 
     @staticmethod
     def _choice_options(request: PermissionRequested) -> list[dict[str, JsonValue]]:
@@ -1556,24 +1735,35 @@ class EditorSession:
             modified=self._modified_after_undo(redone_text),
         )
 
-    def _save(self, current: BufferValue, events: list[Event]) -> BufferValue:
+    def _save(
+        self, current: BufferValue, buffer_id: BufferId, events: list[Event]
+    ) -> BufferValue:
+        """Write ``buffer_id``'s value through the port; return the new value.
+
+        Buffer-addressed rather than current-buffer-bound (plan 0018 D6): the
+        exit prompt saves buffers the user is not looking at, so the line
+        ending and the ``no-file`` event's name must come from the buffer being
+        written and not from whatever happens to be focused. ``C-x C-s`` passes
+        the focused id and is otherwise unchanged.
+        """
         path = current.file_path
+        state = self._states[buffer_id]
         if path is None:
             # No file to write: name the buffer and say so honestly — a fake
             # path with "not-found" would read as a missing file (review 0001
             # finding 26). Echoes as "<buffer>: no-file" until a write-file
             # (path-prompting) slice exists.
-            events.append(SaveFailed(self._current_id.value, "no-file"))
+            events.append(SaveFailed(buffer_id.value, "no-file"))
             return current
         try:
-            self._files.write(path, to_file_text(current.text, self._state.eol))
+            self._files.write(path, to_file_text(current.text, state.eol))
         except OSError as error:
             events.append(SaveFailed(path, normalize_os_error(error)))
             return current
         events.append(BufferSaved(path))
         # The save moves the clean point: undoing past it must now report the
         # buffer modified (review 0001 finding 3).
-        self._state.saved_text = current.text
+        state.saved_text = current.text
         return replace(current, modified=False)
 
     def _kill_line(self, current: BufferValue, events: list[Event]) -> BufferValue:
