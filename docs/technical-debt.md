@@ -29,8 +29,7 @@ that review's. Later entries name the slice that found them instead.
 **Deferred to:** the cancellation slice. Design record:
 `agent/design/0005-acp-pump.md` D5.
 **Location:** `src/drei/acp/machine.py` (`cancel`), `src/drei/session.py`
-(`AbortPendingPermissions`), `src/drei/keys.py` (`C-g` is bound to
-`KeyboardQuit`, which exits the editor).
+(`AbortPendingPermissions`).
 **Severity:** medium — a turn in flight cannot be stopped except by quitting.
 
 **Most of this entry is paid.** Plan 0016 shipped the pump: a
@@ -46,17 +45,20 @@ the `cancelled` outcome, and the session's `AbortPendingPermissions` closes an
 open choice prompt and drains the queue. The pump calls the second (on child
 exit) but never the first, and nothing at all triggers a turn cancel.
 
-**Why deferred:** the trigger is a keymap decision, not a wiring one. 0005 D5
-wants `C-g` *while a turn is in flight* to cancel the turn — but `C-g`
-currently **exits the editor**, a slice-1 shortcut Emacs does not share
-(`C-g` is `keyboard-quit`; `C-x C-c` exits). Overloading an exit key with turn
-cancellation by accident is the bad end state 0005 names, and fixing the
-binding falsifies a parity registry row. That is its own change.
+**Why deferred:** the trigger was a keymap decision before it was a wiring
+one. 0005 D5 wants `C-g` *while a turn is in flight* to cancel the turn, and
+`C-g` used to **exit the editor** — overloading an exit key with turn
+cancellation is the bad end state 0005 names. **Slice 17 removed that
+blocker:** `C-g` is `keyboard-quit` now and `C-x C-c` exits, with the registry
+rows rewritten. What is left is only the wiring.
 
-**Suggested approach:** decide the `C-g`/`C-x C-c` binding first, with its
-registry row; then have the pump call `cancel()` and dispatch
+**Suggested approach:** have the pump call `cancel()` and then dispatch
 `AbortPendingPermissions`, in that order — answer the agent, which is blocked,
-before clearing the UI.
+before clearing the UI. One design question remains: a permission prompt is
+open *precisely* when a turn is in flight, so `C-g` in that state is
+ambiguous. Aborting the innermost thing is the Emacs instinct, and denying one
+permission is narrower than killing the turn, which argues for the first
+`C-g` denying and a second cancelling.
 
 ## TD-3 (finding 18) — trailing-slash find-file creates an unreachable `""` buffer
 

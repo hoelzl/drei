@@ -52,9 +52,12 @@ def test_cx_cs_resolves_to_save() -> None:
 def test_cx_cc_resolves_to_exit() -> None:
     """`C-c` is a prefix in its own right, and the pair still wins.
 
-    `resolve` consults the prefix TABLE before the prefix SET. Reversing those
-    two branches would turn `C-x C-c` into a nested pending prefix, exiting
-    would become unreachable, and nothing else in the keymap would notice.
+    While a prefix is pending, `resolve` never consults the prefix SET at all
+    — the pending branch returns before reaching it. Hoisting that check above
+    the pending branch would turn `C-x C-c` into a nested pending prefix and
+    make exiting unreachable. (It would also break `C-x C-x`, which
+    `test_pending_second_key_cx_again_is_unresolved` catches; this test is the
+    one that names the consequence that matters.)
     """
     assert resolve("C-x", "C-c") == ExitEditor()
     assert resolve(None, "C-c") == PendingKey("C-c")

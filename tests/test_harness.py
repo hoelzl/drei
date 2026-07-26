@@ -115,8 +115,8 @@ def test_harness_outcome_sequence() -> None:
 def test_harness_routes_minibuffer_keys() -> None:
     """C-x C-f opens the prompt; keys route to the minibuffer; a pending
     prefix typed before activation is dropped; RET accepts (missing file
-    through the null port → empty buffer); C-g aborts and a second C-g
-    quits."""
+    through the null port → empty buffer); C-g aborts the prompt without
+    touching the buffer or the mark."""
     harness = EditorHarness(width=40, height=6)
     harness.send("z")  # dirty the buffer: text "z"
     harness.send("C-x")  # pending prefix...

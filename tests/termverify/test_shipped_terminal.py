@@ -2,7 +2,7 @@
 
 Drives the real `drei` process through TermVerify's ConPTY adapter on
 Windows: wait for the cooperation readiness marker, insert text, move
-backward/forward, send C-g, and assert clean exit plus frame evidence.
+backward/forward, exit with C-x C-c, and assert clean exit plus frame evidence.
 
 The semantic oracle remains the direct tests; this scenario proves the
 shipped terminal integration (raw mode, key decoding, frame writes,
@@ -132,8 +132,9 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
             moved_lines = _frame_lines(moved.observation)
             assert any(line.startswith("hi") for line in moved_lines), moved_lines
 
-        # C-g: keyboard quit exits the editor cleanly (native end-of-stream).
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        # C-x C-c exits the editor cleanly (native end-of-stream).
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -196,7 +197,8 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
         moved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "b")))
         assert type(moved) is EpochCompleted, moved
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -238,7 +240,8 @@ def test_shipped_editor_save_scenario(tmp_path: Path) -> None:
         # The file exists on disk with the buffer content.
         assert target.read_text(encoding="utf-8") == "hi"
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -284,7 +287,8 @@ def test_shipped_editor_kill_yank_scenario(tmp_path: Path) -> None:
         assert any(line.startswith("ab") for line in yanked_lines), yanked_lines
         assert any(line.startswith("cd") for line in yanked_lines), yanked_lines
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -352,7 +356,8 @@ def test_shipped_editor_undo_scenario(tmp_path: Path) -> None:
         probed_lines = _frame_lines(probed_observation)
         assert not any(line.startswith("a") for line in probed_lines), probed_lines
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -394,7 +399,8 @@ def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
         yanked_lines = _frame_lines(yanked_observation)
         assert any(line.startswith("two") for line in yanked_lines), yanked_lines
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -464,7 +470,8 @@ def test_shipped_editor_find_file_scenario(tmp_path: Path) -> None:
         assert any("Wrote" in line for line in _frame_lines(saved.observation))
         assert target.read_text(encoding="utf-8") == "!found me"
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -502,7 +509,8 @@ def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
         assert any(line.startswith("keep") for line in aborted_lines), aborted_lines
 
         # The editor is still alive, and C-x C-c is what ends it.
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
@@ -548,7 +556,8 @@ def test_shipped_editor_navigation_keys_are_inert(tmp_path: Path) -> None:
         survived_lines = _frame_lines(stepped.observation)
         assert any(line.startswith("hi") for line in survived_lines), survived_lines
 
-        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
         final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final

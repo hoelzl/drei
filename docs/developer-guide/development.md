@@ -24,7 +24,7 @@ DREI_PARITY=1 uv --no-config run pytest tests/differential -q
 ## Verified commands
 
 - Direct semantic evidence: `uv --no-config run pytest --cov --cov-report=term-missing`
-- Shipped-terminal evidence: `uv --no-config run pytest tests/termverify -q` (ConPTY, Windows; skipped on other platforms in TermVerify 0.1.x), or run `uv --no-config run drei` in a real TTY (writes `DREI:READY`, emits OSC 7791 readiness markers, exits cleanly on `C-g`).
+- Shipped-terminal evidence: `uv --no-config run pytest tests/termverify -q` (ConPTY, Windows; skipped on other platforms in TermVerify 0.1.x), or run `uv --no-config run drei` in a real TTY (writes `DREI:READY`, emits OSC 7791 readiness markers, exits cleanly on `C-x C-c`; `C-g` is `keyboard-quit` and does not exit).
 - Differential evidence: `DREI_PARITY=1 uv --no-config run pytest tests/differential -q` (requires Docker or a pinned 29.x host `emacs`).
 
 ## Coverage floor

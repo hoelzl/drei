@@ -98,8 +98,9 @@ def test_c_g_does_not_end_the_run() -> None:
     destructive outcome (TD-11).
 
     The script does not quit at all, so the run ends by running out of input.
-    That is the point: had `C-g` still exited, the `\x18\x03` after it would
-    never be consumed and no `EndOfInput` would be raised.
+    That is what makes `EndOfInput` the assertion: had `C-g` still exited, the
+    loop would have returned before the queue ran dry and nothing would have
+    been raised.
     """
     port = FakePort([])
     with pytest.raises(EndOfInput):
@@ -112,6 +113,31 @@ def test_c_g_does_not_end_the_run() -> None:
     assert _frame_rows(port)[-1][0].startswith("a")
     assert any(row.startswith("Quit") for row in _frame_rows(port)[-1])
     assert written.count(READINESS_MARKER) == 3  # startup, "a", C-g
+    assert port.restored
+
+
+def test_c_x_c_c_discards_a_modified_buffer_without_asking() -> None:
+    """TD-11, pinned rather than assumed.
+
+    This is the debt slice 17 deliberately did **not** pay: exiting drops
+    unsaved work with no prompt. Emacs's `save-buffers-kill-terminal` offers
+    to save each modified buffer first.
+
+    It is asserted in-process, and fast, on purpose. The behaviour was
+    otherwise covered only by a Windows-only ConPTY scenario, so slice 18 —
+    whose whole subject is making this false — would have had nothing to turn
+    red on the platform most of its work happens on.
+    """
+    from conftest import FakeFilePort
+
+    files = FakeFilePort({"/tmp/notes.txt": "saved"})
+    port = FakePort(["x", "\x18", "\x03"])
+    run_with_keys(port, file_port=files, file_path="/tmp/notes.txt")
+
+    # The edit is gone: nothing was written, and nothing asked.
+    assert files.files["/tmp/notes.txt"] == "saved"
+    written = "".join(port.outputs)
+    assert "Save" not in written
     assert port.restored
 
 
@@ -174,7 +200,7 @@ def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
         def get_size(self) -> tuple[int, int]:
             return (40, 10)
 
-    # C-k C-f C-k C-y ESC y C-g over "one\ntwo\nthree"
+    # C-k C-f C-k C-y ESC y, then C-x C-c, over "one\ntwo\nthree"
     port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x18", "\x03"])
     run_with_keys(port, initial_text="one\ntwo\nthree")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
@@ -197,7 +223,7 @@ def test_editor_region_commands_through_byte_loop() -> None:
 
     # C-@ C-f C-f C-w kills "he"; C-y restores it; C-@ C-b C-b M-w copies
     # "he" backward (copy clears the mark — the kill must come first);
-    # C-x C-x without a mark is then a no-op; C-g quits.
+    # C-x C-x without a mark is then a no-op; C-x C-c exits.
     port = TallPort(
         [
             "\x00",
@@ -254,7 +280,7 @@ def test_editor_undo_through_byte_loop() -> None:
 
 def test_editor_find_file_through_byte_loop(tmp_path: Path) -> None:
     """C-x C-f shows the prompt; typed path echoes; RET opens the file
-    (host fixture); C-g C-g aborts then quits. \x0d and \x7f are ordinary
+    (host fixture); C-g aborts the prompt and C-x C-c exits. \x0d and \x7f are ordinary
     bytes — same delivery path the POSIX terminal uses."""
 
     fixture = tmp_path / "hello.txt"
@@ -384,10 +410,17 @@ def test_editor_esc_consumed_as_chord_start_then_keyboard_quit() -> None:
     port = FakePort(["\x1b", "\x07", "\x18", "\x03"])
     run_with_keys(port)
     assert port.restored
+    frames = _frame_rows(port)
+    # Exactly three: the initial one, the C-g frame, and the exit frame. The
+    # ESC and the C-x prefix rewrite nothing. Counting them is what makes this
+    # test notice if C-g exits again — an `any(... for frame in frames ...)`
+    # scan would find `Quit` on the C-g frame either way and pass.
+    assert len(frames) == 3, frames
     # `Quit` is on the C-g frame, not the last one: every command sets the
     # echo, and `C-x C-c` produces no message of its own, so the exit frame
     # clears it. Transient messages are Emacs's behaviour too.
-    assert any(row.startswith("Quit") for frame in _frame_rows(port) for row in frame)
+    assert any(row.startswith("Quit") for row in frames[-2]), frames
+    assert not any(row.startswith("Quit") for row in frames[-1]), frames
 
 
 def keys(*chars: str) -> list[InputEvent]:
@@ -700,7 +733,10 @@ def test_assembler_esc_non_letter_emits_bare_esc_then_the_key() -> None:
 
 
 def test_assembler_esc_control_byte_emits_bare_esc_then_the_key() -> None:
-    assert _feed("\x1b\x07") == ("\x1b", "C-g")  # ESC C-g: bare ESC, then quit
+    assert _feed("\x1b\x07") == (
+        "\x1b",
+        "C-g",
+    )  # ESC C-g: bare ESC reported, then keyboard-quit
 
 
 def test_assembler_esc_esc_emits_one_bare_esc_and_stays_pending() -> None:
@@ -847,7 +883,7 @@ def test_resize_redraw_carries_a_readiness_marker() -> None:
 def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
     """The pinned answer: the minibuffer gate routes keys, and a resize is
     not a key, so the prompt survives, re-renders at the new width, and keeps
-    receiving input. Two C-g: the first aborts the prompt, the second quits.
+    receiving input. C-g aborts the prompt; C-x C-c is what exits.
     """
     port = FakePort([])
     run_editor(
@@ -948,7 +984,7 @@ class TestLoopAgentArms:
 
     def test_a_key_preempts_agent_output_the_loop_has_not_reached(self) -> None:
         """The fairness rule, visible from the loop: a `C-g` queued *after* a
-        burst of agent bytes still quits first. A human's keystroke must not
+        burst of agent bytes is still consumed first. A human's keystroke must not
         wait behind a paragraph of streamed text."""
         calls, recording = self._recording()
         port = FakePort([])
@@ -1125,6 +1161,14 @@ def test_run_editor_starts_the_terminal_readers_by_default() -> None:
             built.append((port, events))
             events.put(Key("\x18"))
             events.put(Key("\x03"))
+            # Closed behind them, like `scripted()` does. This is the only
+            # loop test that builds its own queue, and without the close it
+            # was the only one where a broken exit path *hangs* instead of
+            # failing — which falsified the sweep's whole safety argument for
+            # exactly one test. Found by the adversarial review, by hoisting
+            # the prefix-set check above the prefix table so that `C-x C-c`
+            # became a nested prefix: this test then ran forever.
+            events.close()
 
         def close(self) -> None:
             pass
