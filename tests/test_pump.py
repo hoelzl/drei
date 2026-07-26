@@ -17,6 +17,7 @@ import pytest
 from drei.acp.codec import encode
 from drei.acp.machine import PermissionRequested
 from drei.acp.messages import (
+    SESSION_CANCEL,
     SESSION_REQUEST_PERMISSION,
     SESSION_UPDATE,
     JsonValue,
@@ -1129,3 +1130,169 @@ def test_every_exit_status_is_rendered(status: int | None) -> None:
     pump.exited(status, harness)
 
     assert "agent exited" in _agent_text(harness)
+
+
+class TestTurnCancellation:
+    """Design 0005 D5, plan 0020 D1–D4: `C-g` cancels a turn in flight.
+
+    The trigger is read out of the command outcome (the 0005 D7 seam — the
+    session stays machine-free), so every test drives a real key through
+    the harness and hands the outcome to the pump, the terminal loop's own
+    shape.
+    """
+
+    def test_c_g_mid_turn_writes_session_cancel_and_the_turn_can_complete(self) -> None:
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+        assert pump.phase == "PROMPT_IN_FLIGHT"
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+
+        methods = [message.get("method") for message in child.sent()]
+        assert methods == [
+            "initialize",
+            "session/new",
+            "session/prompt",
+            SESSION_CANCEL,
+        ]
+        # The phase stays PROMPT_IN_FLIGHT until the agent answers; the
+        # protocol-required cancelled response completes the turn and the
+        # transcript says so.
+        pump.receive(
+            _frames(_completed(child.sent()[2]["id"], reason="cancelled")), harness
+        )
+        assert "end turn (cancelled)" in _agent_text(harness)
+        assert pump.phase == "SESSION_ACTIVE"
+
+    def test_c_g_with_no_agent_is_a_plain_keyboard_quit(self) -> None:
+        """The phase guard: no child, nothing to cancel, nothing written."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+
+        assert port.spawned == []
+
+    def test_c_g_during_the_handshake_does_not_cancel(self) -> None:
+        """INITIALIZING is not PROMPT_IN_FLIGHT: `cancel()` would raise, so
+        the guard is what a `C-g` while the agent starts survives by."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        pump.submit("hi", harness)
+        assert pump.phase == "INITIALIZING"
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+
+        methods = [message.get("method") for message in port.children[0].sent()]
+        assert methods == ["initialize"]
+
+    def test_first_c_g_denies_the_permission_second_cancels_the_turn(self) -> None:
+        """Plan 0020 D2: no new prompt behavior — the shipped deny composes
+        with the new trigger. The first `C-g` answers the agent; the second
+        cancels the turn."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+        pump.receive(_frames(_permission_request(7, "sess-1")), harness)
+
+        first = harness.send("C-g")
+        assert first is not None
+        pump.after_command(first, harness)
+
+        answer = child.sent()[-1]
+        assert answer["id"] == 7
+        assert answer["result"] == {"outcome": {"outcome": "cancelled"}}
+        assert pump.phase == "PROMPT_IN_FLIGHT"
+        assert SESSION_CANCEL not in [m.get("method") for m in child.sent()]
+
+        second = harness.send("C-g")
+        assert second is not None
+        pump.after_command(second, harness)
+
+        methods = [m.get("method") for m in child.sent()]
+        assert methods[-1] == SESSION_CANCEL
+
+    def test_c_g_at_an_exit_prompt_abandons_the_exit_without_cancelling(self) -> None:
+        """Plan 0020 D3: one `C-g` peels one layer. The exit prompt outranks
+        the turn; the turn stays in flight for the `C-g` that follows."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+        harness.send("x")  # the scratch buffer is modified — and pathless
+        harness.send("C-x")
+        harness.send("C-c")  # straight to the gate (plan 0018 D2)
+        assert "exit anyway" in (harness.observation.minibuffer_prompt or "")
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+
+        assert harness.observation.minibuffer is None  # the exit is abandoned
+        assert SESSION_CANCEL not in [m.get("method") for m in child.sent()]
+        assert pump.phase == "PROMPT_IN_FLIGHT"
+
+    def test_a_second_c_g_before_the_answer_recancels_without_raising(self) -> None:
+        """Plan 0020 D4: the phase stays PROMPT_IN_FLIGHT until the agent
+        answers, so a repeated `C-g` re-sends the (idempotent) notification
+        rather than raising."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+
+        for _ in range(2):
+            outcome = harness.send("C-g")
+            assert outcome is not None
+            pump.after_command(outcome, harness)
+
+        cancels = [m for m in child.sent() if m.get("method") == SESSION_CANCEL]
+        assert len(cancels) == 2
+
+    def test_a_request_queued_behind_a_prompt_is_presented_on_close(self) -> None:
+        """The routing invariant that keeps the post-cancel sweep defensive:
+        a request queued behind a text prompt is presented the moment the
+        prompt closes — *accept* drains too (`session.py:942–945`), not only
+        abandon — so a top-level `C-g` (the turn-cancelling one) never meets
+        an unpresented request. The queue detour then composes with D2:
+        deny the presented request, then cancel the turn."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+        harness.send("C-x")
+        harness.send("C-f")
+        pump.receive(_frames(_permission_request(7, "sess-1")), harness)
+        assert harness.observation.minibuffer_prompt == "Find file: "
+
+        for char in "/x.txt":
+            harness.send(char)
+        accepted = harness.send("RET")
+        assert accepted is not None
+
+        # The accept drained the queue and presented the request.
+        prompt = harness.observation.minibuffer_prompt or ""
+        assert "Allow write file" in prompt
+
+        denied = harness.send("C-g")
+        assert denied is not None
+        pump.after_command(denied, harness)
+        assert child.sent()[-1]["result"] == {"outcome": {"outcome": "cancelled"}}
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+        methods = [m.get("method") for m in child.sent()]
+        assert methods[-1] == SESSION_CANCEL
+        assert harness._session._permission_queue == []  # noqa: SLF001

@@ -35,6 +35,7 @@ from drei.acp.machine import (
     ProtocolError,
     SessionEffect,
     SessionEstablished,
+    cancel,
     handle,
     new_session,
     prompt,
@@ -57,6 +58,7 @@ from drei.commands import (
     DeliverSessionEffects,
     DisplayBuffer,
     InsertAgentText,
+    KeyboardQuitEvent,
     PermissionDecided,
     PromptPermission,
 )
@@ -338,6 +340,21 @@ class AgentPump:
                     for response in responses:
                         self._write(response, harness)
                     self._deliver(resolved, harness)
+                case KeyboardQuitEvent():
+                    # Design 0005 D5 / plan 0020 D1: `C-g` while a turn is in
+                    # flight cancels the turn. The session's keyboard-quit
+                    # meaning (mark off, `Quit`) has already run — this only
+                    # adds the wire half, read off the outcome so the session
+                    # stays machine-free (D7). Answer the blocked agent
+                    # first, then clear the UI, in that order. The phase
+                    # guard keeps every other `C-g` — no agent, handshake,
+                    # idle — a plain keyboard-quit: `cancel()` would raise.
+                    if self._machine.phase == "PROMPT_IN_FLIGHT":
+                        self._machine, messages, effects = cancel(self._machine)
+                        for message in messages:
+                            self._write(message, harness)
+                        self._deliver(effects, harness)
+                        harness.apply(AbortPendingPermissions())
                 case _:
                     pass
 
