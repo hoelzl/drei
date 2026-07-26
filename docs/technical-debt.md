@@ -24,73 +24,6 @@ that review's. Later entries name the slice that found them instead.
 
 ---
 
-## TD-2 (finding 11) — turn cancellation is wired to nothing
-
-**Deferred to:** the cancellation slice. Design record:
-`agent/design/0005-acp-pump.md` D5.
-**Location:** `src/drei/acp/machine.py` (`cancel`), `src/drei/session.py`
-(`AbortPendingPermissions`).
-**Severity:** medium — a turn in flight cannot be stopped except by quitting.
-
-**Most of this entry is paid.** Plan 0016 shipped the pump: a
-`StreamingProcessPort` holds a long-lived child, agent bytes arrive as events
-on the loop's ordered input stream, `C-c a` sends a prompt, the streamed
-answer folds into a displayed agent buffer, and a permission request is both
-presented *and answered* — the response that "nobody sends" now goes on the
-wire. Plan 0015 had already paid the injection point and single-dispatch
-delivery. What is left is the fifth item design 0005 lists.
-
-`AcpMachine.cancel()` answers every pending `session/request_permission` with
-the `cancelled` outcome, and the session's `AbortPendingPermissions` closes an
-open choice prompt and drains the queue. The pump calls the second (on child
-exit) but never the first, and nothing at all triggers a turn cancel.
-
-**Why deferred:** the trigger was a keymap decision before it was a wiring
-one. 0005 D5 wants `C-g` *while a turn is in flight* to cancel the turn, and
-`C-g` used to **exit the editor** — overloading an exit key with turn
-cancellation is the bad end state 0005 names. **Slice 17 removed that
-blocker:** `C-g` is `keyboard-quit` now and `C-x C-c` exits, with the registry
-rows rewritten. What is left is only the wiring.
-
-**Suggested approach:** have the pump call `cancel()` and then dispatch
-`AbortPendingPermissions`, in that order — answer the agent, which is blocked,
-before clearing the UI. One design question remains: a permission prompt is
-open *precisely* when a turn is in flight, so `C-g` in that state is
-ambiguous. Aborting the innermost thing is the Emacs instinct, and denying one
-permission is narrower than killing the turn, which argues for the first
-`C-g` denying and a second cancelling.
-
-**Slice 18 added a third case to that question, and did not settle it.** `C-g`
-at an exit prompt abandons the exit, unconditionally — a turn in flight is not
-consulted, so today the exit wins. Whether "the innermost thing" is the exit
-prompt or the turn is exactly the ambiguity above with one more claimant, and
-the cancellation slice owns the choice. What slice 18 *did* settle is what an
-exit owes the agent either way: a `session/request_permission` that queues
-behind an exit prompt is presented if the exit is abandoned and dropped if it
-completes (plan 0018 D7, parity registry). `AbortPendingPermissions` arriving
-mid-sequence clears the queue and leaves the exit prompt standing, because an
-exit prompt is not a choice prompt.
-
-## TD-3 (finding 18) — trailing-slash find-file creates an unreachable `""` buffer
-
-**Location:** `src/drei/session.py` — `_visit`'s basename derivation
-(`path.rsplit("/", 1)[-1]`), and the `switch-buffer` MRU default which treats
-`""` as absent.
-**Severity:** low frequency, bad outcome — unsaved edits become unreachable.
-
-`C-x C-f notes/ RET` yields a buffer named `""`. Text typed into it is real
-and editable, but after switching away nothing addresses it: `C-x b` with
-empty input takes the MRU default, and no typed name matches `""`. With no
-kill-buffer command there is also no way to discard it.
-
-**Why deferred:** scope control — it sits at the intersection of path
-handling and buffer naming, both of which have their own deferred work
-(`file-truename` canonicalization, uniquify-style names, kill-buffer).
-
-**Suggested approach:** reject a path whose basename is empty at the
-find-file boundary (an `OpenFailed`-class outcome, consistent with the
-directory-path arm), rather than special-casing `""` downstream.
-
 ## TD-7 (finding 22) — frozen dataclasses over aliased mutable dicts
 
 **Location:** `src/drei/acp/machine.py` — `in_flight_outgoing`,
@@ -194,6 +127,24 @@ retained. Then decide, with a parity row, whether a frame too short for even
 one pane keeps the echo row or renders empty.
 
 ## Paid and removed
+
+*TD-2 (the pump calls nothing on a `KeyboardQuitEvent` — turn cancellation
+wired to nothing) was paid by slice 20 (issue #56, plan
+`agent/plans/0020-turn-cancellation-and-trailing-slash.md`), the last of
+design 0005's five items: the pump reads `KeyboardQuitEvent` out of the
+command outcome and, with the phase at `PROMPT_IN_FLIGHT`, calls
+`AcpMachine.cancel()` and applies `AbortPendingPermissions`, in 0005 D5's
+order. The ambiguity the entry carried is settled by composition rather than
+new rules: at a permission prompt `C-g` is the shipped deny, so the turn is
+the second `C-g`; an exit prompt peels first; one `C-g`, one layer. The
+entry's earlier payments (slices 15–16) are named in its removed text.*
+
+*TD-3 (trailing-slash find-file creates an unreachable `""` buffer) was paid
+by slice 20 (same plan) on the entry's own suggested approach: an empty
+basename is refused at the find-file boundary with
+`OpenFailed(path, "empty-basename")` before the filesystem is asked —
+deterministic on every platform, in the same deviation family as the
+directory-path row of `knowledge/emacs-parity.md`.*
 
 *TD-11 (`C-x C-c` discards unsaved work with no prompt) was paid by slice 18
 (issue #48, plan `agent/plans/0018-save-buffers-on-exit.md`) and removed

@@ -1,11 +1,12 @@
 # 0005: The ACP pump (design 0003 §C)
 
-**Status:** implemented except **D5** (cancellation). D2 (the injection point)
+**Status:** implemented. D2 (the injection point)
 and D4 (atomic delivery) shipped in plan `0015-input-events-and-resize.md`;
 D1 (streaming port), D3 (fairness), D6 (launcher and lifecycle) and D7 (the
-pump owns the machine) shipped in plan `0016-acp-pump.md`. D5 stays proposed;
-the `C-g` overload that blocked it was resolved by plan
-`0017-keyboard-quit-and-exit.md`, so what remains is the wiring. Where a slice departed
+pump owns the machine) shipped in plan `0016-acp-pump.md`; D5 (cancellation)
+shipped in plan `0020-turn-cancellation-and-trailing-slash.md` — the trigger
+composition it proposed, with the trigger read off the command outcome per
+D7. Where a slice departed
 from this record, the departure is noted in place below.
 **Builds on:** `0003-hermes-drei-integration.md`, `0004-agent-buffer-identity.md`
 **Does not revise:** 0001/0002/0003. It supplies the §C boundary 0003 assumed
@@ -160,6 +161,17 @@ in sequence. Design 0003's consequence 2 ("the live model applies each
 instead of aspirational.
 
 ### D5. Cancellation
+
+**Implemented (slice 20, plan 0020 D1–D4).** The composition below shipped as
+written, with the trigger read off the command outcome per D7 (the session
+still holds no machine). One amendment, discovered in the slice: the "queued
+`session/request_permission` waiting in the session" that
+`AbortPendingPermissions` sweeps is unreachable in the current routing —
+*every* prompt close drains the queue, accept included
+(`session.py:942–945`), not only abandons — so a top-level `C-g` never meets
+an unpresented request, and that half of the sweep is defensive rather than
+load-bearing (pinned by
+`test_a_request_queued_behind_a_prompt_is_presented_on_close`).
 
 `AcpMachine.cancel()` already answers every pending `session/request_permission`
 with `cancelled`, and the session already has `AbortPendingPermissions` to
