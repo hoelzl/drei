@@ -225,6 +225,13 @@ test sweep across four files — the kind of change where an assertion quietly
 stops asserting what it used to — and pairing it with a new prompt would have
 put both in one slice. Slice 18 has the prompt as its whole subject.
 
+**Claimed:** slice 18 (issue #48), plan
+`agent/plans/0018-save-buffers-on-exit.md`. The plan's D2 goes one step past
+the reference editor at the user's direction: Emacs counts only file-visiting
+buffers when it asks "exit anyway?", which would leave a modified `scratch` —
+where a new user's first keystrokes land, and which Drei cannot save at all —
+discarded in silence.
+
 **Suggested approach:** the choice minibuffer built for the approval bridge
 (B.8) already presents options and maps a key to a decision, so this is a use
 of existing machinery rather than new machinery. Per-buffer `y`/`n`, plus an
