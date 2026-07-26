@@ -111,6 +111,21 @@ Fixing it one event at a time entrenches the ad-hoc shape.
 event class the session emits, one rendering site, and a pass over the
 registry rows that currently say "Drei has no echo-error mechanism yet".
 
+**Claimed:** slice 19 (issue #52), plan
+`agent/plans/0019-echo-message-mechanism.md`. The plan carries issue #51 with
+it — not as a rider, but because `C-g` at a prompt and `n` at plan 0018's exit
+gate emit the *same* `MinibufferAborted` today, so the abort cannot be given a
+voice until a deliberate answer is a different event. It also found that this
+entry's premise is now slightly understated: since slice 18 there is a
+*second* ad-hoc message path (`_save_buffer`'s `[<path>: <token>]` prompt
+suffix), built under review pressure for one case. Two ad-hoc shapes is the
+entry's own argument, one slice later.
+
+**Do not close this entry for the mechanism alone.** Its cost is the rows that
+defer to it; a mechanism that ships with the deviations still pointing here
+re-scopes the debt instead of paying it, which is exactly how TD-11 stayed
+open for seventeen slices.
+
 ## TD-7 (finding 22) — frozen dataclasses over aliased mutable dicts
 
 **Location:** `src/drei/acp/machine.py` — `in_flight_outgoing`,
