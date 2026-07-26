@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from drei.commands import BackwardChar, ForwardChar, InsertText, TextKilled
+from drei.commands import BackwardChar, ForwardChar, InsertText, Message, TextKilled
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
 
@@ -718,8 +718,9 @@ def test_undo_parity() -> None:
     assert undone2.observation.text == "" != undo.group(7)
     assert undone2.observation.point == 0
     assert not undone2.observation.modified
-    # The truncated redo tail: undo now has nothing left.
-    assert session.dispatch(Undo()).events == ()
+    # The truncated redo tail: undo now has nothing left — and says so
+    # (row 80; a Message that changes nothing, plan 0019 D2).
+    assert session.dispatch(Undo()).events == (Message("no-further-undo"),)
 
 
 EMACS_FIND_FILE_EVAL = (
