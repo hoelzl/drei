@@ -469,8 +469,11 @@ class EditorSession:
         # Non-empty only while an exit sequence is in flight; `_minibuffer_kind`
         # ("save-buffer" / "exit-anyway") is what puts the minibuffer in exit
         # mode, so `_choice` stays None throughout and B.8's permission path is
-        # untouched.
-        self._exit_pending: list[BufferId] = []
+        # untouched. The path is carried alongside the id rather than re-read
+        # at prompt time: it is what made the buffer eligible, so pairing them
+        # makes "a pending buffer always has a path" a type rather than an
+        # invariant a later slice could quietly break (review 0002 finding 10).
+        self._exit_pending: list[tuple[BufferId, str]] = []
         # Permission requests that arrived while a prompt was open, in order.
         # Grows only while a prompt is open and drains on resolution; in
         # practice bounded by the agent's concurrent in-flight requests (a
@@ -868,9 +871,7 @@ class EditorSession:
                     events.append(MinibufferAborted())
                     # Draining here too: a queued permission request must not
                     # wait forever behind an aborted text prompt.
-                    if self._permission_queue:
-                        nxt = self._permission_queue.pop(0)
-                        self._open_choice(nxt, events)
+                    self._drain_permission_queue(events)
                 new_value = current
             case MinibufferAccept():
                 if self._choice is not None:
@@ -929,9 +930,7 @@ class EditorSession:
                     # A permission request queued behind this text prompt is
                     # presented next — otherwise it would wait forever and
                     # hang the agent.
-                    if self._permission_queue:
-                        nxt = self._permission_queue.pop(0)
-                        self._open_choice(nxt, events)
+                    self._drain_permission_queue(events)
                 else:
                     new_value = current
             case PromptPermission(request=request):
@@ -1047,18 +1046,24 @@ class EditorSession:
         (D2, parity row 4).
         """
         self._exit_pending = [
-            buffer_id
+            (buffer_id, buffer.current.file_path)
             for buffer_id, buffer in self._buffers.items()
             if buffer.current.modified and buffer.current.file_path is not None
         ]
         self._advance_exit(events)
 
-    def _advance_exit(self, events: list[Event]) -> None:
-        """Offer the next buffer at risk, or fall through to the exit gate."""
+    def _advance_exit(self, events: list[Event], note: str = "") -> None:
+        """Offer the next buffer at risk, or fall through to the exit gate.
+
+        ``note`` is prepended to whichever prompt opens: it carries a failure
+        the user has to know about before answering, and the minibuffer owns
+        the echo row while a prompt is open, so a message left to `_echo_for`
+        would be drawn over unread (review 0002 finding 1).
+        """
         if self._exit_pending:
-            path = self._buffers[self._exit_pending[0]].current.file_path
+            _, path = self._exit_pending[0]
             self._open_exit_prompt(
-                "save-buffer", f"Save file {path}? (y or n) ", events
+                "save-buffer", f"{note}Save file {path}? (y or n) ", events
             )
         elif any(buffer.current.modified for buffer in self._buffers.values()):
             # Stage 2 (D3): the question is "does any buffer currently report
@@ -1069,7 +1074,9 @@ class EditorSession:
             # read-only case right, and Emacs re-checks `buffer-modified-p`
             # the same way.
             self._open_exit_prompt(
-                "exit-anyway", "Modified buffers exist; exit anyway? (y or n) ", events
+                "exit-anyway",
+                f"{note}Modified buffers exist; exit anyway? (y or n) ",
+                events,
             )
         else:
             events.append(EditorExited())
@@ -1113,11 +1120,12 @@ class EditorSession:
                 events.append(MinibufferAborted())
                 self._drain_permission_queue(events)
             return
-        buffer_id = self._exit_pending.pop(0)
-        if char == "y":
-            self._save_buffer(buffer_id, events)
+        buffer_id, _ = self._exit_pending.pop(0)
+        # A `y` whose write fails must not read as a save. `n` is an answer
+        # rather than an error and reports nothing.
+        note = self._save_buffer(buffer_id, events) if char == "y" else ""
         self._close_exit_prompt()
-        self._advance_exit(events)
+        self._advance_exit(events, note)
 
     def _drain_permission_queue(self, events: list[Event]) -> None:
         """Present the next request that queued behind a prompt, if any.
@@ -1131,17 +1139,28 @@ class EditorSession:
             nxt = self._permission_queue.pop(0)
             self._open_choice(nxt, events)
 
-    def _save_buffer(self, buffer_id: BufferId, events: list[Event]) -> None:
-        """Save one buffer in place, whether or not it is the focused one.
+    def _save_buffer(self, buffer_id: BufferId, events: list[Event]) -> str:
+        """Save one buffer in place; return a note for the next exit prompt.
 
         The write-back is direct rather than through `dispatch`'s trailing
         `replace` (D6): the command being dispatched is a `MinibufferInput`,
         whose commit target is the *focused* buffer. The arm re-reads
         `self.buffer.current` afterwards so a save of the focused buffer is not
         overwritten by the value captured before the arm ran.
+
+        The note is empty on success and `"<path>: <token>. "` on failure —
+        `_echo_for`'s own `SaveFailed` shape, because it is the same failure
+        and a second vocabulary for it would be one to keep in agreement.
         """
         buffer = self._buffers[buffer_id]
+        before = len(events)
         buffer.replace(self._save(buffer.current, buffer_id, events))
+        # Only what this save appended: scanning the whole list would let an
+        # unrelated earlier event decide what the next prompt says.
+        for event in events[before:]:
+            if isinstance(event, SaveFailed):
+                return f"{event.path}: {event.error}. "
+        return ""
 
     # ------------------------------------------------------------------
     # B.8 choice-minibuffer helpers
@@ -1159,9 +1178,7 @@ class EditorSession:
         self._choice = None
         self._minibuffer = None
         self._minibuffer_prompt = ""
-        if self._permission_queue:
-            nxt = self._permission_queue.pop(0)
-            self._open_choice(nxt, events)
+        self._drain_permission_queue(events)
 
     @staticmethod
     def _choice_options(request: PermissionRequested) -> list[dict[str, JsonValue]]:

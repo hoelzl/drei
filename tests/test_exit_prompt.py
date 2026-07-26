@@ -31,6 +31,7 @@ from drei.commands import (
     MinibufferAbort,
     MinibufferAborted,
     MinibufferAccept,
+    MinibufferBackspace,
     MinibufferInput,
     MinibufferOpened,
     PromptPermission,
@@ -249,7 +250,8 @@ def test_a_save_that_fails_still_blocks_the_exit() -> None:
     outcome = session.dispatch(MinibufferInput("y"))
     assert SaveFailed("/tmp/notes.txt", "permission-denied") in outcome.events
     assert not _exited(outcome)
-    assert MinibufferOpened(EXIT_PROMPT) in outcome.events
+    # The gate is reached — and it says why, which is its own test below.
+    assert _prompts(outcome) == [f"/tmp/notes.txt: permission-denied. {EXIT_PROMPT}"]
 
 
 def test_a_save_that_succeeds_stops_blocking() -> None:
@@ -585,3 +587,90 @@ def test_abort_pending_permissions_leaves_the_exit_prompt_standing() -> None:
     assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
     # And the sequence still resolves.
     assert _exited(session.dispatch(MinibufferInput("y")))
+
+
+# ----------------------------------------------------------------------
+# A save that fails inside the sequence says so (review 0002 finding 1)
+# ----------------------------------------------------------------------
+
+
+def test_a_failed_save_names_itself_in_the_prompt_that_follows() -> None:
+    """The gate must not be the first thing the user reads after a failure.
+
+    `SaveFailed` *is* one of the three events `_echo_for` renders, but the
+    same outcome opens the next exit prompt, and an open minibuffer owns the
+    echo row — so the message was drawn over before it could be read. The
+    user had explicitly asked to save, got no signal that the write did not
+    happen, and was then asked a generic question that reads as being about
+    some *other* buffer. One `y` and the edit is gone.
+
+    The prefix reuses `_echo_for`'s `<path>: <token>` shape rather than
+    inventing a second vocabulary for the same failure.
+    """
+    files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
+    session = _session(files)
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+    outcome = session.dispatch(MinibufferInput("y"))
+
+    assert SaveFailed("/tmp/notes.txt", "permission-denied") in outcome.events
+    assert _prompts(outcome) == [f"/tmp/notes.txt: permission-denied. {EXIT_PROMPT}"]
+
+
+def test_a_failed_save_names_itself_before_the_next_offer() -> None:
+    """The multi-buffer case is the worse one: without the prefix the next
+    frame is an ordinary `Save file …?` for the *other* buffer, with no trace
+    at all that the previous one was not written."""
+    files = FakeFilePort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"}, fail="permission")
+    session = _session(files, path="/tmp/a.txt", text="A")
+    session.dispatch(InsertText("1"))
+    _visit(session, "/tmp/b.txt", edit="2")
+
+    session.dispatch(ExitEditor())
+    outcome = session.dispatch(MinibufferInput("y"))  # a.txt: write fails
+    assert _prompts(outcome) == [
+        "/tmp/a.txt: permission-denied. " + SAVE_PROMPT.format("/tmp/b.txt")
+    ]
+
+
+def test_the_failure_note_does_not_outlive_the_prompt_it_was_raised_on() -> None:
+    """It reports what just happened, not what happened at some point."""
+    files = FakeFilePort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"})
+    session = _session(files, path="/tmp/a.txt", text="A")
+    session.dispatch(InsertText("1"))
+    _visit(session, "/tmp/b.txt", edit="2")
+
+    session.dispatch(ExitEditor())
+    session.dispatch(MinibufferInput("n"))  # a.txt declined: no failure
+    outcome = session.dispatch(MinibufferInput("y"))  # b.txt saved fine
+    assert _prompts(outcome) == [EXIT_PROMPT]
+
+
+def test_a_declined_save_is_not_reported_as_a_failure() -> None:
+    """`n` is an answer, not an error — nothing to report."""
+    files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
+    session = _session(files)
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+    outcome = session.dispatch(MinibufferInput("n"))
+    assert _prompts(outcome) == [EXIT_PROMPT]
+
+
+def test_del_at_an_exit_prompt_leaves_it_standing() -> None:
+    """The fourth minibuffer arm (review 0002 finding 2).
+
+    `MinibufferBackspace` has no exit branch: DEL falls through to text mode
+    and is harmless only because an exit prompt's input is `""`, which the
+    `elif self._minibuffer:` guard reads as falsy. That is a real property of
+    the current design, but it was holding by accident — pinned here so a
+    prompt that ever carries text cannot silently start eating it.
+    """
+    session = _session()
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+    outcome = session.dispatch(MinibufferBackspace())
+    assert outcome.events == ()
+    assert session.minibuffer == ""
+    assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
+    # And the sequence still resolves normally afterwards.
+    assert _prompts(session.dispatch(MinibufferInput("n"))) == [EXIT_PROMPT]

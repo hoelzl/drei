@@ -20,6 +20,17 @@ Two ConPTY scenarios exit *through* stage 1 rather than around it
 then confirms), which is more than §9 asked for and is where the acceptance
 criterion "proven through the shipped executable" is met.
 
+**One behavior arrived that this plan did not specify.** The adversarial
+review found that a stage-1 save which *fails* was completely silent: the
+`SaveFailed` event is one of the three `_echo_for` renders, but the same
+outcome opens the next exit prompt, and an open minibuffer owns the echo row —
+so the message was drawn over unread. The user had asked to save, saw no
+failure, and was then asked `Modified buffers exist; exit anyway?`, which
+reads as being about some *other* buffer. D3's "On screen" line described the
+control flow and mistook it for the message. The fix carries the failure in
+the next prompt (`<path>: <token>. ` prefix, `_echo_for`'s own shape) rather
+than building the message mechanism §4 defers, and it is registry row 8.
+
 **Architecture gate:** none — no design record owns the keymap or the exit
 path, and this slice does not need one. It is `docs/technical-debt.md` **TD-11
 step 2**: the half slice 17 deliberately left open, plus the parity rows that

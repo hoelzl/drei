@@ -60,6 +60,17 @@ ambiguous. Aborting the innermost thing is the Emacs instinct, and denying one
 permission is narrower than killing the turn, which argues for the first
 `C-g` denying and a second cancelling.
 
+**Slice 18 added a third case to that question, and did not settle it.** `C-g`
+at an exit prompt abandons the exit, unconditionally — a turn in flight is not
+consulted, so today the exit wins. Whether "the innermost thing" is the exit
+prompt or the turn is exactly the ambiguity above with one more claimant, and
+the cancellation slice owns the choice. What slice 18 *did* settle is what an
+exit owes the agent either way: a `session/request_permission` that queues
+behind an exit prompt is presented if the exit is abandoned and dropped if it
+completes (plan 0018 D7, parity registry). `AbortPendingPermissions` arriving
+mid-sequence clears the queue and leaves the exit prompt standing, because an
+exit prompt is not a choice prompt.
+
 ## TD-3 (finding 18) — trailing-slash find-file creates an unreachable `""` buffer
 
 **Location:** `src/drei/session.py` — `_visit`'s basename derivation
@@ -202,8 +213,14 @@ shortfall, dropping whole panes from the bottom while the echo row is
 retained. Then decide, with a parity row, whether a frame too short for even
 one pane keeps the echo row or renders empty.
 
+## Paid and removed
+
 *TD-11 (`C-x C-c` discards unsaved work with no prompt) was paid by slice 18
-(issue #48, plan `agent/plans/0018-save-buffers-on-exit.md`) and removed here
+(issue #48, plan `agent/plans/0018-save-buffers-on-exit.md`) and removed
 rather than narrowed again — the entry's own instruction. What `C-x C-c` does
-now, and the six differences from `save-buffers-kill-terminal` that remain,
+now, and the seven differences from `save-buffers-kill-terminal` that remain,
 are recorded in `knowledge/emacs-parity.md`.*
+
+*TD-5 and TD-6 were paid by slice 17 and TD-1 by an earlier slice; they are
+listed nowhere else, which is the point — an entry is removed when the debt is
+paid, and git history is where a removed entry lives.*

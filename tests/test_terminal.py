@@ -186,6 +186,40 @@ def test_c_x_c_c_does_not_exit_while_the_save_prompt_is_open() -> None:
     )
 
 
+def test_a_failed_save_at_the_exit_prompt_is_readable_on_the_frame() -> None:
+    """Review 0002 finding 1, at the level where it was invisible.
+
+    The session emits `SaveFailed` and `_echo_for` renders it — but the same
+    outcome opens the next exit prompt, and an open minibuffer owns the echo
+    row, so the message was drawn over before it could be read. The user had
+    asked to save, got no signal that the write failed, and was then asked a
+    generic question that reads as being about some other buffer.
+
+    Asserted on the *frame* rather than on the event, because the event was
+    never the part that was broken.
+    """
+    from conftest import FakeFilePort
+
+    files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
+    port = _WidePort([])
+    with pytest.raises(EndOfInput):
+        run_editor(
+            port,
+            events=scripted(keys("x", "\x18", "\x03", "y")),
+            file_port=files,
+            file_path="/tmp/notes.txt",
+            initial_text="saved",
+        )
+
+    # The run did not end (the `y` was answered by the gate, not by an exit),
+    # and the reason the write did not happen is on the prompt row.
+    assert files.files["/tmp/notes.txt"] == "saved"
+    assert any(
+        row.startswith("/tmp/notes.txt: permission-denied. Modified buffers")
+        for row in _frame_rows(port)[-1]
+    ), _frame_rows(port)[-1]
+
+
 def test_editor_inserts_text_and_renders() -> None:
     # `y` answers the exit gate: the scratch buffer is modified and pathless,
     # so slice 18 asks before discarding it.
