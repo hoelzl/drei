@@ -14,6 +14,17 @@ What the plan got wrong (the honesty record):
    0005 D5 carries the same amendment. The plan (and 0005) had assumed the
    queue could stand at cancel time.
 
+2. **The peeling order had two more claimers than the plan discussed.**
+   Round-1 review found both unpinned: `C-g` at a *text prompt* mid-turn
+   aborts the prompt alone (the turn waits — `MinibufferAborted` carries no
+   `KeyboardQuitEvent`), and a *pending prefix* peels *with* the turn —
+   `C-x C-g` resolves to the same `KeyboardQuit()` as a bare `C-g`, so the
+   event carries no prefix provenance and the pump cannot distinguish
+   (pinned as intended: Emacs's own `C-g` also quits from a prefix). Both
+   are now pinned in `TestTurnCancellation` and recorded in the registry
+   row and 0005 D5's banner. Also in that review's wash: a stale "Nothing
+   calls either." in 0005 D5's body, amended.
+
 Everything else held: the V-order, the trigger-composition D1–D4, the D5
 token choice, "no pins change" (§5), and the ConPTY settle witness
 (`Drei: *agent*` ⟹ prompt in flight) all survived contact.

@@ -1296,3 +1296,51 @@ class TestTurnCancellation:
         methods = [m.get("method") for m in child.sent()]
         assert methods[-1] == SESSION_CANCEL
         assert harness._session._permission_queue == []  # noqa: SLF001
+
+    def test_c_g_at_a_text_prompt_mid_turn_aborts_only_the_prompt(self) -> None:
+        """Round-1 review finding 2, pinned: a text prompt peels *alone*.
+        `C-g` at `Find file:` while a turn is in flight aborts the prompt
+        (`MinibufferAborted`, no `KeyboardQuitEvent`), the turn waits, and
+        the next top-level `C-g` is the one that cancels it."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+        harness.send("C-x")
+        harness.send("C-f")
+        assert harness.observation.minibuffer_prompt == "Find file: "
+
+        aborted = harness.send("C-g")
+        assert aborted is not None
+        pump.after_command(aborted, harness)
+
+        assert harness.observation.minibuffer is None
+        assert SESSION_CANCEL not in [m.get("method") for m in child.sent()]
+        assert pump.phase == "PROMPT_IN_FLIGHT"
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+        methods = [m.get("method") for m in child.sent()]
+        assert methods[-1] == SESSION_CANCEL
+
+    def test_c_g_with_a_pending_prefix_cancels_prefix_and_turn_together(self) -> None:
+        """Round-1 review finding 1, pinned as intended: a prefix peels
+        *with* the turn. `C-x C-g` resolves to the same `KeyboardQuit()`
+        as a bare `C-g` (`keys.py:91–97`), so the event carries no prefix
+        provenance and the pump cannot — and should not — distinguish:
+        Emacs's own `C-g` also quits from a prefix. The user escaping a
+        half-typed chord mid-turn cancels the turn too; the peeling order
+        in the registry row says so."""
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+
+        harness.send("C-x")  # a pending prefix, not a prompt
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+
+        methods = [m.get("method") for m in child.sent()]
+        assert methods[-1] == SESSION_CANCEL

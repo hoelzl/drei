@@ -164,7 +164,10 @@ instead of aspirational.
 
 **Implemented (slice 20, plan 0020 D1–D4).** The composition below shipped as
 written, with the trigger read off the command outcome per D7 (the session
-still holds no machine). One amendment, discovered in the slice: the "queued
+still holds no machine). The peeling order, pinned: permission prompt (deny)
+→ exit prompt (abandon) → text prompt (abandon — the turn waits) → turn; a
+pending prefix peels *with* the turn (`C-x C-g` is the same `KeyboardQuit()`).
+One amendment, discovered in the slice: the "queued
 `session/request_permission` waiting in the session" that
 `AbortPendingPermissions` sweeps is unreachable in the current routing —
 *every* prompt close drains the queue, accept included
@@ -175,7 +178,8 @@ load-bearing (pinned by
 
 `AcpMachine.cancel()` already answers every pending `session/request_permission`
 with `cancelled`, and the session already has `AbortPendingPermissions` to
-close an open choice prompt and drain the queue. Nothing calls either. The
+close an open choice prompt and drain the queue. Nothing called either until
+slice 20 wired the pump (the banner above). The
 pump calls both, in that order, on turn cancellation: answer the agent first
 (it is blocked), then clear the UI.
 
