@@ -386,6 +386,11 @@ def run_editor(
                     # itself, so the final frame carries no marker.
                     _write_frame(port, harness, mark_ready=not quit_requested)
                     if quit_requested:
+                        # TODO: [tech-debt] TD-11 — this ends the run and drops
+                        # every modified buffer with no prompt, and the key
+                        # that reaches it is `C-g`, which in Emacs is the one
+                        # key guaranteed to destroy nothing. See
+                        # docs/technical-debt.md.
                         return
     finally:
         # The child goes first: a leaked `hermes acp` holding a pipe outlives a
