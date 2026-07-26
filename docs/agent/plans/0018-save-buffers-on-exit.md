@@ -28,8 +28,18 @@ so the message was drawn over unread. The user had asked to save, saw no
 failure, and was then asked `Modified buffers exist; exit anyway?`, which
 reads as being about some *other* buffer. D3's "On screen" line described the
 control flow and mistook it for the message. The fix carries the failure in
-the next prompt (`<path>: <token>. ` prefix, `_echo_for`'s own shape) rather
-than building the message mechanism §4 defers, and it is registry row 8.
+the next prompt rather than building the message mechanism §4 defers, and it
+is registry row 8.
+
+A second review round then caught the fix's own defect: the note started as a
+**prefix**, and the echo row is hard-clipped (`render._clip` — no wrap, no
+scroll) at a shipped width of 40 columns, so it pushed the question off the
+screen. At 40 the gate read `<path>: permission-denied. Modif` — a truncated
+error with no visible question, on the row where `y` discards the buffer — and
+the stage-1 offer lost the filename it was asking about. The note is a suffix
+now: one half of that string is always going to be sacrificed, and it must not
+be the question. That ordering is a decision this plan never made, and it is
+the kind a plan is supposed to make.
 
 **Architecture gate:** none — no design record owns the keymap or the exit
 path, and this slice does not need one. It is `docs/technical-debt.md` **TD-11

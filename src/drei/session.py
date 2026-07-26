@@ -1055,15 +1055,26 @@ class EditorSession:
     def _advance_exit(self, events: list[Event], note: str = "") -> None:
         """Offer the next buffer at risk, or fall through to the exit gate.
 
-        ``note`` is prepended to whichever prompt opens: it carries a failure
-        the user has to know about before answering, and the minibuffer owns
-        the echo row while a prompt is open, so a message left to `_echo_for`
-        would be drawn over unread (review 0002 finding 1).
+        ``note`` carries a failure the user has to know about before
+        answering. It rides the prompt because the minibuffer owns the echo
+        row while a prompt is open, so a message left to `_echo_for` would be
+        drawn over unread (review 0002 finding 1).
+
+        It is a **suffix**, and that ordering is the decision. The echo row is
+        hard-clipped — `render._clip` does not wrap or scroll, and the shipped
+        ConPTY scenarios run at 40 columns — so one half of this string is
+        going to be sacrificed. Prefixing sacrificed the question: at 40 the
+        gate read `<path>: permission-denied. Modif`, a truncated error with
+        no visible question, on the row where `y` discards the buffer, and the
+        stage-1 offer lost the filename it was asking about. A suffix
+        sacrifices the annotation instead, which is the right way round: the
+        question and its answer set must be readable at every width, and a
+        cut-off reason is still a visible sign that something went wrong.
         """
         if self._exit_pending:
             _, path = self._exit_pending[0]
             self._open_exit_prompt(
-                "save-buffer", f"{note}Save file {path}? (y or n) ", events
+                "save-buffer", f"Save file {path}? (y or n) {note}", events
             )
         elif any(buffer.current.modified for buffer in self._buffers.values()):
             # Stage 2 (D3): the question is "does any buffer currently report
@@ -1075,7 +1086,7 @@ class EditorSession:
             # the same way.
             self._open_exit_prompt(
                 "exit-anyway",
-                f"{note}Modified buffers exist; exit anyway? (y or n) ",
+                f"Modified buffers exist; exit anyway? (y or n) {note}",
                 events,
             )
         else:
@@ -1148,18 +1159,19 @@ class EditorSession:
         `self.buffer.current` afterwards so a save of the focused buffer is not
         overwritten by the value captured before the arm ran.
 
-        The note is empty on success and `"<path>: <token>. "` on failure —
-        `_echo_for`'s own `SaveFailed` shape, because it is the same failure
-        and a second vocabulary for it would be one to keep in agreement.
+        The note is empty on success and `"[<path>: <token>]"` on failure,
+        wrapping `_echo_for`'s own `SaveFailed` shape — the same failure, so a
+        second vocabulary for it would be one more thing to keep in agreement.
         """
         buffer = self._buffers[buffer_id]
+        # Only what this save appends. `events` is in fact empty at the single
+        # call site today, so the window is belt-and-braces rather than a
+        # tested guarantee — it costs a line and removes the question.
         before = len(events)
         buffer.replace(self._save(buffer.current, buffer_id, events))
-        # Only what this save appended: scanning the whole list would let an
-        # unrelated earlier event decide what the next prompt says.
         for event in events[before:]:
             if isinstance(event, SaveFailed):
-                return f"{event.path}: {event.error}. "
+                return f"[{event.path}: {event.error}]"
         return ""
 
     # ------------------------------------------------------------------

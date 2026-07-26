@@ -251,7 +251,7 @@ def test_a_save_that_fails_still_blocks_the_exit() -> None:
     assert SaveFailed("/tmp/notes.txt", "permission-denied") in outcome.events
     assert not _exited(outcome)
     # The gate is reached — and it says why, which is its own test below.
-    assert _prompts(outcome) == [f"/tmp/notes.txt: permission-denied. {EXIT_PROMPT}"]
+    assert _prompts(outcome) == [f"{EXIT_PROMPT}[/tmp/notes.txt: permission-denied]"]
 
 
 def test_a_save_that_succeeds_stops_blocking() -> None:
@@ -284,11 +284,15 @@ def test_an_unrecognized_key_leaves_the_offer_standing() -> None:
     session = _session()
     session.dispatch(InsertText("x"))
     session.dispatch(ExitEditor())
-    outcome = session.dispatch(MinibufferInput("z"))
-    assert outcome.events == ()
-    assert not _exited(outcome)
-    assert session.minibuffer == ""
-    assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
+    # `SPC` and `DEL` are *bound answers* in Emacs's `map-y-or-n-p`, and
+    # `Y`/`N` are the obvious near-misses — the registry row names all of
+    # them, so all of them are pinned rather than three of them assumed.
+    for char in ("z", " ", "Y", "N", "!", "q", "."):
+        outcome = session.dispatch(MinibufferInput(char))
+        assert outcome.events == (), char
+        assert not _exited(outcome), char
+        assert session.minibuffer == "", char
+        assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt"), char
 
 
 def test_ret_is_not_a_default_yes() -> None:
@@ -614,7 +618,7 @@ def test_a_failed_save_names_itself_in_the_prompt_that_follows() -> None:
     outcome = session.dispatch(MinibufferInput("y"))
 
     assert SaveFailed("/tmp/notes.txt", "permission-denied") in outcome.events
-    assert _prompts(outcome) == [f"/tmp/notes.txt: permission-denied. {EXIT_PROMPT}"]
+    assert _prompts(outcome) == [f"{EXIT_PROMPT}[/tmp/notes.txt: permission-denied]"]
 
 
 def test_a_failed_save_names_itself_before_the_next_offer() -> None:
@@ -629,21 +633,8 @@ def test_a_failed_save_names_itself_before_the_next_offer() -> None:
     session.dispatch(ExitEditor())
     outcome = session.dispatch(MinibufferInput("y"))  # a.txt: write fails
     assert _prompts(outcome) == [
-        "/tmp/a.txt: permission-denied. " + SAVE_PROMPT.format("/tmp/b.txt")
+        SAVE_PROMPT.format("/tmp/b.txt") + "[/tmp/a.txt: permission-denied]"
     ]
-
-
-def test_the_failure_note_does_not_outlive_the_prompt_it_was_raised_on() -> None:
-    """It reports what just happened, not what happened at some point."""
-    files = FakeFilePort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"})
-    session = _session(files, path="/tmp/a.txt", text="A")
-    session.dispatch(InsertText("1"))
-    _visit(session, "/tmp/b.txt", edit="2")
-
-    session.dispatch(ExitEditor())
-    session.dispatch(MinibufferInput("n"))  # a.txt declined: no failure
-    outcome = session.dispatch(MinibufferInput("y"))  # b.txt saved fine
-    assert _prompts(outcome) == [EXIT_PROMPT]
 
 
 def test_a_declined_save_is_not_reported_as_a_failure() -> None:
@@ -674,3 +665,96 @@ def test_del_at_an_exit_prompt_leaves_it_standing() -> None:
     assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
     # And the sequence still resolves normally afterwards.
     assert _prompts(session.dispatch(MinibufferInput("n"))) == [EXIT_PROMPT]
+
+
+# ----------------------------------------------------------------------
+# The note is a SUFFIX, because the row is clipped (review 0002r2 finding 1)
+# ----------------------------------------------------------------------
+
+
+class _RefusingPort(FakeFilePort):
+    """A port that refuses writes to named paths only.
+
+    `FakeFilePort.fail` is global to the port, so a sequence where one save
+    fails and the next succeeds — the case that distinguishes a per-prompt
+    note from sticky session state — cannot be built with it.
+    """
+
+    def __init__(self, files: dict[str, str], refuse: set[str]) -> None:
+        super().__init__(files)
+        self.refuse = refuse
+
+    def write(self, path: str, text: str) -> None:
+        if path in self.refuse:
+            raise PermissionError(path)
+        super().write(path, text)
+
+
+def test_the_question_survives_clipping_when_a_note_is_present() -> None:
+    """The fix must not make the question unreadable to make the failure so.
+
+    The echo row is hard-clipped (`render._clip`: no wrap, no scroll), and the
+    shipped ConPTY scenarios run at 40 columns. A *prefixed* note pushes the
+    question off the end — at 40 the gate read
+    `/tmp/notes.txt: permission-denied. Modif`, a truncated error with no
+    visible question, on the row where `y` is the key that discards the
+    buffer. A suffix guarantees the opposite sacrifice: the annotation is what
+    gets cut, and the question and its answer set always survive.
+    """
+    from drei.render import _clip
+
+    files = _RefusingPort({"/tmp/notes.txt": "saved"}, refuse={"/tmp/notes.txt"})
+    session = _session(files)
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+    outcome = session.dispatch(MinibufferInput("y"))
+
+    (prompt,) = _prompts(outcome)
+    assert prompt.startswith(EXIT_PROMPT)
+    assert "permission-denied" in prompt
+    # At the width the shipped scenarios use, the question is intact and it is
+    # the note that is sacrificed.
+    assert _clip(prompt, 40) == _clip(EXIT_PROMPT, 40)
+
+
+def test_the_offer_keeps_its_filename_when_a_note_is_present() -> None:
+    """The stage-1 case is the one where truncation used to hide the *target*:
+    at 40 columns the prefixed form read `Save file` with no filename, and `y`
+    then wrote a file the user had never been shown."""
+    from drei.render import _clip
+
+    files = _RefusingPort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"}, refuse={"/tmp/a.txt"})
+    session = _session(files, path="/tmp/a.txt", text="A")
+    session.dispatch(InsertText("1"))
+    _visit(session, "/tmp/b.txt", edit="2")
+
+    session.dispatch(ExitEditor())
+    outcome = session.dispatch(MinibufferInput("y"))  # a.txt refuses
+
+    (prompt,) = _prompts(outcome)
+    assert prompt.startswith(SAVE_PROMPT.format("/tmp/b.txt"))
+    assert "/tmp/a.txt: permission-denied" in prompt
+    assert "/tmp/b.txt" in _clip(prompt, 40)
+
+
+def test_the_note_does_not_outlive_the_prompt_it_was_raised_on() -> None:
+    """a.txt fails, b.txt saves cleanly — the gate must be clean.
+
+    The earlier version of this test used a port with no failures at all, so
+    it could not observe the property it is named for: making the note sticky
+    session state left the whole suite green.
+    """
+    files = _RefusingPort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"}, refuse={"/tmp/a.txt"})
+    session = _session(files, path="/tmp/a.txt", text="A")
+    session.dispatch(InsertText("1"))
+    _visit(session, "/tmp/b.txt", edit="2")
+
+    session.dispatch(ExitEditor())
+    failed = session.dispatch(MinibufferInput("y"))  # a.txt refuses
+    assert "permission-denied" in _prompts(failed)[0]
+
+    gate = session.dispatch(MinibufferInput("y"))  # b.txt saves cleanly
+    assert files.files["/tmp/b.txt"] == "2B"
+    # a.txt is still modified, so the gate is reached — and it says nothing
+    # about a failure, because none happened on this keystroke.
+    assert _prompts(gate) == [EXIT_PROMPT]

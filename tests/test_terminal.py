@@ -202,6 +202,7 @@ def test_a_failed_save_at_the_exit_prompt_is_readable_on_the_frame() -> None:
 
     files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
     port = _WidePort([])
+    port.get_size = lambda: (100, 4)  # type: ignore[method-assign]
     with pytest.raises(EndOfInput):
         run_editor(
             port,
@@ -215,9 +216,43 @@ def test_a_failed_save_at_the_exit_prompt_is_readable_on_the_frame() -> None:
     # and the reason the write did not happen is on the prompt row.
     assert files.files["/tmp/notes.txt"] == "saved"
     assert any(
-        row.startswith("/tmp/notes.txt: permission-denied. Modified buffers")
+        row.startswith(
+            "Modified buffers exist; exit anyway? (y or n) "
+            "[/tmp/notes.txt: permission-denied]"
+        )
         for row in _frame_rows(port)[-1]
     ), _frame_rows(port)[-1]
+
+
+def test_the_exit_question_survives_a_narrow_frame_carrying_a_failure() -> None:
+    """Finding 1 of the second review round, at the shipped width.
+
+    The echo row is hard-clipped, and the ConPTY scenarios run at 40 columns.
+    While the failure note was a *prefix* this row read
+    `/tmp/notes.txt: permission-denied. Modif` — a truncated error with no
+    visible question, on the row where `y` is the key that discards the
+    buffer. The note is a suffix now, so the annotation is what gets cut.
+
+    The width here is the one the shipped scenarios use, which is exactly the
+    width no scenario exercises for this row (none of them fails a save).
+    """
+    from conftest import FakeFilePort
+
+    files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
+    port = FakePort([])  # 10 columns is narrower still; see the assert below
+    port.get_size = lambda: (40, 4)  # type: ignore[method-assign]
+    with pytest.raises(EndOfInput):
+        run_editor(
+            port,
+            events=scripted(keys("x", "\x18", "\x03", "y")),
+            file_port=files,
+            file_path="/tmp/notes.txt",
+            initial_text="saved",
+        )
+
+    echo = _frame_rows(port)[-1][-1]
+    assert echo.startswith("Modified buffers exist; exit anyway?"), echo
+    assert "permission-denied" not in echo  # the sacrificed half, deliberately
 
 
 def test_editor_inserts_text_and_renders() -> None:
