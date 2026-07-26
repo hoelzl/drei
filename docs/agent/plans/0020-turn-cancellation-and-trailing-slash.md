@@ -1,6 +1,22 @@
 # Twentieth slice: C-g turn cancellation and trailing-slash find-file (TD-2, TD-3)
 
-**Status:** ready (issue #56).
+**Status:** implemented (issue #56).
+
+What the plan got wrong (the honesty record):
+
+1. **V2's "queued permission answered before the UI clears" premise is
+   unreachable.** Caught RED by its own test: *every* prompt close drains
+   the permission queue — accept included (`session.py:942–945`), not only
+   abandons — so a top-level `C-g` never meets an unpresented request, and
+   the `AbortPendingPermissions` half of the post-cancel sweep is defensive,
+   not load-bearing. The test was rewritten to pin that routing invariant
+   (`test_a_request_queued_behind_a_prompt_is_presented_on_close`); design
+   0005 D5 carries the same amendment. The plan (and 0005) had assumed the
+   queue could stand at cancel time.
+
+Everything else held: the V-order, the trigger-composition D1–D4, the D5
+token choice, "no pins change" (§5), and the ConPTY settle witness
+(`Drei: *agent*` ⟹ prompt in flight) all survived contact.
 
 **Architecture gate:** design `0005-acp-pump.md` **D5** (cancellation — the
 one decision in that record still `proposed`; its blocker, `C-g` meaning
