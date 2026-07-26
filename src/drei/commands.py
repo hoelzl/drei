@@ -677,6 +677,51 @@ class OpenFailed:
     error: str
 
 
+@dataclass(frozen=True, slots=True)
+class Message:
+    """A user-visible message with no semantic payload (plan 0019 D1).
+
+    ``token`` is a Drei-owned identifier (``end-of-buffer``,
+    ``no-further-undo``, …) — never English — so replay outcomes and message
+    assertions stay locale- and prose-independent; the harness owns the
+    token→text table, exactly as it already formats ``SaveFailed``'s tokens.
+    ``subject`` is the optional thing the message is about (a path, a buffer
+    name), composed by the caller.
+
+    A Message *describes*; it never acts. The kill-append, yank, and undo
+    bookkeeping excludes it (plan 0019 D2), so a no-op that speaks is still a
+    no-op.
+    """
+
+    token: str
+    subject: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SaveDeclined:
+    """The user answered `n` at a stage-1 save offer (plan 0019 D4).
+
+    The buffer stays modified and unwritten *by decision*. Recorded so the
+    transcript shows what the user did (issue #51): replay can now tell a
+    declined save from a save that was never offered. Carries the buffer
+    name, as ``BufferSaved`` carries the path one level up.
+    """
+
+    buffer_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ExitRefused:
+    """The user answered `n` at the stage-2 exit gate (plan 0019 D4).
+
+    A refusal is a decision, not an escape — distinct from
+    ``MinibufferAborted`` (``C-g``), which is what this outcome emitted
+    before the distinction existed (issue #51). Like an abandonment it
+    leaves the editor running and can be asked again; unlike one it is
+    silent on the frame, which is now *honest* silence.
+    """
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BufferObservation:
     buffer_id: str
@@ -744,6 +789,9 @@ class CommandOutcome:
         | WindowsCollapsed
         | FrameResized
         | OpenFailed
+        | Message
+        | SaveDeclined
+        | ExitRefused
         | AgentPromptSubmitted
         | BufferDisplayed
         | AgentTranscriptUpdated

@@ -10,11 +10,13 @@ from drei.commands import (
     InsertText,
     KillLine,
     KillRegion,
+    Message,
     SaveBuffer,
     SetMark,
     TextUndone,
     Undo,
     Yank,
+    YankPop,
 )
 from drei.files import FilePort
 from drei.model import Buffer, BufferId, BufferValue
@@ -30,7 +32,8 @@ def _session(text: str = "", point: int = 0) -> EditorSession:
 def test_undo_empty_stack_is_noop() -> None:
     session = _session("hello", 5)
     outcome = session.dispatch(Undo())
-    assert outcome.events == ()
+    # Speaks (row 80) but changes nothing — a Message is not a semantic event.
+    assert outcome.events == (Message("no-further-undo"),)
     assert session.buffer.current.text == "hello"
     assert session.buffer.current.point == 5
     assert not session.buffer.current.modified
@@ -106,10 +109,12 @@ def test_undo_clears_yank_active() -> None:
     session.dispatch(KillLine())  # newline (appends)
     session.dispatch(Yank())  # "a\n" back
     session.dispatch(Undo())  # undo the yank
-    # M-y now: no active yank → no-op (ring has one entry anyway)
+    # M-y now: no active yank → speaks (row 68), changes nothing
     from drei.commands import YankPop
 
-    assert session.dispatch(YankPop()).events == ()
+    assert session.dispatch(YankPop()).events == (
+        Message("previous-command-not-a-yank"),
+    )
 
 
 def test_fresh_edit_after_undo_truncates_redo() -> None:
@@ -122,7 +127,8 @@ def test_fresh_edit_after_undo_truncates_redo() -> None:
     assert session.buffer.current.text == "ab"
     session.dispatch(Undo())  # removes "ab" — "cd" is NOT resurrected
     assert session.buffer.current.text == ""
-    assert session.dispatch(Undo()).events == ()  # nothing left
+    # Nothing left: speaks (row 80), changes nothing.
+    assert session.dispatch(Undo()).events == (Message("no-further-undo"),)
 
 
 def test_motion_between_undos_breaks_descent() -> None:
@@ -153,17 +159,39 @@ def test_noop_command_does_not_break_descent() -> None:
 
 
 def test_exhausted_undo_does_not_flip_into_redo() -> None:
-    """Review 0001 finding 2: an Undo that emitted nothing is a silent no-op
-    and must not break the descent. Before the fix a held C-/ oscillated the
-    buffer with period 3 (undo → no-op → redo → …) forever."""
+    """Review 0001 finding 2: an exhausted Undo intervenes in nothing and
+    must not break the descent. Before the fix a held C-/ oscillated the
+    buffer with period 3 (undo → no-op → redo → …) forever. Since plan 0019
+    the no-op SPEAKS (row 80) — a Message, which describes rather than acts
+    (D2), so the oscillation guard is unchanged."""
     session = _session()
     session.dispatch(InsertText("a"))
     session.dispatch(Undo())  # removes "a" — the only group
     assert session.buffer.current.text == ""
     for _ in range(6):
         outcome = session.dispatch(Undo())
-        assert outcome.events == ()
+        assert outcome.events == (Message("no-further-undo"),)
         assert session.buffer.current.text == ""
+
+
+def test_a_speaking_no_op_does_not_break_the_undo_descent() -> None:
+    """Plan 0019 D2's hazard, proven: undo three times (descending), press
+    M-y on an empty ring — a no-op that now emits a Message — then C-/. If
+    the Message counted as an intervening event the descent would be broken
+    and the last C-/ would REDO; it must undo instead (registry row 82:
+    only event-emitting commands intervene, and a message is not one)."""
+    session = _session()
+    for char in "abcd":
+        session.dispatch(InsertText(char))
+    session.dispatch(Undo())  # removes "d"
+    session.dispatch(Undo())  # removes "c"
+    session.dispatch(Undo())  # removes "b"
+    assert session.buffer.current.text == "a"
+    pop = session.dispatch(YankPop())  # speaks; must not intervene
+    assert pop.events == (Message("previous-command-not-a-yank"),)
+    outcome = session.dispatch(Undo())
+    assert session.buffer.current.text == ""  # undid "a" — not redone to "ab"
+    assert any(isinstance(e, TextUndone) for e in outcome.events)
 
 
 def test_undo_stack_capacity() -> None:
@@ -171,7 +199,9 @@ def test_undo_stack_capacity() -> None:
     for i in range(110):
         session.dispatch(InsertText(chr(97 + i % 26)))
     undone = 0
-    while session.dispatch(Undo()).events:
+    # Exhaustion speaks now (row 80), so the loop keys on semantic events —
+    # the same correction the property-suite twin of this loop needed.
+    while any(not isinstance(e, Message) for e in session.dispatch(Undo()).events):
         undone += 1
     assert undone == 100  # oldest 10 groups were dropped
     assert len(session.buffer.current.text) == 10  # first 10 remain

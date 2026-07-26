@@ -22,6 +22,7 @@ from drei.commands import (
     KillLine,
     KillRegion,
     MarkSet,
+    Message,
     MinibufferAbort,
     MinibufferAccept,
     MinibufferBackspace,
@@ -437,7 +438,7 @@ def test_modified_flag_consistent_with_history(history: list[object]) -> None:
             or isinstance(command, KillLine)
             and any(isinstance(e, TextKilled) for e in outcome.events)
             or isinstance(command, (Yank, YankPop))
-            and outcome.events
+            and any(isinstance(e, (TextYanked, TextYankPopped)) for e in outcome.events)
             or isinstance(command, KillRegion)
             and any(isinstance(e, RegionKilled) for e in outcome.events)
         ):
@@ -704,14 +705,15 @@ def test_process_deliveries_never_perturb_editor_folds(history: list[object]) ->
 
 @given(command_history())
 def test_undo_stack_bounded(history: list[object]) -> None:
-    """At most 100 groups; exhaustion degrades to silent no-ops."""
+    """At most 100 groups; exhaustion degrades to no-ops that *speak* (row
+    80) — so the loop keys on semantic events, not on emptiness (D2)."""
     from drei.session import UNDO_CAPACITY
 
     session = _session()
     for command in history:
         session.dispatch(command)  # type: ignore[arg-type]
     undone = 0
-    while session.dispatch(Undo()).events:
+    while any(not isinstance(e, Message) for e in session.dispatch(Undo()).events):
         undone += 1
     assert undone <= UNDO_CAPACITY
 

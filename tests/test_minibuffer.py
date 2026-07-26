@@ -11,6 +11,7 @@ from drei.commands import (
     FindFile,
     InsertText,
     KeyboardQuit,
+    Message,
     MinibufferAbort,
     MinibufferAborted,
     MinibufferAccept,
@@ -195,8 +196,11 @@ def test_open_preserves_kill_ring_and_clears_yank_state(tmp_path: Path) -> None:
         session.dispatch(MinibufferInput(char))
     session.dispatch(MinibufferAccept())
     assert session.kill_ring == ("killme",)  # ring preserved
-    # Yank state cleared by the event-emitting open: M-y is a no-op.
-    assert session.dispatch(YankPop()).events == ()
+    # Yank state cleared by the event-emitting open: M-y is a no-op that
+    # *says* so (row 68) — a Message, not a semantic event.
+    assert session.dispatch(YankPop()).events == (
+        Message("previous-command-not-a-yank"),
+    )
 
 
 def test_open_failed_on_read_error_leaves_buffer_untouched() -> None:

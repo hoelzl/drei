@@ -5,10 +5,13 @@ from drei.commands import (
     BufferSaved,
     CommandOutcome,
     KeyboardQuitEvent,
+    Message,
     MinibufferAbort,
+    MinibufferAborted,
     MinibufferAccept,
     MinibufferBackspace,
     MinibufferInput,
+    OpenFailed,
     ResizeFrame,
     SaveFailed,
 )
@@ -17,6 +20,30 @@ from drei.keys import PendingKey, UnresolvedKey, resolve
 from drei.model import Buffer, BufferId, BufferValue
 from drei.render import Frame, render_session
 from drei.session import Command, EditorSession
+
+# The one token→text table (plan 0019 D1): the session emits Drei-owned
+# tokens, this adapter owns the English. Seeded with the vocabulary the
+# slice's parity-registry rows fix; each entry earns its behavioral test as
+# its emitter lands (V2–V5).
+_MESSAGE_TEXT = {
+    "answer-y-or-n": "Please answer y or n",
+    "end-of-buffer": "End of buffer",
+    "mark-not-set": "The mark is not set now, or there is no region",
+    "no-further-undo": "No further undo information",
+    "previous-command-not-a-yank": "Previous command was not a yank",
+    "too-small-for-splitting": "Too small for splitting",
+}
+
+
+def _message_text(token: str, subject: str | None = None) -> str:
+    """Format one message token for the echo row.
+
+    An unknown token fails visible — rendered as itself — rather than
+    raising mid-frame or going blank: a missing table entry is a programming
+    error the suite should catch, never a reason the user sees nothing.
+    """
+    text = _MESSAGE_TEXT.get(token, token)
+    return f"{subject}: {text}" if subject is not None else text
 
 
 class EditorHarness:
@@ -49,6 +76,7 @@ class EditorHarness:
         self._outcomes: list[CommandOutcome] = []
         self._unresolved: list[UnresolvedKey] = []
         self._echo = ""
+        self._note = ""
         self._frame = self._render_frame()
 
     def send(self, key: str) -> CommandOutcome | None:
@@ -66,6 +94,7 @@ class EditorHarness:
             outcome = self._session.dispatch(command)
             self._outcomes.append(outcome)
             self._echo = self._echo_for(outcome)
+            self._note = self._note_for(outcome)
             self._frame = self._render_frame()
             return outcome
         resolved = resolve(self._pending, key)
@@ -79,6 +108,7 @@ class EditorHarness:
         outcome = self._session.dispatch(resolved)
         self._outcomes.append(outcome)
         self._echo = self._echo_for(outcome)
+        self._note = self._note_for(outcome)
         self._frame = self._render_frame()
         return outcome
 
@@ -147,18 +177,42 @@ class EditorHarness:
 
     @staticmethod
     def _echo_for(outcome: CommandOutcome) -> str:
-        # TODO: [tech-debt] TD-4 — only these three events echo. Every other
-        # failure (notably OpenFailed from a C-x C-f that hit a permission
-        # error) closes the minibuffer with a blank echo row, which reads as
-        # a successful no-op. Needs the echo-message slice; see
-        # docs/technical-debt.md.
+        # TODO: [tech-debt] TD-4 — the mechanism is here (V1); the remaining
+        # emitters land through V5 and the debt entry closes in V6. See
+        # docs/technical-debt.md and docs/agent/plans/0019-*.md §7.
         for event in outcome.events:
             if isinstance(event, KeyboardQuitEvent):
                 return "Quit"
+            if isinstance(event, MinibufferAborted):
+                # `C-g` at a prompt (row 92). Reachable only from genuine
+                # aborts: the gate refusal carries ExitRefused instead (D4),
+                # so "Quit" here is the truth, not a euphemism.
+                return "Quit"
             if isinstance(event, BufferSaved):
                 return f"Wrote {event.path}"
-            if isinstance(event, SaveFailed):
-                return f"{event.path}: {event.error}"
+            if isinstance(event, SaveFailed | OpenFailed):
+                return _message_text(event.error, event.path)
+            if isinstance(event, Message):
+                return _message_text(event.token, event.subject)
+        return ""
+
+    def _note_for(self, outcome: CommandOutcome) -> str:
+        """The message that rides an open prompt (plan 0019 D3), or "".
+
+        Only the message class — a failure, or a refusal to act — belongs on
+        a prompt: `Wrote …` is an echo, and `Quit` comes from a `C-g` that
+        closes the prompt rather than riding one. Nothing rides a closed
+        prompt: a `C-x C-f` failure leaves no prompt behind, and its text is
+        the echo row's alone. Recomputed per command (D6); `resize` and
+        `apply` leave it alone for the same reason they leave the echo.
+        """
+        if self._session.minibuffer is None:
+            return ""
+        for event in outcome.events:
+            if isinstance(event, SaveFailed | OpenFailed):
+                return _message_text(event.error, event.path)
+            if isinstance(event, Message):
+                return _message_text(event.token, event.subject)
         return ""
 
     @property
@@ -193,4 +247,5 @@ class EditorHarness:
             width=self._width,
             height=self._height,
             echo=self._echo,
+            note=self._note,
         )

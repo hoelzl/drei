@@ -38,6 +38,7 @@ from drei.commands import (
     EditorExited,
     ExchangePointAndMark,
     ExitEditor,
+    ExitRefused,
     FindFile,
     ForwardChar,
     FrameResized,
@@ -49,6 +50,7 @@ from drei.commands import (
     KillRegion,
     MarkExchanged,
     MarkSet,
+    Message,
     MinibufferAbort,
     MinibufferAborted,
     MinibufferAccept,
@@ -66,6 +68,7 @@ from drei.commands import (
     RegionKilled,
     ResizeFrame,
     SaveBuffer,
+    SaveDeclined,
     SaveFailed,
     SessionObservation,
     SetMark,
@@ -165,6 +168,9 @@ Event = (
     | WindowsCollapsed
     | FrameResized
     | OpenFailed
+    | Message
+    | SaveDeclined
+    | ExitRefused
     | AgentPromptSubmitted
     | BufferDisplayed
     | AgentTranscriptUpdated
@@ -837,6 +843,10 @@ class EditorSession:
             case MinibufferBackspace():
                 if self._choice is not None:
                     pass  # no text to delete in choice mode
+                elif self._minibuffer_kind in _EXIT_KINDS:
+                    # Not an answer (row 130), not text editing: an exit
+                    # prompt's input is always "".
+                    events.append(Message("answer-y-or-n"))
                 elif self._minibuffer:
                     self._minibuffer = self._minibuffer[:-1]
                 new_value = current
@@ -885,7 +895,9 @@ class EditorSession:
                 elif self._minibuffer_kind in _EXIT_KINDS:
                     # `RET` is not a default `y` (D5): the exit prompts are the
                     # last guard before losing work, and a habitual `RET` must
-                    # not answer them. Silent no-op; the prompt stays up.
+                    # not answer them. It says so (row 130), like every other
+                    # non-answer key; the prompt stays up.
+                    events.append(Message("answer-y-or-n"))
                     new_value = current
                 elif self._minibuffer is not None:
                     text = self._minibuffer
@@ -964,12 +976,19 @@ class EditorSession:
         commit_id = pinned_id or self._current_id
         state = self._states[commit_id]
 
+        # A Message describes rather than acts (plan 0019 D2): a no-op that
+        # speaks is still a no-op, so "did this command intervene" keys off
+        # *semantic* events only. Without this a speaking no-op breaks the
+        # kill-append chain, yank_active, and the undo descent — the last is
+        # review 0001 finding 2's exact bug, now with a voice.
+        intervened = any(not isinstance(e, Message) for e in events)
+
         if isinstance(command, KillLine):
             # A kill that emits an event starts/continues the append chain;
             # a no-op kill leaves the chain intact.
             if any(isinstance(e, TextKilled) for e in events):
                 state.last_was_kill = True
-        elif events:
+        elif intervened:
             # Only event-emitting commands break the chain. A silent no-op
             # (empty insert) leaves no trace in the transcript, so it must
             # not intervene — keeping the chain derivable from the evidence
@@ -982,7 +1001,7 @@ class EditorSession:
         elif isinstance(command, YankPop):
             # Active stays on for a successful pop (chains), off for a no-op.
             state.yank_active = any(isinstance(e, TextYankPopped) for e in events)
-        elif events:
+        elif intervened:
             # Same rule as the chain: only event-emitting commands intervene.
             state.yank_active = False
 
@@ -992,9 +1011,9 @@ class EditorSession:
         # breaks the descent (matches Emacs's last-command gating); a
         # silent no-op intervenes in nothing.
         if isinstance(command, Undo):
-            if events:
+            if intervened:
                 # Only an Undo that actually moved the buffer sets the
-                # direction. An exhausted Undo emits nothing, and a silent
+                # direction. An exhausted Undo intervenes in nothing, and a
                 # no-op intervenes in nothing — clearing the flag here would
                 # send the *next* Undo down the redo branch, so a held C-/
                 # oscillated the buffer forever (review 0001 finding 2).
@@ -1007,7 +1026,7 @@ class EditorSession:
                     : max(0, len(state.undo_history) - UNDO_CAPACITY)
                 ]
                 state.undo_redo.clear()
-            if events:
+            if intervened:
                 state.undo_descending = False
 
         # Validation happens in BufferValue.__post_init__ before any
@@ -1052,29 +1071,18 @@ class EditorSession:
         ]
         self._advance_exit(events)
 
-    def _advance_exit(self, events: list[Event], note: str = "") -> None:
+    def _advance_exit(self, events: list[Event]) -> None:
         """Offer the next buffer at risk, or fall through to the exit gate.
 
-        ``note`` carries a failure the user has to know about before
-        answering. It rides the prompt because the minibuffer owns the echo
-        row while a prompt is open, so a message left to `_echo_for` would be
-        drawn over unread (review 0002 finding 1).
-
-        It is a **suffix**, and that ordering is the decision. The echo row is
-        hard-clipped — `render._clip` does not wrap or scroll, and the shipped
-        ConPTY scenarios run at 40 columns — so one half of this string is
-        going to be sacrificed. Prefixing sacrificed the question: at 40 the
-        gate read `<path>: permission-denied. Modif`, a truncated error with
-        no visible question, on the row where `y` discards the buffer, and the
-        stage-1 offer lost the filename it was asking about. A suffix
-        sacrifices the annotation instead, which is the right way round: the
-        question and its answer set must be readable at every width, and a
-        cut-off reason is still a visible sign that something went wrong.
+        A failure the user has to know about before answering — a `SaveFailed`
+        from the buffer just offered — rides the prompt at render time (plan
+        0019 D3); it is not baked into the prompt string. Plan 0018's note
+        plumbing is retired; the rendered row is unchanged.
         """
         if self._exit_pending:
             _, path = self._exit_pending[0]
             self._open_exit_prompt(
-                "save-buffer", f"Save file {path}? (y or n) {note}", events
+                "save-buffer", f"Save file {path}? (y or n) ", events
             )
         elif any(buffer.current.modified for buffer in self._buffers.values()):
             # Stage 2 (D3): the question is "does any buffer currently report
@@ -1086,7 +1094,7 @@ class EditorSession:
             # the same way.
             self._open_exit_prompt(
                 "exit-anyway",
-                f"Modified buffers exist; exit anyway? (y or n) {note}",
+                "Modified buffers exist; exit anyway? (y or n) ",
                 events,
             )
         else:
@@ -1112,13 +1120,14 @@ class EditorSession:
     def _exit_prompt_key(self, char: str, events: list[Event]) -> None:
         """One key at an exit prompt (D5).
 
-        `y` and `n` advance the sequence; every other key is a silent no-op and
-        the prompt stays up — deliberately including `RET`, which must not
-        resolve a question about losing work by reflex (B.8 finding 9's
-        reasoning). Emacs echoes `Please answer y or n` there; Drei has no
-        message mechanism (TD-4, deviation row 6).
+        `y` and `n` advance the sequence; every other key says `Please
+        answer y or n` (row 130) and the prompt stays up — deliberately
+        including `RET`, which must not resolve a question about losing work
+        by reflex (B.8 finding 9's reasoning). The message rides the standing
+        prompt at render time (plan 0019 D3).
         """
         if char not in ("y", "n"):
+            events.append(Message("answer-y-or-n"))
             return
         if self._minibuffer_kind == "exit-anyway":
             self._close_exit_prompt()
@@ -1126,17 +1135,24 @@ class EditorSession:
                 events.append(EditorExited())
             else:
                 # Refusing the gate abandons *this* exit, not the ability to
-                # exit: `C-x C-c` asks again from the top. Same abandonment
-                # path as `C-g`, so the permission queue drains here too (D7).
-                events.append(MinibufferAborted())
+                # exit: `C-x C-c` asks again from the top. It is a refusal,
+                # not an abandonment — the transcript says which (plan 0019
+                # D4, issue #51) — and the permission queue drains here too,
+                # exactly as on the `C-g` path (D7).
+                events.append(ExitRefused())
                 self._drain_permission_queue(events)
             return
         buffer_id, _ = self._exit_pending.pop(0)
-        # A `y` whose write fails must not read as a save. `n` is an answer
-        # rather than an error and reports nothing.
-        note = self._save_buffer(buffer_id, events) if char == "y" else ""
+        # A `y` whose write fails must not read as a save: the `SaveFailed`
+        # rides the prompt that follows (D3). `n` is an answer rather than an
+        # error — nothing rides the prompt — but it *is* something the user
+        # did, so the transcript records it (plan 0019 D4, issue #51).
+        if char == "y":
+            self._save_buffer(buffer_id, events)
+        else:
+            events.append(SaveDeclined(buffer_id.value))
         self._close_exit_prompt()
-        self._advance_exit(events, note)
+        self._advance_exit(events)
 
     def _drain_permission_queue(self, events: list[Event]) -> None:
         """Present the next request that queued behind a prompt, if any.
@@ -1150,8 +1166,8 @@ class EditorSession:
             nxt = self._permission_queue.pop(0)
             self._open_choice(nxt, events)
 
-    def _save_buffer(self, buffer_id: BufferId, events: list[Event]) -> str:
-        """Save one buffer in place; return a note for the next exit prompt.
+    def _save_buffer(self, buffer_id: BufferId, events: list[Event]) -> None:
+        """Save one buffer in place.
 
         The write-back is direct rather than through `dispatch`'s trailing
         `replace` (D6): the command being dispatched is a `MinibufferInput`,
@@ -1159,20 +1175,13 @@ class EditorSession:
         `self.buffer.current` afterwards so a save of the focused buffer is not
         overwritten by the value captured before the arm ran.
 
-        The note is empty on success and `"[<path>: <token>]"` on failure,
-        wrapping `_echo_for`'s own `SaveFailed` shape — the same failure, so a
-        second vocabulary for it would be one more thing to keep in agreement.
+        A failure is a `SaveFailed` event and nothing more: the visible note
+        on the prompt that follows is derived from that event at render time
+        (plan 0019 D3), retiring plan 0018's baked-in `[<path>: <token>]`
+        prompt suffix without changing the rendered row.
         """
         buffer = self._buffers[buffer_id]
-        # Only what this save appends. `events` is in fact empty at the single
-        # call site today, so the window is belt-and-braces rather than a
-        # tested guarantee — it costs a line and removes the question.
-        before = len(events)
         buffer.replace(self._save(buffer.current, buffer_id, events))
-        for event in events[before:]:
-            if isinstance(event, SaveFailed):
-                return f"[{event.path}: {event.error}]"
-        return ""
 
     # ------------------------------------------------------------------
     # B.8 choice-minibuffer helpers
@@ -1683,7 +1692,10 @@ class EditorSession:
         """
         if self._state.undo_descending or not self._state.undo_redo:
             if not self._state.undo_history:
-                return current  # nothing to undo: silent no-op
+                # Nothing to undo: says so (row 80) and changes nothing —
+                # the Message must not count as intervening (D2).
+                events.append(Message("no-further-undo"))
+                return current
             group = self._state.undo_history.pop()
             self._state.undo_redo.append(group)
             events.append(
@@ -1842,8 +1854,16 @@ class EditorSession:
         )
 
     def _yank_pop(self, current: BufferValue, events: list[Event]) -> BufferValue:
-        if not self._state.yank_active or len(self._kill_ring) < 2:
-            return current  # no active yank / empty or 1-entry ring: silent no-op
+        if not self._state.yank_active:
+            # No active yank: says so (row 68) and changes nothing — the
+            # Message must not count as intervening (D2).
+            events.append(Message("previous-command-not-a-yank"))
+            return current
+        if len(self._kill_ring) < 2:
+            # One-entry ring (row 69): a deliberate SILENT no-op — Emacs
+            # replaces the entry with itself and sets modified, which would
+            # contradict the modified-flag invariant. Unrelated to messages.
+            return current
         start, end = self._state.yank_bounds
         old = current.text[start:end]
         cursor = (self._state.yank_cursor + 1) % len(self._kill_ring)

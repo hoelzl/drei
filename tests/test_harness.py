@@ -100,6 +100,52 @@ def test_harness_save_failure_echoes_token() -> None:
     assert harness.frame.rows[-1].startswith("/root/x.txt: permission-denied")
 
 
+def test_harness_find_file_failure_echoes_token_then_clears() -> None:
+    """Plan 0019 V1's acceptance scenario (TD-4's headline case).
+
+    A `C-x C-f` the port refuses closes the prompt and says so on the echo
+    row — `<path>: <token>`, the `SaveFailed` shape — where it used to close
+    on a blank row indistinguishable from a successful no-op. The buffer is
+    untouched, and the message lives exactly until the next command (D6).
+    """
+    from conftest import FakeFilePort
+
+    port = FakeFilePort(fail_read="permission")
+    harness = EditorHarness(width=40, height=6, file_port=port)
+    harness.send("C-x")
+    harness.send("C-f")
+    for char in "/etc/shadow":
+        harness.send(char)
+    outcome = harness.send("RET")
+
+    assert outcome is not None
+    assert harness.observation.minibuffer is None  # the prompt CLOSES
+    assert harness.observation.text == ""  # the buffer is untouched
+    assert harness.frame.rows[-1].startswith("/etc/shadow: permission-denied")
+
+    harness.send("a")
+    assert harness.frame.rows[-1].strip() == ""
+    assert harness.observation.text == "a"
+
+
+def test_message_text_formats_through_the_token_table() -> None:
+    """The one formatting seam (plan 0019 D1).
+
+    A known token maps to its table text; an unknown token fails visible as
+    itself rather than raising mid-frame; a subject prefixes as
+    `<subject>: <text>` — the shape `SaveFailed` has used since review 0001
+    finding 26.
+    """
+    from drei.harness import _message_text
+
+    assert _message_text("no-further-undo") == "No further undo information"
+    assert _message_text("some-future-token") == "some-future-token"
+    assert (
+        _message_text("permission-denied", "/etc/shadow")
+        == "/etc/shadow: permission-denied"
+    )
+
+
 def test_harness_outcome_sequence() -> None:
     harness = EditorHarness(width=10, height=3)
     harness.send("a")
@@ -138,11 +184,14 @@ def test_harness_routes_minibuffer_keys() -> None:
     assert harness.send("C-f") is None  # ForwardChar does NOT run
     assert harness.observation.minibuffer == "a"
 
-    # Abort: prompt closes, buffer and mark untouched, no quit.
+    # Abort: prompt closes, buffer and mark untouched, no quit — and the
+    # echo says what happened (row 92: this assertion is the one this test
+    # was cited for without ever having had).
     outcome = harness.send("C-g")
     assert outcome is not None
     assert any(type(e).__name__ == "MinibufferAborted" for e in outcome.events)
     assert all(type(e).__name__ != "KeyboardQuitEvent" for e in outcome.events)
+    assert harness.frame.rows[-1].startswith("Quit")
     closed = harness.observation.minibuffer
     assert closed is None
     # The `closed is None` narrowing bleeds into the next expression under

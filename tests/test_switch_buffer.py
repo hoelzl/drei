@@ -17,6 +17,7 @@ from drei.commands import (
     ForwardChar,
     InsertText,
     KillLine,
+    Message,
     MinibufferAbort,
     MinibufferAccept,
     MinibufferInput,
@@ -123,7 +124,10 @@ def test_switch_breaks_yank_pop_chaining() -> None:
     session.dispatch(KillLine())  # ring: ("bbb", "aaa")
     session.dispatch(Yank())  # yanks "bbb"
     session._select_buffer(BufferId("alpha"), [])
-    assert session.dispatch(YankPop()).events == ()  # no pop after switch
+    # No pop after switch: speaks (row 68), changes nothing.
+    assert session.dispatch(YankPop()).events == (
+        Message("previous-command-not-a-yank"),
+    )
 
 
 def test_switch_restores_per_buffer_point_and_mark() -> None:

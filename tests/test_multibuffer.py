@@ -9,7 +9,15 @@ from __future__ import annotations
 
 from conftest import FakeFilePort
 
-from drei.commands import InsertText, KeyboardQuit, KillLine, Undo, Yank, YankPop
+from drei.commands import (
+    InsertText,
+    KeyboardQuit,
+    KillLine,
+    Message,
+    Undo,
+    Yank,
+    YankPop,
+)
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
 
@@ -58,7 +66,10 @@ def test_kill_chain_and_yank_state_unchanged_in_one_buffer() -> None:
     assert session.kill_ring == ("one two\n",)
     session.dispatch(Yank())
     session.dispatch(KeyboardQuit())  # intervenes: breaks yank-pop
-    assert session.dispatch(YankPop()).events == ()
+    # No active yank: speaks (row 68), changes nothing.
+    assert session.dispatch(YankPop()).events == (
+        Message("previous-command-not-a-yank"),
+    )
     assert session.buffer.current.text == "one two\nthree four\n"
 
 
