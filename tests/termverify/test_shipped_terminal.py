@@ -440,6 +440,45 @@ def test_shipped_editor_undo_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_exhausted_undo_speaks(tmp_path: Path) -> None:
+    """Plan 0019's ConPTY acceptance: a message read off the shipped frame.
+
+    C-x u on a fresh buffer has nothing to undo; the echo row must say
+    "No further undo information" — the whole slice-19 path (session
+    `Message` event -> harness token table -> `_echo_for` -> frame) proven
+    through the real executable, not the in-process harness. D6: the next
+    command clears it.
+    """
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-undo-message", _configuration())
+        assert type(started) is Started, started
+
+        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        spoken = adapter.dispatch(TextInput(ManualTime(0), "u"))
+        assert type(spoken) is EpochCompleted, spoken
+        spoken_observation = spoken.observation
+        assert spoken_observation is not None
+        spoken_lines = _frame_lines(spoken_observation)
+        assert any(
+            line.startswith("No further undo information") for line in spoken_lines
+        ), spoken_lines
+
+        # D6: the message lives exactly until the next command.
+        cleared = adapter.dispatch(TextInput(ManualTime(0), "a"))
+        assert type(cleared) is EpochCompleted, cleared
+        cleared_observation = cleared.observation
+        assert cleared_observation is not None
+        cleared_lines = _frame_lines(cleared_observation)
+        assert not any(
+            line.startswith("No further undo information") for line in cleared_lines
+        ), cleared_lines
+
+        final = _exit_through_the_gate(adapter)
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
     """C-k C-k (chain broken) C-y through ConPTY; M-y pop proven in-process.
 
@@ -583,6 +622,10 @@ def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
         aborted_lines = _frame_lines(aborted.observation)
         assert not any("Find file:" in line for line in aborted_lines), aborted_lines
         assert any(line.startswith("keep") for line in aborted_lines), aborted_lines
+        # Slice 19 (row 92): the abort says so — Quit on the echo row, read
+        # off the shipped frame. It derives from MinibufferAborted, not from
+        # a quit event.
+        assert any(line.startswith("Quit") for line in aborted_lines), aborted_lines
 
         # The editor is still alive, and C-x C-c is what ends it.
         final = _exit_through_the_gate(adapter)
