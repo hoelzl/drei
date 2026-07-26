@@ -77,7 +77,30 @@ class Undo:
 
 @dataclass(frozen=True, slots=True)
 class KeyboardQuit:
-    pass
+    """`C-g`: abort what is in progress. Never ends the run.
+
+    Emacs's `keyboard-quit` — the key a user presses when they do not know
+    what is happening, and the one key guaranteed to destroy nothing. Until
+    slice 17 this ended the editor and discarded every modified buffer, which
+    inverted the reference editor's safest key into its most destructive one
+    (TD-11). Exiting is :class:`ExitEditor`.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ExitEditor:
+    """`C-x C-c`: end the run.
+
+    Separate from :class:`KeyboardQuit` because one event cannot mean both
+    "the user aborted something" and "tear the process down" — conflating them
+    is what made `C-g` destructive. The session records the request and the
+    terminal loop acts on it; nothing here decides *how* the process ends.
+
+    TODO: [tech-debt] TD-11 — this exits with modified buffers unsaved and
+    unmentioned, where Emacs's `save-buffers-kill-terminal` offers to save
+    each one first. Slice 17 moved the data loss behind a deliberate two-key
+    sequence; slice 18 adds the prompt. See docs/technical-debt.md.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,7 +453,21 @@ class SaveFailed:
 
 @dataclass(frozen=True, slots=True)
 class KeyboardQuitEvent:
-    pass
+    """The user aborted something with `C-g`. Renders as `Quit`.
+
+    Not an exit signal. It was one until slice 17, which is why the editor
+    used to die on the key that means "never mind".
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class EditorExited:
+    """The user asked to end the run, and the session agreed.
+
+    The terminal loop's only exit condition. An event rather than a return
+    value because the transcript is the record of what the user did, and
+    "they quit" belongs in it.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,6 +730,7 @@ class CommandOutcome:
         | BufferSaved
         | SaveFailed
         | KeyboardQuitEvent
+        | EditorExited
         | ProcessOutputRecorded
         | MinibufferOpened
         | MinibufferAborted

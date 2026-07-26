@@ -188,7 +188,8 @@ def test_shipped_editor_runs_an_agent_turn(tmp_path: Path) -> None:
         assert any("Drei: *agent*" in line for line in answered), answered
         assert any("Drei: scratch" in line for line in answered), answered
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -232,6 +233,7 @@ def test_shipped_editor_survives_an_agent_that_will_not_start(tmp_path: Path) ->
         logged = _chord(adapter, "Enter")
         assert any("not-found" in line for line in logged), logged
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final

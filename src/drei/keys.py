@@ -7,6 +7,7 @@ from drei.commands import (
     CopyRegionAsKill,
     DeleteOtherWindows,
     ExchangePointAndMark,
+    ExitEditor,
     FindFile,
     ForwardChar,
     InsertText,
@@ -48,6 +49,10 @@ _PREFIXES = frozenset({"C-x", "C-c"})
 
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-c", "a"): PromptAgent(),
+    # `C-c` is also a prefix in its own right, and this pair wins: `resolve`
+    # consults the prefix TABLE before the prefix SET, so `C-x C-c` completes
+    # rather than opening a nested prefix.
+    ("C-x", "C-c"): ExitEditor(),
     ("C-x", "C-s"): SaveBuffer(),
     ("C-x", "C-x"): ExchangePointAndMark(),
     ("C-x", "u"): Undo(),

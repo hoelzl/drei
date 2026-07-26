@@ -35,7 +35,9 @@ from drei.commands import (
     DeliverProcessOutput,
     DeliverSessionEffects,
     DisplayBuffer,
+    EditorExited,
     ExchangePointAndMark,
+    ExitEditor,
     FindFile,
     ForwardChar,
     FrameResized,
@@ -114,6 +116,7 @@ Command = (
     | ExchangePointAndMark
     | Undo
     | KeyboardQuit
+    | ExitEditor
     | DeliverProcessOutput
     | DeliverSessionEffects
     | InsertAgentText
@@ -149,6 +152,7 @@ Event = (
     | BufferSaved
     | SaveFailed
     | KeyboardQuitEvent
+    | EditorExited
     | ProcessOutputRecorded
     | MinibufferOpened
     | MinibufferAborted
@@ -767,8 +771,13 @@ class EditorSession:
                 events.append(FrameResized(width, height))
                 new_value = current
             case KeyboardQuit():
+                # Emacs's keyboard-quit: deactivate the mark, say so, change
+                # nothing else. It does not end the run — ExitEditor does.
                 new_value = replace(current, mark=None)
                 events.append(KeyboardQuitEvent())
+            case ExitEditor():
+                events.append(EditorExited())
+                new_value = current
             case FindFile():
                 self._minibuffer = ""
                 self._minibuffer_prompt = "Find file: "
@@ -805,8 +814,11 @@ class EditorSession:
                     self._minibuffer = self._minibuffer[:-1]
                 new_value = current
             case MinibufferAbort():
-                # Never emits KeyboardQuitEvent (the terminal exits on that
-                # event); the main buffer's mark survives the abort.
+                # Never emits KeyboardQuitEvent: aborting a prompt is not a
+                # top-level quit, so it must not deactivate the main buffer's
+                # mark. (Until slice 17 the stronger reason was that the
+                # terminal exited on that event — `C-g` closing a prompt would
+                # have killed the editor.)
                 if self._choice is not None:
                     # Aborting a permission prompt denies the request.
                     request_id = self._choice.request_id

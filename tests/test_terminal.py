@@ -81,16 +81,42 @@ def run_with_keys(port: FakePort, **kwargs: object) -> None:
     run_editor(port, events=scripted(keys(*port.inputs)), **kwargs)  # type: ignore[arg-type]
 
 
-def test_editor_writes_readiness_and_exits_on_quit() -> None:
-    port = FakePort(["\x07"])
+def test_editor_writes_readiness_and_exits_on_c_x_c_c() -> None:
+    port = FakePort(["\x18", "\x03"])
     run_with_keys(port)
     assert port.outputs[0] == "DREI:READY\n"
     assert port.restored
     assert port.raw_entered
 
 
+def test_c_g_does_not_end_the_run() -> None:
+    """The whole slice, in one assertion.
+
+    `C-g` is `keyboard-quit`: it aborts what is in progress and echoes `Quit`,
+    and it never exits. Until slice 17 it ended the run and discarded every
+    modified buffer — the reference editor's safest key wired to its most
+    destructive outcome (TD-11).
+
+    The script does not quit at all, so the run ends by running out of input.
+    That is the point: had `C-g` still exited, the `\x18\x03` after it would
+    never be consumed and no `EndOfInput` would be raised.
+    """
+    port = FakePort([])
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted(keys("a", "\x07")))
+
+    written = "".join(port.outputs)
+    # The buffer survived, and `Quit` is on the echo row of the final frame —
+    # the first time that message has been readable rather than drawn once
+    # into a dying process.
+    assert _frame_rows(port)[-1][0].startswith("a")
+    assert any(row.startswith("Quit") for row in _frame_rows(port)[-1])
+    assert written.count(READINESS_MARKER) == 3  # startup, "a", C-g
+    assert port.restored
+
+
 def test_editor_inserts_text_and_renders() -> None:
-    port = FakePort(["a", "\x07"])
+    port = FakePort(["a", "\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
     assert "a" in written
@@ -117,20 +143,22 @@ def test_editor_restores_on_exception() -> None:
 def test_unresolved_key_marks_quiescence_without_frame_rewrite() -> None:
     # DEL is not bound to any command; the loop must still emit the
     # readiness marker (quiescence) but must not rewrite the frame.
-    port = FakePort(["\x7f", "\x07"])
+    port = FakePort(["\x7f", "\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
-    # Two markers: one after the initial frame, one after the unresolved key.
-    assert written.count("\x1b]7791;ready\x1b\\") == 2
-    # Two frame rewrites: the initial frame and the final C-g quit frame.
-    # The unresolved key in between triggers no rewrite of its own.
+    # Three markers: the initial frame, the unresolved DEL, and the `C-x`
+    # prefix — which is also an unresolved key as far as the loop is
+    # concerned, so exiting costs one marker more than quitting used to.
+    assert written.count("\x1b]7791;ready\x1b\\") == 3
+    # Two frame rewrites: the initial frame and the final exit frame. Neither
+    # the DEL nor the prefix rewrites one.
     assert written.count("\x1b[2J\x1b[H") == 2
 
 
 def test_editor_meta_chord_yank_pop_through_byte_loop() -> None:
     # ESC y assembles to M-y: with an empty ring it is a silent no-op, so the
     # loop treats it like any other no-state-change input and then quits.
-    port = FakePort(["\x1b", "y", "\x07"])
+    port = FakePort(["\x1b", "y", "\x18", "\x03"])
     run_with_keys(port)
     assert port.restored
 
@@ -147,7 +175,7 @@ def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
             return (40, 10)
 
     # C-k C-f C-k C-y ESC y C-g over "one\ntwo\nthree"
-    port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x07"])
+    port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x18", "\x03"])
     run_with_keys(port, initial_text="one\ntwo\nthree")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     pop_frame = frames[-2]  # last frame before the quit frame
@@ -184,7 +212,8 @@ def test_editor_region_commands_through_byte_loop() -> None:
             "w",  # mark 2 → point 0; copy "he"
             "\x18",
             "\x18",  # C-x C-x: no mark (copy cleared it) → no-op
-            "\x07",
+            "\x18",
+            "\x03",
         ]
     )
     run_with_keys(port, initial_text="hello world")
@@ -211,7 +240,8 @@ def test_editor_undo_through_byte_loop() -> None:
             "\x1f",  # C-/: undo "b" → "a"
             "\x18",
             "u",  # C-x u: undo "a" → ""
-            "\x07",
+            "\x18",
+            "\x03",
         ]
     )
     run_with_keys(port)
@@ -246,7 +276,8 @@ def test_editor_find_file_through_byte_loop(tmp_path: Path) -> None:
             "\x18",
             "\x06",  # C-x C-f again
             "\x07",  # C-g: abort (editor keeps running)
-            "\x07",  # C-g: quit
+            "\x18",
+            "\x03",  # C-x C-c: quit
         ]
     )
     run_with_keys(port, file_port=SystemFilePort(), initial_text="scratch")
@@ -276,7 +307,7 @@ def test_editor_arrow_keys_leave_the_buffer_untouched() -> None:
             return (40, 10)
 
     # Up, Down, Right, Left, Home (ESC [ H), Delete (ESC [ 3 ~), then quit.
-    port = TallPort(list("\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[3~") + ["\x07"])
+    port = TallPort(list("\x1b[A\x1b[B\x1b[C\x1b[D\x1b[H\x1b[3~") + ["\x18", "\x03"])
     run_with_keys(port, initial_text="hi")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     rows = [f.split("\r\n")[0] for f in frames[1:]]
@@ -286,12 +317,13 @@ def test_editor_arrow_keys_leave_the_buffer_untouched() -> None:
 
 def test_editor_arrow_key_does_not_rewrite_the_frame() -> None:
     """An arrow is one unresolved key: one readiness marker, no frame."""
-    port = FakePort(list("\x1b[A") + ["\x07"])
+    port = FakePort(list("\x1b[A") + ["\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
-    # Markers: initial frame + the arrow (unresolved). The quit frame has none.
-    assert written.count("\x1b]7791;ready\x1b\\") == 2
-    # Frames: the initial one and the final quit frame only.
+    # Markers: initial frame, the arrow (unresolved), the `C-x` prefix. The
+    # exit frame carries none.
+    assert written.count("\x1b]7791;ready\x1b\\") == 3
+    # Frames: the initial one and the final exit frame only.
     assert written.count("\x1b[2J\x1b[H") == 2
 
 
@@ -302,7 +334,7 @@ def test_editor_arrow_keys_do_not_reach_the_minibuffer() -> None:
         def get_size(self) -> tuple[int, int]:
             return (60, 10)
 
-    port = TallPort(["\x18", "\x06", *list("\x1b[A"), "\x07", "\x07"])
+    port = TallPort(["\x18", "\x06", *list("\x1b[A"), "\x07", "\x18", "\x03"])
     run_with_keys(port)
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     prompts = [
@@ -318,7 +350,7 @@ def test_editor_arrow_keys_do_not_reach_the_minibuffer() -> None:
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.
-    port = FakePort(["\x1b", "1", "\x07"])
+    port = FakePort(["\x1b", "1", "\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
     assert "1" in written
@@ -333,20 +365,29 @@ def test_editor_esc_non_letter_marks_quiescence_for_both_inputs() -> None:
     path. A bare ESC as chord START is different: the subject is mid-chord
     and correctly emits no marker until the chord resolves.
     """
-    port = FakePort(["\x1b", "1", "\x07"])
+    port = FakePort(["\x1b", "1", "\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
     # Markers: initial frame, ESC (unresolved, no frame), "1" (frame), and
-    # the final C-g quit frame carries none.
-    assert written.count("\x1b]7791;ready\x1b\\") == 3
+    # the `C-x` prefix. The final exit frame carries none.
+    assert written.count("\x1b]7791;ready\x1b\\") == 4
 
 
-def test_editor_esc_consumed_as_chord_start_then_quit() -> None:
-    # ESC followed by C-g: bare ESC reported (unresolved), C-g reprocessed
-    # and quits the loop.
-    port = FakePort(["\x1b", "\x07"])
+def test_editor_esc_consumed_as_chord_start_then_keyboard_quit() -> None:
+    """ESC then C-g: the bare ESC is reported unresolved and the C-g is
+    reprocessed from the empty state as `keyboard-quit`.
+
+    Before slice 17 the reprocessed C-g ended the run, which made this
+    test pass for a reason that had nothing to do with the assembler. Now
+    the editor survives it and C-x C-c is what exits.
+    """
+    port = FakePort(["\x1b", "\x07", "\x18", "\x03"])
     run_with_keys(port)
     assert port.restored
+    # `Quit` is on the C-g frame, not the last one: every command sets the
+    # echo, and `C-x C-c` produces no message of its own, so the exit frame
+    # clears it. Transient messages are Emacs's behaviour too.
+    assert any(row.startswith("Quit") for frame in _frame_rows(port) for row in frame)
 
 
 def keys(*chars: str) -> list[InputEvent]:
@@ -365,7 +406,7 @@ def test_loop_consumes_events_and_never_reads_the_port() -> None:
             raise AssertionError("run_editor read the port instead of the source")
 
     port = UnreadablePort([])
-    run_editor(port, events=scripted(keys("a", "\x07")))
+    run_editor(port, events=scripted(keys("a", "\x18", "\x03")))
     assert "a" in "".join(port.outputs)
 
 
@@ -659,7 +700,7 @@ def test_assembler_esc_non_letter_emits_bare_esc_then_the_key() -> None:
 
 
 def test_assembler_esc_control_byte_emits_bare_esc_then_the_key() -> None:
-    assert _feed("\x1b\x07") == ("\x1b", "C-g")  # ESC C-g: C-g still quits
+    assert _feed("\x1b\x07") == ("\x1b", "C-g")  # ESC C-g: bare ESC, then quit
 
 
 def test_assembler_esc_esc_emits_one_bare_esc_and_stays_pending() -> None:
@@ -766,7 +807,9 @@ def test_resize_event_redraws_at_the_new_size() -> None:
     """V3 wiring: a Resize on the stream reaches the session as a command and
     every later frame is drawn at the new size. FakePort starts at 10x3."""
     port = FakePort([])
-    run_editor(port, events=scripted([Key("a"), Resize(30, 6), Key("\x07")]))
+    run_editor(
+        port, events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03")])
+    )
     frames = _frame_rows(port)
     # Frames before the resize are 10 wide, after it 30 — and the buffer
     # content survived the resize.
@@ -787,10 +830,12 @@ def test_resize_redraw_carries_a_readiness_marker() -> None:
     swallows the *next* input's marker and shifts every epoch after it.
     """
     keyed = FakePort([])
-    run_editor(keyed, events=scripted(keys("a", "\x07")))
+    run_editor(keyed, events=scripted(keys("a", "\x18", "\x03")))
 
     resized = FakePort([])
-    run_editor(resized, events=scripted([Key("a"), Resize(30, 6), Key("\x07")]))
+    run_editor(
+        resized, events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03")])
+    )
 
     written = "".join(resized.outputs)
     baseline = "".join(keyed.outputs)
@@ -814,7 +859,8 @@ def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
                 Resize(30, 6),
                 Key("x"),
                 Key("\x07"),  # abort the prompt
-                Key("\x07"),  # quit
+                Key("\x18"),
+                Key("\x03"),  # C-x C-c: quit
             ]
         ),
     )
@@ -909,7 +955,9 @@ class TestLoopAgentArms:
         with patch.object(drei.terminal, "AgentPump", recording):
             run_editor(
                 port,
-                events=scripted([AgentBytes(b"a lot of text\n"), Key("\x07")]),
+                events=scripted(
+                    [AgentBytes(b"a lot of text\n"), Key("\x18"), Key("\x03")]
+                ),
             )
 
         assert ("receive", b"a lot of text\n") not in calls
@@ -944,7 +992,7 @@ class TestLoopAgentArms:
         calls, recording = self._recording()
         port = FakePort([])
         with patch.object(drei.terminal, "AgentPump", recording):
-            run_editor(port, events=scripted(keys("a", "\x07")))
+            run_editor(port, events=scripted(keys("a", "\x18", "\x03")))
 
         assert [name for name, _ in calls].count("after_command") == 2
 
@@ -966,7 +1014,7 @@ class TestLoopAgentArms:
 
         port = TrackingPort([])
         with patch.object(drei.terminal, "AgentPump", recording):
-            run_editor(port, events=scripted(keys("\x07")))
+            run_editor(port, events=scripted(keys("\x18", "\x03")))
 
         names = [name for name, _ in journal]
         assert names[-2:] == ["close", "restore"]
@@ -1075,7 +1123,8 @@ def test_run_editor_starts_the_terminal_readers_by_default() -> None:
     class RecordingReaders:
         def __init__(self, port: TerminalPort, events: EventQueue) -> None:
             built.append((port, events))
-            events.put(Key("\x07"))
+            events.put(Key("\x18"))
+            events.put(Key("\x03"))
 
         def close(self) -> None:
             pass
