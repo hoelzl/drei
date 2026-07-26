@@ -8,7 +8,11 @@ renderer — is proved against a real child without ``hermes`` installed.
 Deliberately thin. It replays the exact frames the pinned 0.9.0 traces in
 ``tests/acp`` already assert against; a fake elaborate enough to drift from
 the real wire would prove nothing. It answers three methods and streams one
-chunk per prompt.
+chunk per prompt — plus one opt-in mode (slice 20): a prompt starting with
+``hold`` is *not* answered, leaving the turn in flight until a
+``session/cancel`` notification arrives, which answers it with
+``stopReason: "cancelled"`` (the response ACP 0.9.0 requires). Default
+behavior is byte-identical for every other prompt.
 
 Not a test module (no ``test_`` name): pytest must not collect it, and it is
 executed, not imported.
@@ -45,6 +49,7 @@ def main() -> None:
     # exercised by the same run rather than by a test of its own.
     sys.stderr.write("fake-agent: ready\n")
     sys.stderr.flush()
+    held_prompt_id: Any = None
     while True:
         # readline, not iteration: iterating a buffered stream reads ahead,
         # which would hold a request hostage until the next one arrived.
@@ -79,6 +84,11 @@ def main() -> None:
             )
         elif method == "session/prompt":
             text = message["params"]["prompt"][0]["text"]
+            if text.startswith("hold"):
+                # Held-turn mode: the turn stays in flight. Only
+                # session/cancel ends it — nothing else is answered.
+                held_prompt_id = message["id"]
+                continue
             # Two chunks, so the test proves a fold rather than a single write.
             _update(
                 {
@@ -99,6 +109,15 @@ def main() -> None:
                     "result": {"stopReason": "end_turn"},
                 }
             )
+        elif method == "session/cancel" and held_prompt_id is not None:
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": held_prompt_id,
+                    "result": {"stopReason": "cancelled"},
+                }
+            )
+            held_prompt_id = None
 
 
 if __name__ == "__main__":
