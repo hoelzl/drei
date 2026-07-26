@@ -106,7 +106,7 @@ def test_harness_save_failure_echoes_token() -> None:
 
 
 def test_harness_find_file_failure_echoes_token_then_clears() -> None:
-    """Plan 0019 V1's acceptance scenario (TD-4's headline case).
+    """Plan 0019 V1's acceptance scenario — the case TD-4 called invisible.
 
     A `C-x C-f` the port refuses closes the prompt and says so on the echo
     row — `<path>: <token>`, the `SaveFailed` shape — where it used to close
@@ -136,19 +136,48 @@ def test_harness_find_file_failure_echoes_token_then_clears() -> None:
 def test_message_text_formats_through_the_token_table() -> None:
     """The one formatting seam (plan 0019 D1).
 
-    A known token maps to its table text; an unknown token fails visible as
-    itself rather than raising mid-frame; a subject prefixes as
+    The whole table is pinned — a typo'd or unmapped token fails here rather
+    than rendering as itself in production. An unknown token still fails
+    visible as itself rather than raising mid-frame; a subject prefixes as
     `<subject>: <text>` — the shape `SaveFailed` has used since review 0001
     finding 26.
     """
     from drei.harness import _message_text
 
+    assert _message_text("answer-y-or-n") == "Please answer y or n"
+    assert _message_text("end-of-buffer") == "End of buffer"
+    assert (
+        _message_text("mark-not-set")
+        == "The mark is not set now, or there is no region"
+    )
     assert _message_text("no-further-undo") == "No further undo information"
+    assert (
+        _message_text("previous-command-not-a-yank")
+        == "Previous command was not a yank"
+    )
+    assert _message_text("too-small-for-splitting") == "Too small for splitting"
     assert _message_text("some-future-token") == "some-future-token"
     assert (
         _message_text("permission-denied", "/etc/shadow")
         == "/etc/shadow: permission-denied"
     )
+
+
+def test_an_exhausted_undo_speaks_on_the_echo_row_then_clears() -> None:
+    """The end-to-end pin for `_echo_for`'s Message branch (plan 0019 D1/D6).
+
+    Registry rows 66/68/72/80/98 each pin their token at the session and the
+    table in `test_message_text_formats_through_the_token_table`; this is
+    the one that drives a plain message — no prompt involved — from a key to
+    the echo row, so the "echoed as …" half of those rows is not pinned
+    unit-wise only (the row-92 lesson). D6: it clears on the next command.
+    """
+    harness = EditorHarness(width=40, height=6)
+    harness.send("C-/")  # nothing to undo
+    assert harness.frame.rows[-1].startswith("No further undo information")
+    harness.send("a")
+    assert harness.frame.rows[-1].strip() == ""
+    assert harness.observation.text == "a"
 
 
 def test_harness_outcome_sequence() -> None:

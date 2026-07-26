@@ -182,9 +182,9 @@ class EditorHarness:
 
     @staticmethod
     def _echo_for(outcome: CommandOutcome) -> str:
-        # TODO: [tech-debt] TD-4 — the mechanism is here (V1); the remaining
-        # emitters land through V5 and the debt entry closes in V6. See
-        # docs/technical-debt.md and docs/agent/plans/0019-*.md §7.
+        # The one echo-derivation site (plan 0019 D1): every user-visible
+        # message is derived from the outcome's events here — never inline in
+        # the session, never a ninth ad-hoc branch.
         for event in outcome.events:
             if isinstance(event, KeyboardQuitEvent):
                 return "Quit"
