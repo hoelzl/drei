@@ -18,6 +18,7 @@ def render(
     width: int,
     height: int,
     echo: str = "",
+    note: str = "",
 ) -> Frame:
     if height == 0:
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
@@ -32,7 +33,7 @@ def render(
     if observation.minibuffer is not None:
         # The minibuffer occupies the echo row; the cursor sits at the end
         # of the prompt + input, and the body point is ignored.
-        prompt = observation.minibuffer_prompt or ""
+        prompt = _noted_prompt(observation.minibuffer_prompt or "", note)
         echo_row = _clip(prompt + observation.minibuffer, width)
         cursor_row = len(body_rows) + 1  # echo row index
         cursor_col = min(len(_sanitize(prompt + observation.minibuffer)), width - 1)
@@ -55,6 +56,7 @@ def render_session(
     width: int,
     height: int,
     echo: str = "",
+    note: str = "",
 ) -> Frame:
     """Draw one pane per window (design 0003 §A.2, plan 0012 D5).
 
@@ -79,7 +81,7 @@ def render_session(
     heights = _window_heights(body_height, window_count)
 
     if observation.minibuffer is not None:
-        prompt = observation.minibuffer_prompt or ""
+        prompt = _noted_prompt(observation.minibuffer_prompt or "", note)
         echo_row = _clip(prompt + observation.minibuffer, width)
         cursor_row, cursor_col = (
             height - 1,
@@ -122,6 +124,21 @@ def render_session(
     return Frame(
         rows=tuple(rows), cursor=(cursor_row, cursor_col), width=width, height=height
     )
+
+
+def _noted_prompt(prompt: str, note: str) -> str:
+    """A message raised while a prompt is open rides it as a SUFFIX (plan
+    0019 D3), and that ordering is the decision. The echo row is
+    hard-clipped — `_clip` does not wrap or scroll, and the shipped ConPTY
+    scenarios run at 40 columns — so one half of the row is going to be
+    sacrificed. Prefixing sacrificed the question: at 40 the exit gate read
+    `<path>: permission-denied. Modif`, a truncated error with no visible
+    question, on the row where `y` discards the buffer. A suffix sacrifices
+    the annotation instead, which is the right way round: the question and
+    its answer set must be readable at every width, and a cut-off reason is
+    still a visible sign that something went wrong.
+    """
+    return f"{prompt}[{note}]" if note else prompt
 
 
 def _window_heights(body_height: int, window_count: int) -> tuple[int, ...]:

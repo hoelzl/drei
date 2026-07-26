@@ -28,6 +28,7 @@ from drei.commands import (
     InsertAgentText,
     InsertText,
     KillLine,
+    Message,
     MinibufferAbort,
     Undo,
 )
@@ -204,7 +205,8 @@ class TestAgentDeliveriesNotUndoable:
         session = make_session()
         session.apply_session_effects((AgentTextChunk(text="stream"),), AGENT)
         outcome = session.dispatch(Undo())
-        assert outcome.events == ()  # nothing to undo: silent no-op
+        # Nothing to undo: speaks (row 80) but undoes nothing.
+        assert outcome.events == (Message("no-further-undo"),)
         assert outcome.observation.text == "\n── agent ──\nstream"
 
     def test_undo_skips_agent_delivery_reaches_user_edit(self) -> None:

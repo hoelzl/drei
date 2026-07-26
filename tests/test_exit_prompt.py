@@ -24,10 +24,12 @@ from drei.commands import (
     CreateAgentBuffer,
     EditorExited,
     ExitEditor,
+    ExitRefused,
     FindFile,
     InsertAgentText,
     InsertText,
     KeyboardQuitEvent,
+    Message,
     MinibufferAbort,
     MinibufferAborted,
     MinibufferAccept,
@@ -36,14 +38,29 @@ from drei.commands import (
     MinibufferOpened,
     PromptPermission,
     SaveBuffer,
+    SaveDeclined,
     SaveFailed,
     SetMark,
 )
+from drei.harness import EditorHarness
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
 
 SAVE_PROMPT = "Save file {}? (y or n) "
 EXIT_PROMPT = "Modified buffers exist; exit anyway? (y or n) "
+
+
+def _harness(files: FakeFilePort, *, width: int = 80) -> EditorHarness:
+    """A harness over one file-visiting buffer (/tmp/notes.txt, unmodified
+    until the test types) — the note lives on the frame, so the frame is
+    where these tests read it (plan 0019 D3)."""
+    return EditorHarness(
+        width=width,
+        height=6,
+        file_port=files,
+        file_path="/tmp/notes.txt",
+        initial_text="saved",
+    )
 
 
 def _session(
@@ -156,6 +173,26 @@ def test_n_at_the_offer_leads_to_the_exit_gate() -> None:
     assert MinibufferOpened(EXIT_PROMPT) in outcome.events
     # `n` means "do not save", and nothing was written.
     assert files.files["/tmp/notes.txt"] == "saved"
+    # ...but it is something the user *did*, so the transcript records it
+    # (plan 0019 D4, issue #51): replay can now tell a declined save from a
+    # save that was never offered.
+    assert SaveDeclined("notes.txt") in outcome.events
+
+
+def test_c_g_at_the_gate_says_quit() -> None:
+    """Plan 0019 acceptance scenario 3 (row 92): `C-g` at the gate abandons
+    the exit, and the echo says `Quit` — because that is what happened. The
+    refusal (`n`) is silent, which is now *honest* silence: the transcript
+    carries `ExitRefused` for it."""
+    files = FakeFilePort({"/tmp/notes.txt": "saved"})
+    harness = _harness(files)
+    harness.send("x")
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("n")  # offer declined → the gate
+    harness.send("C-g")
+    assert harness.observation.minibuffer is None
+    assert harness.frame.rows[-1].startswith("Quit")
 
 
 def test_y_at_the_gate_ends_the_run_and_the_edit_is_gone() -> None:
@@ -176,7 +213,10 @@ def test_n_at_the_gate_leaves_the_editor_running_with_the_text_intact() -> None:
     session.dispatch(MinibufferInput("n"))
     outcome = session.dispatch(MinibufferInput("n"))
     assert not _exited(outcome)
-    assert MinibufferAborted() in outcome.events
+    # A refusal is a decision, not an escape — the transcript distinguishes
+    # it from `C-g`'s MinibufferAborted now (plan 0019 D4, issue #51).
+    assert ExitRefused() in outcome.events
+    assert MinibufferAborted() not in outcome.events
     assert session.minibuffer is None
     assert session.buffer.current.text == "savedx"
     assert session.buffer.current.modified is True
@@ -250,8 +290,9 @@ def test_a_save_that_fails_still_blocks_the_exit() -> None:
     outcome = session.dispatch(MinibufferInput("y"))
     assert SaveFailed("/tmp/notes.txt", "permission-denied") in outcome.events
     assert not _exited(outcome)
-    # The gate is reached — and it says why, which is its own test below.
-    assert _prompts(outcome) == [f"{EXIT_PROMPT}[/tmp/notes.txt: permission-denied]"]
+    # The gate is reached; the failure rides it on the frame (D3), which the
+    # note tests below pin — the prompt string itself stays bare.
+    assert _prompts(outcome) == [EXIT_PROMPT]
 
 
 def test_a_save_that_succeeds_stops_blocking() -> None:
@@ -275,7 +316,8 @@ def test_a_save_that_succeeds_stops_blocking() -> None:
 
 
 def test_an_unrecognized_key_leaves_the_offer_standing() -> None:
-    """Emacs echoes `Please answer y or n` here; Drei is silent (TD-4).
+    """Emacs echoes `Please answer y or n` here; since plan 0019, so does
+    Drei (row 130) — as a Message, which is not a semantic event (D2).
 
     What matters either way is that the prompt does not resolve — and that the
     key is not appended as *text*, which is what a missed branch would do:
@@ -289,7 +331,7 @@ def test_an_unrecognized_key_leaves_the_offer_standing() -> None:
     # them, so all of them are pinned rather than three of them assumed.
     for char in ("z", " ", "Y", "N", "!", "q", "."):
         outcome = session.dispatch(MinibufferInput(char))
-        assert outcome.events == (), char
+        assert outcome.events == (Message("answer-y-or-n"),), char
         assert not _exited(outcome), char
         assert session.minibuffer == "", char
         assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt"), char
@@ -297,12 +339,13 @@ def test_an_unrecognized_key_leaves_the_offer_standing() -> None:
 
 def test_ret_is_not_a_default_yes() -> None:
     """The exit prompts are the last guard before losing work, so a habitual
-    `RET` must not answer them (B.8 finding 9's reasoning, D5)."""
+    `RET` must not answer them (B.8 finding 9's reasoning, D5). Like any
+    other non-answer key it now says `Please answer y or n` (row 130)."""
     session = _session()
     session.dispatch(InsertText("x"))
     session.dispatch(ExitEditor())
     outcome = session.dispatch(MinibufferAccept())
-    assert outcome.events == ()
+    assert outcome.events == (Message("answer-y-or-n"),)
     assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
 
 
@@ -311,7 +354,7 @@ def test_ret_is_not_a_default_yes_at_the_gate() -> None:
     session.dispatch(InsertText("hello"))
     session.dispatch(ExitEditor())
     outcome = session.dispatch(MinibufferAccept())
-    assert outcome.events == ()
+    assert outcome.events == (Message("answer-y-or-n"),)
     assert session.minibuffer_prompt == EXIT_PROMPT
 
 
@@ -339,6 +382,10 @@ def test_c_g_at_the_gate_abandons_the_exit() -> None:
     session.dispatch(ExitEditor())
     outcome = session.dispatch(MinibufferAbort())
     assert not _exited(outcome)
+    # `C-g` is an escape, not a decision — the other half of the refusal /
+    # abandonment distinction (plan 0019 D4, issue #51).
+    assert MinibufferAborted() in outcome.events
+    assert ExitRefused() not in outcome.events
     assert session.minibuffer is None
     assert session.buffer.current.text == "hello"
 
@@ -601,66 +648,101 @@ def test_abort_pending_permissions_leaves_the_exit_prompt_standing() -> None:
 def test_a_failed_save_names_itself_in_the_prompt_that_follows() -> None:
     """The gate must not be the first thing the user reads after a failure.
 
-    `SaveFailed` *is* one of the three events `_echo_for` renders, but the
-    same outcome opens the next exit prompt, and an open minibuffer owns the
-    echo row — so the message was drawn over before it could be read. The
-    user had explicitly asked to save, got no signal that the write did not
-    happen, and was then asked a generic question that reads as being about
-    some *other* buffer. One `y` and the edit is gone.
-
-    The prefix reuses `_echo_for`'s `<path>: <token>` shape rather than
-    inventing a second vocabulary for the same failure.
+    An open minibuffer owns the echo row, so a message left to `_echo_for`
+    would be drawn over unread (review 0002 finding 1). Since plan 0019 D3
+    the message *rides the prompt*: the harness appends `[<path>: <token>]`
+    — `_message_text`'s own shape — to whatever prompt is open after the
+    command. The `MinibufferOpened` event stays bare: the note is rendering,
+    not prompt identity, and plan 0018's baked-in plumbing is gone. The
+    rendered string is byte-identical to what that plumbing produced.
     """
     files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
-    session = _session(files)
-    session.dispatch(InsertText("x"))
-    session.dispatch(ExitEditor())
-    outcome = session.dispatch(MinibufferInput("y"))
+    harness = _harness(files, width=100)
+    harness.send("x")
+    harness.send("C-x")
+    harness.send("C-c")
+    outcome = harness.send("y")
 
+    assert outcome is not None
     assert SaveFailed("/tmp/notes.txt", "permission-denied") in outcome.events
-    assert _prompts(outcome) == [f"{EXIT_PROMPT}[/tmp/notes.txt: permission-denied]"]
+    assert MinibufferOpened(EXIT_PROMPT) in outcome.events  # bare, not baked
+    assert harness.frame.rows[-1].startswith(
+        f"{EXIT_PROMPT}[/tmp/notes.txt: permission-denied]"
+    )
 
 
 def test_a_failed_save_names_itself_before_the_next_offer() -> None:
-    """The multi-buffer case is the worse one: without the prefix the next
+    """The multi-buffer case is the worse one: without the note the next
     frame is an ordinary `Save file …?` for the *other* buffer, with no trace
     at all that the previous one was not written."""
     files = FakeFilePort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"}, fail="permission")
-    session = _session(files, path="/tmp/a.txt", text="A")
-    session.dispatch(InsertText("1"))
-    _visit(session, "/tmp/b.txt", edit="2")
+    harness = EditorHarness(
+        width=100, height=6, file_port=files, file_path="/tmp/a.txt", initial_text="A"
+    )
+    harness.send("1")  # modify a.txt
+    harness.send("C-x")
+    harness.send("C-f")
+    for char in "/tmp/b.txt":
+        harness.send(char)
+    harness.send("RET")  # visit b.txt
+    harness.send("2")  # modify b.txt
 
-    session.dispatch(ExitEditor())
-    outcome = session.dispatch(MinibufferInput("y"))  # a.txt: write fails
-    assert _prompts(outcome) == [
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("y")  # a.txt offered first (creation order); write fails
+    assert harness.frame.rows[-1].startswith(
         SAVE_PROMPT.format("/tmp/b.txt") + "[/tmp/a.txt: permission-denied]"
-    ]
+    )
 
 
 def test_a_declined_save_is_not_reported_as_a_failure() -> None:
-    """`n` is an answer, not an error — nothing to report."""
+    """`n` is an answer, not an error — nothing to report, so the gate that
+    follows carries no note."""
     files = FakeFilePort({"/tmp/notes.txt": "saved"}, fail="permission")
-    session = _session(files)
-    session.dispatch(InsertText("x"))
-    session.dispatch(ExitEditor())
-    outcome = session.dispatch(MinibufferInput("n"))
-    assert _prompts(outcome) == [EXIT_PROMPT]
+    harness = _harness(files, width=100)
+    harness.send("x")
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("n")
+    row = harness.frame.rows[-1]
+    assert row.startswith(EXIT_PROMPT)
+    assert "[" not in row
+
+
+def test_an_unrecognized_key_rides_the_standing_prompt() -> None:
+    """Plan 0019's second acceptance scenario (D3, row 130): a message
+    raised while a prompt stays open rides that prompt as
+    `<prompt> [<message>]`, the prompt stays up, and its answer set still
+    works afterwards."""
+    files = FakeFilePort({"/tmp/notes.txt": "saved"})
+    harness = _harness(files, width=100)
+    harness.send("x")
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("z")
+    assert harness.frame.rows[-1].startswith(
+        SAVE_PROMPT.format("/tmp/notes.txt") + "[Please answer y or n]"
+    )
+    assert harness.observation.minibuffer is not None  # the prompt is STILL UP
+    harness.send("y")  # and its answer set still resolves the sequence
+    assert files.files["/tmp/notes.txt"] == "xsaved"  # harness point starts at 0
+    assert _exited(harness.outcomes[-1])
 
 
 def test_del_at_an_exit_prompt_leaves_it_standing() -> None:
-    """The fourth minibuffer arm (review 0002 finding 2).
+    """DEL at an exit prompt speaks and changes nothing (row 130).
 
-    `MinibufferBackspace` has no exit branch: DEL falls through to text mode
-    and is harmless only because an exit prompt's input is `""`, which the
-    `elif self._minibuffer:` guard reads as falsy. That is a real property of
-    the current design, but it was holding by accident — pinned here so a
-    prompt that ever carries text cannot silently start eating it.
+    Like every non-`y`/`n` key at an exit prompt, DEL is met with
+    `Please answer y or n` and the prompt stands. The deeper pin from
+    review 0002 finding 2 is unchanged: an exit prompt's input is `""`,
+    and DEL must leave it that way — a prompt that ever carries text
+    cannot silently start eating it.
     """
     session = _session()
     session.dispatch(InsertText("x"))
     session.dispatch(ExitEditor())
     outcome = session.dispatch(MinibufferBackspace())
-    assert outcome.events == ()
+    assert outcome.events == (Message("answer-y-or-n"),)
     assert session.minibuffer == ""
     assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
     # And the sequence still resolves normally afterwards.
@@ -699,62 +781,75 @@ def test_the_question_survives_clipping_when_a_note_is_present() -> None:
     `/tmp/notes.txt: permission-denied. Modif`, a truncated error with no
     visible question, on the row where `y` is the key that discards the
     buffer. A suffix guarantees the opposite sacrifice: the annotation is what
-    gets cut, and the question and its answer set always survive.
+    gets cut, and the question always survives. The answer *set* does not —
+    the gate's parity string is 46 characters, so `(y or n)` clips at 40 too;
+    the question is the half that must survive (plan 0019 D3/status, slice-19
+    review finding 3).
     """
     from drei.render import _clip
 
     files = _RefusingPort({"/tmp/notes.txt": "saved"}, refuse={"/tmp/notes.txt"})
-    session = _session(files)
-    session.dispatch(InsertText("x"))
-    session.dispatch(ExitEditor())
-    outcome = session.dispatch(MinibufferInput("y"))
+    harness = _harness(files, width=40)
+    harness.send("x")
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("y")
 
-    (prompt,) = _prompts(outcome)
-    assert prompt.startswith(EXIT_PROMPT)
-    assert "permission-denied" in prompt
-    # At the width the shipped scenarios use, the question is intact and it is
-    # the note that is sacrificed.
-    assert _clip(prompt, 40) == _clip(EXIT_PROMPT, 40)
+    # At the width the shipped scenarios use, the question is intact and it
+    # is the note that is sacrificed.
+    assert harness.frame.rows[-1] == _clip(EXIT_PROMPT, 40)
 
 
 def test_the_offer_keeps_its_filename_when_a_note_is_present() -> None:
     """The stage-1 case is the one where truncation used to hide the *target*:
     at 40 columns the prefixed form read `Save file` with no filename, and `y`
     then wrote a file the user had never been shown."""
-    from drei.render import _clip
-
     files = _RefusingPort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"}, refuse={"/tmp/a.txt"})
-    session = _session(files, path="/tmp/a.txt", text="A")
-    session.dispatch(InsertText("1"))
-    _visit(session, "/tmp/b.txt", edit="2")
+    harness = EditorHarness(
+        width=40, height=6, file_port=files, file_path="/tmp/a.txt", initial_text="A"
+    )
+    harness.send("1")
+    harness.send("C-x")
+    harness.send("C-f")
+    for char in "/tmp/b.txt":
+        harness.send(char)
+    harness.send("RET")
+    harness.send("2")
 
-    session.dispatch(ExitEditor())
-    outcome = session.dispatch(MinibufferInput("y"))  # a.txt refuses
-
-    (prompt,) = _prompts(outcome)
-    assert prompt.startswith(SAVE_PROMPT.format("/tmp/b.txt"))
-    assert "/tmp/a.txt: permission-denied" in prompt
-    assert "/tmp/b.txt" in _clip(prompt, 40)
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("y")  # a.txt refuses
+    assert "/tmp/b.txt" in harness.frame.rows[-1]
 
 
 def test_the_note_does_not_outlive_the_prompt_it_was_raised_on() -> None:
     """a.txt fails, b.txt saves cleanly — the gate must be clean.
 
-    The earlier version of this test used a port with no failures at all, so
-    it could not observe the property it is named for: making the note sticky
-    session state left the whole suite green.
+    The note is recomputed per command (D6), exactly like the echo row's own
+    lifetime: it belongs to the keystroke whose save failed, not to the
+    sequence.
     """
     files = _RefusingPort({"/tmp/a.txt": "A", "/tmp/b.txt": "B"}, refuse={"/tmp/a.txt"})
-    session = _session(files, path="/tmp/a.txt", text="A")
-    session.dispatch(InsertText("1"))
-    _visit(session, "/tmp/b.txt", edit="2")
+    harness = EditorHarness(
+        width=100, height=6, file_port=files, file_path="/tmp/a.txt", initial_text="A"
+    )
+    harness.send("1")
+    harness.send("C-x")
+    harness.send("C-f")
+    for char in "/tmp/b.txt":
+        harness.send(char)
+    harness.send("RET")
+    harness.send("2")
 
-    session.dispatch(ExitEditor())
-    failed = session.dispatch(MinibufferInput("y"))  # a.txt refuses
-    assert "permission-denied" in _prompts(failed)[0]
+    harness.send("C-x")
+    harness.send("C-c")
+    harness.send("y")  # a.txt refuses
+    assert "permission-denied" in harness.frame.rows[-1]
 
-    gate = session.dispatch(MinibufferInput("y"))  # b.txt saves cleanly
+    harness.send("y")  # b.txt saves cleanly
     assert files.files["/tmp/b.txt"] == "2B"
     # a.txt is still modified, so the gate is reached — and it says nothing
     # about a failure, because none happened on this keystroke.
-    assert _prompts(gate) == [EXIT_PROMPT]
+    row = harness.frame.rows[-1]
+    assert row.startswith(EXIT_PROMPT)
+    assert "permission-denied" not in row

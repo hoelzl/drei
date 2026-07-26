@@ -91,41 +91,6 @@ handling and buffer naming, both of which have their own deferred work
 find-file boundary (an `OpenFailed`-class outcome, consistent with the
 directory-path arm), rather than special-casing `""` downstream.
 
-## TD-4 (finding 19) — `OpenFailed` and every non-save failure is invisible
-
-**Location:** `src/drei/harness.py` — `_echo_for`.
-**Severity:** medium — a failure is indistinguishable from success.
-
-The echo row renders only `KeyboardQuitEvent`, `BufferSaved`, and
-`SaveFailed`. A `C-x C-f` that fails on a permission error closes the
-minibuffer with a blank echo row, which looks exactly like a successful
-no-op. The parity registry covers only the missing-file arm, where an empty
-buffer is the correct outcome.
-
-**Why deferred:** it is the first case of a general gap — Drei has no
-error/message mechanism at all, which is also the recorded rationale for a
-half-dozen registry deviations ("silent no-op where Emacs signals an error").
-Fixing it one event at a time entrenches the ad-hoc shape.
-
-**Suggested approach:** a small echo-message slice: a `Message`/`Error`
-event class the session emits, one rendering site, and a pass over the
-registry rows that currently say "Drei has no echo-error mechanism yet".
-
-**Claimed:** slice 19 (issue #52), plan
-`agent/plans/0019-echo-message-mechanism.md`. The plan carries issue #51 with
-it — not as a rider, but because `C-g` at a prompt and `n` at plan 0018's exit
-gate emit the *same* `MinibufferAborted` today, so the abort cannot be given a
-voice until a deliberate answer is a different event. It also found that this
-entry's premise is now slightly understated: since slice 18 there is a
-*second* ad-hoc message path (`_save_buffer`'s `[<path>: <token>]` prompt
-suffix), built under review pressure for one case. Two ad-hoc shapes is the
-entry's own argument, one slice later.
-
-**Do not close this entry for the mechanism alone.** Its cost is the rows that
-defer to it; a mechanism that ships with the deviations still pointing here
-re-scopes the debt instead of paying it, which is exactly how TD-11 stayed
-open for seventeen slices.
-
 ## TD-7 (finding 22) — frozen dataclasses over aliased mutable dicts
 
 **Location:** `src/drei/acp/machine.py` — `in_flight_outgoing`,
@@ -235,6 +200,13 @@ one pane keeps the echo row or renders empty.
 rather than narrowed again — the entry's own instruction. What `C-x C-c` does
 now, and the seven differences from `save-buffers-kill-terminal` that remain,
 are recorded in `knowledge/emacs-parity.md`.*
+
+*TD-4 (`OpenFailed` and every non-save failure is invisible) was paid by
+slice 19 (issue #52, plan `agent/plans/0019-echo-message-mechanism.md`) on
+the entry's own terms — not for the mechanism alone, but with every
+registry row that deferred to it rewritten in the same slice: the eight
+"silent no-op / no echo" rows now record what Drei says, with citations, in
+`knowledge/emacs-parity.md`.*
 
 *TD-5 and TD-6 were paid by slice 17 and TD-1 by an earlier slice; they are
 listed nowhere else, which is the point — an entry is removed when the debt is

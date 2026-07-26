@@ -81,10 +81,11 @@ def test_c_g_cancels_a_pending_prefix_and_quits() -> None:
     assert resolve("C-c", "C-g") == KeyboardQuit()
 
 
-def test_a_prefix_still_swallows_every_other_unbound_key() -> None:
-    """Only `C-g` is special-cased. Whether an unbound chord should echo
-    `C-x <key> is undefined` the way Emacs does is a question about prefix
-    semantics generally, and it needs the echo mechanism TD-4 tracks."""
+def test_a_prefix_leaves_every_other_unbound_key_unresolved() -> None:
+    """Only `C-g` is special-cased. Every other unbound chord resolves to
+    one `UnresolvedKey` for the whole sequence; the *echo* —
+    `C-x <key> is undefined` (row 134) — is the harness's half, pinned by
+    `test_harness_records_unresolved_keys`."""
     for key in ("a", "z", "C-z", "RET"):
         result = resolve("C-x", key)
         assert isinstance(result, UnresolvedKey), key

@@ -15,6 +15,7 @@ from drei.commands import (
     InsertText,
     KeyboardQuitEvent,
     KillLine,
+    Message,
     ProcessOutputRecorded,
     SaveBuffer,
     SetMark,
@@ -116,9 +117,10 @@ def test_null_port_run_raises_not_found_and_records_token() -> None:
 def test_delivery_pushes_no_undo_group_and_noop_undo_stays_noop() -> None:
     session = _session("abc", 3)
     session.run_process(("cmd",))
-    # No undo group was pushed by the delivery: undo is a silent no-op.
+    # No undo group was pushed by the delivery: undo is a no-op that
+    # *says* so (row 80) — a Message, not a semantic event.
     outcome = session.dispatch(Undo())
-    assert outcome.events == ()
+    assert outcome.events == (Message("no-further-undo"),)
     assert session.buffer.current.text == "abc"
 
 

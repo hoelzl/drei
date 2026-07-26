@@ -1,6 +1,53 @@
 # Nineteenth slice: the echo-message mechanism (TD-4)
 
-**Status:** ready (issue #52).
+**Status:** implemented (issue #52; the code PR closes #52 and #51). The
+sweep count §5 refused to estimate, measured at landing: **16 test files, 26
+`events == ()` silence assertions** — 21 becoming explicit `Message(...)`
+assertions — plus **two `while …dispatch(Undo()).events:` loops** that went
+infinite the moment an exhausted undo spoke, and one property-invariant arm.
+The fresh-agent adversarial review (verdict NOT CLEAN on arrival) found one
+major and four smaller defects, all fixed in the same branch: three
+property-tier folds still keyed on event truthiness / transcript adjacency —
+the "fourth site" D2 exists for, and a latent hypothesis flake — registry
+row 126's stale "silent no-op" wording, §9's answer-set overclaim (below), a
+README overclaim scoped to printable keys, and an implicit `_note` invariant
+made explicit.
+
+What the plan got wrong or did not foresee:
+
+- **Row 68 moved from V5 to V2.** §7 assigned yank-pop to V5, but the D2
+  hazard test needed a second speaking no-op as its demonstrator, so row 68
+  landed with the exclusion.
+- **Emission before exclusion, deliberately.** §7 said "exclude Message from
+  the three bookkeeping sites, then let the exhausted undo speak." V2 did it
+  the other way round inside the step: the no-ops spoke first and the suite
+  went RED in exactly the two predicted ways (descent flipped to redo, kill
+  chain split) — the only reason the exclusion is known to be load-bearing
+  rather than precautionary.
+- **V5 found a fourth casualty class.** Beyond §5's `== ()` pins and loops,
+  the refused-split *behavioral* tests asserted silence, and the resize
+  transcript now records the Message.
+- **D7 needed a frame re-render.** The unresolved-key branch set the echo,
+  but frames were only rebuilt after dispatches.
+- **§9 overclaimed the clipping guarantee.** "The prompt's question and
+  answer set survive `_clip` at 40 columns" is unmeetable: the gate's parity
+  string is 46 characters, so `(y or n)` clips at 40 even with no note. What
+  the tests pin is the recorded D3 decision — the question is the half that
+  must survive. The criterion is narrowed here to the question; shortening
+  the prompt was rejected because the string is the parity text.
+- **The citation audit found exactly one hollow citation** (row 92, fixed in
+  V4) — at §8's file-it threshold, so none was filed. It also found the
+  end-to-end gap V6 closed: `_echo_for`'s Message branch had no key-to-frame
+  pin.
+- **The sweep stopped one file early.** §8 warned that transcript-folding
+  property tests must ignore messages; V2 migrated two folds and the review
+  found three more in the same file. The warning was right; the counting
+  was incomplete.
+- **And one tier short.** The differential tier had a silence pin of its
+  own (`test_undo_parity`'s exhausted-undo `== ()`), invisible locally
+  because `DREI_PARITY=1` needs the pinned Emacs — CI's parity job caught
+  it on the PR. The sweep count above is the unit tier; the honest total
+  is 27 silence assertions across 17 files.
 
 **Architecture gate:** none — no design record owns the echo area, and this
 slice does not need one. It is `docs/technical-debt.md` **TD-4**, the parity

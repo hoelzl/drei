@@ -7,6 +7,8 @@ from drei.commands import (
     InsertText,
     KeyboardQuit,
     KillLine,
+    KillRegion,
+    Message,
     TextYanked,
     TextYankPopped,
     Yank,
@@ -32,6 +34,21 @@ def _two_entry_session() -> EditorSession:
 
 
 # --- Replacement ---------------------------------------------------------
+
+
+def test_a_speaking_no_op_between_yank_and_pop_keeps_the_pop_active() -> None:
+    """D2, the `yank_active` arm: a speaking no-op between a yank and its
+    pop leaves the pop active. This is the session-side pin for the
+    transcript shape — `TextYanked, Message, TextYankPopped` — that the
+    slice-19 review (finding 1) caught the property tier's coherence fold
+    rejecting."""
+    session = _two_entry_session()
+    session.dispatch(Yank())  # inserts "two"; the pop is active
+    outcome = session.dispatch(KillRegion())  # no mark: speaks, nothing else
+    assert outcome.events == (Message("mark-not-set"),)
+    popped = session.dispatch(YankPop())
+    assert TextYankPopped("two", "one", 1, 4) in popped.events
+    assert session.buffer.current.text == "\none\nthree"
 
 
 def test_pop_replaces_with_next_older_entry() -> None:
@@ -99,7 +116,8 @@ def test_pop_without_active_yank_is_noop() -> None:
     session = _two_entry_session()
     before = session.buffer.current
     outcome = session.dispatch(YankPop())
-    assert outcome.events == ()
+    # No active yank: speaks (row 68), changes nothing.
+    assert outcome.events == (Message("previous-command-not-a-yank"),)
     assert session.buffer.current is before
 
 
@@ -108,7 +126,7 @@ def test_pop_after_non_yank_command_is_noop() -> None:
     session.dispatch(Yank())
     session.dispatch(ForwardChar())  # emits PointMoved -> clears active
     outcome = session.dispatch(YankPop())
-    assert outcome.events == ()
+    assert outcome.events == (Message("previous-command-not-a-yank"),)
 
 
 def test_pop_after_keyboard_quit_is_noop() -> None:
@@ -116,7 +134,7 @@ def test_pop_after_keyboard_quit_is_noop() -> None:
     session.dispatch(Yank())
     session.dispatch(KeyboardQuit())
     outcome = session.dispatch(YankPop())
-    assert outcome.events == ()
+    assert outcome.events == (Message("previous-command-not-a-yank"),)
 
 
 def test_pop_on_one_entry_ring_is_noop() -> None:
@@ -136,8 +154,8 @@ def test_noop_yank_clears_active() -> None:
     empty = _session("text", 0)
     outcome = empty.dispatch(Yank())  # no-op, no event
     assert outcome.events == ()
-    pop = empty.dispatch(YankPop())
-    assert pop.events == ()
+    pop = empty.dispatch(YankPop())  # no active yank: speaks, changes nothing
+    assert pop.events == (Message("previous-command-not-a-yank"),)
 
 
 def test_pop_breaks_append_chain() -> None:
@@ -151,9 +169,14 @@ def test_pop_breaks_append_chain() -> None:
 
 
 def test_noop_pop_preserves_chain() -> None:
+    """Plan 0019 D2's kill-chain hazard, proven: consecutive C-k appends into
+    one ring entry, and a *speaking* no-op between them is not an
+    intervening command — the pop says why it did nothing (row 68) and the
+    chain survives it."""
     session = _session("ab\nc", 0)
     session.dispatch(KillLine())  # "ab", chain on
-    session.dispatch(YankPop())  # no active yank -> silent no-op
+    pop = session.dispatch(YankPop())  # no active yank -> speaks, intervenes not
+    assert pop.events == (Message("previous-command-not-a-yank"),)
     session.dispatch(KillLine())  # kills "\n" -> appended
     assert session.kill_ring == ("ab\n",)
 
@@ -186,4 +209,4 @@ def test_pop_after_insert_is_noop() -> None:
     session.dispatch(Yank())
     session.dispatch(InsertText("x"))
     outcome = session.dispatch(YankPop())
-    assert outcome.events == ()
+    assert outcome.events == (Message("previous-command-not-a-yank"),)
