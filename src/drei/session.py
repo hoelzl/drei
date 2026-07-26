@@ -1575,6 +1575,16 @@ class EditorSession:
             if buffer.current.file_path == path:
                 self._select_buffer(buffer_id, events)
                 return current
+        # An empty basename (a trailing separator) is refused at the
+        # boundary, before the filesystem: a buffer named "" is unreachable
+        # — C-x b's empty input takes the MRU default and no typed name
+        # matches it — so edits made there were stranded (TD-3, plan 0020
+        # D5). A name judgment, not a read result: deterministic and
+        # OS-independent, unlike the directory arm below.
+        name = path.replace("\\", "/").rsplit("/", 1)[-1]
+        if not name:
+            events.append(OpenFailed(path, "empty-basename"))
+            return current
         try:
             text = self._files.read(path)
         except FileNotFoundError:
@@ -1585,11 +1595,6 @@ class EditorSession:
         except UnicodeDecodeError:
             events.append(OpenFailed(path, "io-error"))
             return current
-        # TODO: [tech-debt] TD-3 — a trailing slash ("notes/") makes this
-        # basename "", and a buffer named "" is unreachable afterwards: C-x b
-        # with empty input takes the MRU default and no typed name matches
-        # it, so edits made there are stranded. See docs/technical-debt.md.
-        name = path.replace("\\", "/").rsplit("/", 1)[-1]
         buffer_id = self._create_buffer(
             name,
             BufferValue(text=text, point=0, file_path=path, modified=False, mark=None),
