@@ -55,6 +55,18 @@ class FakePort(TerminalPort):
         self.restored = True
 
 
+class _WidePort(FakePort):
+    """A frame wide enough for a full exit prompt to survive `_clip`.
+
+    `FakePort`'s 10 columns truncate `Save file /tmp/notes.txt? (y or n) ` to
+    `Save file `, which would let an assertion on the prompt text pass while
+    asserting almost nothing.
+    """
+
+    def get_size(self) -> tuple[int, int]:
+        return (60, 4)
+
+
 def scripted(events: list[InputEvent]) -> EventQueue:
     """A queue holding exactly these events, closed behind them.
 
@@ -116,33 +128,68 @@ def test_c_g_does_not_end_the_run() -> None:
     assert port.restored
 
 
-def test_c_x_c_c_discards_a_modified_buffer_without_asking() -> None:
-    """TD-11, pinned rather than assumed.
+def test_c_x_c_c_offers_to_save_a_modified_buffer() -> None:
+    """Plan 0018's acceptance scenario, end to end through the byte loop.
 
-    This is the debt slice 17 deliberately did **not** pay: exiting drops
-    unsaved work with no prompt. Emacs's `save-buffers-kill-terminal` offers
-    to save each modified buffer first.
+    Was `…_discards_a_modified_buffer_without_asking`: slice 17 wrote it as a
+    pin on TD-11 *so that this slice would have something to turn red* on
+    Windows, where the behaviour was otherwise covered only by a ConPTY
+    scenario. Same fixture, one more key, inverted assertion.
 
-    It is asserted in-process, and fast, on purpose. The behaviour was
-    otherwise covered only by a Windows-only ConPTY scenario, so slice 18 —
-    whose whole subject is making this false — would have had nothing to turn
-    red on the platform most of its work happens on.
+    The last two assertions are the ones worth reading twice. `y` produces one
+    outcome carrying **both** `BufferSaved` and `EditorExited`, so `Wrote …`
+    lands on the very frame the loop writes before returning — unlike slice
+    17's `Quit`, which the exit frame cleared.
     """
     from conftest import FakeFilePort
 
     files = FakeFilePort({"/tmp/notes.txt": "saved"})
-    port = FakePort(["x", "\x18", "\x03"])
-    run_with_keys(port, file_port=files, file_path="/tmp/notes.txt")
+    port = _WidePort(["x", "\x18", "\x03", "y"])
+    run_with_keys(
+        port, file_port=files, file_path="/tmp/notes.txt", initial_text="saved"
+    )
 
-    # The edit is gone: nothing was written, and nothing asked.
-    assert files.files["/tmp/notes.txt"] == "saved"
+    # The edit reached disk, and it was asked about first.
+    assert files.files["/tmp/notes.txt"] == "xsaved"
     written = "".join(port.outputs)
-    assert "Save" not in written
+    assert "Save file /tmp/notes.txt? (y or n) " in written
+    assert any(row.startswith("Wrote /tmp/notes.txt") for row in _frame_rows(port)[-1])
     assert port.restored
 
 
+def test_c_x_c_c_does_not_exit_while_the_save_prompt_is_open() -> None:
+    """The prompt is a real pause, not a decoration drawn on the way out.
+
+    The script ends at `C-c`, so the queue runs dry with the prompt open. Had
+    the exit gone through anyway, the loop would have returned before the
+    queue emptied and `EndOfInput` would never have been raised — the same
+    shape slice 17 used to prove `C-g` stopped exiting.
+    """
+    from conftest import FakeFilePort
+
+    files = FakeFilePort({"/tmp/notes.txt": "saved"})
+    port = _WidePort([])
+    with pytest.raises(EndOfInput):
+        run_editor(
+            port,
+            events=scripted(keys("x", "\x18", "\x03")),
+            file_port=files,
+            file_path="/tmp/notes.txt",
+            initial_text="saved",
+        )
+
+    # Nothing written while the question is still on screen.
+    assert files.files["/tmp/notes.txt"] == "saved"
+    assert any(
+        row.startswith("Save file /tmp/notes.txt? (y or n) ")
+        for row in _frame_rows(port)[-1]
+    )
+
+
 def test_editor_inserts_text_and_renders() -> None:
-    port = FakePort(["a", "\x18", "\x03"])
+    # `y` answers the exit gate: the scratch buffer is modified and pathless,
+    # so slice 18 asks before discarding it.
+    port = FakePort(["a", "\x18", "\x03", "y"])
     run_with_keys(port)
     written = "".join(port.outputs)
     assert "a" in written
@@ -201,7 +248,7 @@ def test_editor_yank_pop_frame_evidence_through_byte_loop() -> None:
             return (40, 10)
 
     # C-k C-f C-k C-y ESC y, then C-x C-c, over "one\ntwo\nthree"
-    port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x18", "\x03"])
+    port = TallPort(["\x0b", "\x06", "\x0b", "\x19", "\x1b", "y", "\x18", "\x03", "y"])
     run_with_keys(port, initial_text="one\ntwo\nthree")
     frames = "".join(port.outputs).split("\x1b[2J\x1b[H")
     pop_frame = frames[-2]  # last frame before the quit frame
@@ -240,6 +287,7 @@ def test_editor_region_commands_through_byte_loop() -> None:
             "\x18",  # C-x C-x: no mark (copy cleared it) → no-op
             "\x18",
             "\x03",
+            "y",  # the buffer is modified: answer the exit gate
         ]
     )
     run_with_keys(port, initial_text="hello world")
@@ -376,7 +424,7 @@ def test_editor_arrow_keys_do_not_reach_the_minibuffer() -> None:
 def test_editor_esc_non_letter_reprocesses_byte() -> None:
     # ESC then "1": the bare ESC is unresolved; the "1" is reprocessed and
     # inserted as printable text.
-    port = FakePort(["\x1b", "1", "\x18", "\x03"])
+    port = FakePort(["\x1b", "1", "\x18", "\x03", "y"])
     run_with_keys(port)
     written = "".join(port.outputs)
     assert "1" in written
@@ -391,12 +439,14 @@ def test_editor_esc_non_letter_marks_quiescence_for_both_inputs() -> None:
     path. A bare ESC as chord START is different: the subject is mid-chord
     and correctly emits no marker until the chord resolves.
     """
-    port = FakePort(["\x1b", "1", "\x18", "\x03"])
+    port = FakePort(["\x1b", "1", "\x18", "\x03", "y"])
     run_with_keys(port)
     written = "".join(port.outputs)
-    # Markers: initial frame, ESC (unresolved, no frame), "1" (frame), and
-    # the `C-x` prefix. The final exit frame carries none.
-    assert written.count("\x1b]7791;ready\x1b\\") == 4
+    # Markers: initial frame, ESC (unresolved, no frame), "1" (frame), the
+    # `C-x` prefix, and the `C-c` that opens the exit gate — an ordinary
+    # marked epoch now that it no longer ends the run. The final exit frame,
+    # produced by the `y`, carries none.
+    assert written.count("\x1b]7791;ready\x1b\\") == 5
 
 
 def test_editor_esc_consumed_as_chord_start_then_keyboard_quit() -> None:
@@ -439,7 +489,7 @@ def test_loop_consumes_events_and_never_reads_the_port() -> None:
             raise AssertionError("run_editor read the port instead of the source")
 
     port = UnreadablePort([])
-    run_editor(port, events=scripted(keys("a", "\x18", "\x03")))
+    run_editor(port, events=scripted(keys("a", "\x18", "\x03", "y")))
     assert "a" in "".join(port.outputs)
 
 
@@ -844,7 +894,8 @@ def test_resize_event_redraws_at_the_new_size() -> None:
     every later frame is drawn at the new size. FakePort starts at 10x3."""
     port = FakePort([])
     run_editor(
-        port, events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03")])
+        port,
+        events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03"), Key("y")]),
     )
     frames = _frame_rows(port)
     # Frames before the resize are 10 wide, after it 30 — and the buffer
@@ -865,12 +916,15 @@ def test_resize_redraw_carries_a_readiness_marker() -> None:
     unmarked resize would not be a quieter epoch, it would be an epoch that
     swallows the *next* input's marker and shifts every epoch after it.
     """
+    # Both scripts gain the `y`: the counts are *relative*, so a one-sided
+    # edit would shift the difference and fail — which is the right failure.
     keyed = FakePort([])
-    run_editor(keyed, events=scripted(keys("a", "\x18", "\x03")))
+    run_editor(keyed, events=scripted(keys("a", "\x18", "\x03", "y")))
 
     resized = FakePort([])
     run_editor(
-        resized, events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03")])
+        resized,
+        events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03"), Key("y")]),
     )
 
     written = "".join(resized.outputs)
@@ -1028,9 +1082,12 @@ class TestLoopAgentArms:
         calls, recording = self._recording()
         port = FakePort([])
         with patch.object(drei.terminal, "AgentPump", recording):
-            run_editor(port, events=scripted(keys("a", "\x18", "\x03")))
+            run_editor(port, events=scripted(keys("a", "\x18", "\x03", "y")))
 
-        assert [name for name, _ in calls].count("after_command") == 2
+        # Three, not two: `C-c` opens the exit gate instead of ending the run,
+        # and the `y` that answers it is a third outcome. Slice 17's "exiting
+        # costs one marker more than quitting did", in a different currency.
+        assert [name for name, _ in calls].count("after_command") == 3
 
     def test_the_child_is_terminated_before_the_terminal_is_restored(self) -> None:
         """A leaked `hermes acp` holding a pipe outlives a garbled terminal,

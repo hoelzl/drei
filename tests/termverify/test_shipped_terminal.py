@@ -91,6 +91,90 @@ def _modeline_row(lines: tuple[str, ...]) -> int:
     return rows[0]
 
 
+def _exit_through_the_gate(adapter: ConptyAdapter) -> TerminalResult:
+    """`C-x C-c` then `y` — the exit of a scenario that leaves work unsaved.
+
+    Since slice 18 `C-x C-c` stops to ask. These scenarios end on a modified
+    `scratch` buffer, which visits no file and so is never *offered* a save;
+    it reaches the stage-2 gate instead (plan 0018 D2, parity row 4). The
+    `C-c` is therefore an ordinary quiescent epoch and the `y` is what ends
+    the run.
+
+    Asserting the gate text here rather than only the exit is what keeps this
+    from degrading into "press one more key until it exits": an epoch that
+    completed for some other reason would satisfy the type check alone.
+    """
+    prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+    assert type(prefix) is EpochCompleted, prefix
+    gate = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
+    assert type(gate) is EpochCompleted, gate
+    assert gate.observation is not None
+    gate_lines = _frame_lines(gate.observation)
+    assert any("exit anyway?" in line for line in gate_lines), gate_lines
+    final = adapter.dispatch(TextInput(ManualTime(0), "y"))
+    assert isinstance(final, TerminalResult), final
+    return final
+
+
+def _exit_saving_the_file(adapter: ConptyAdapter, path: Path) -> TerminalResult:
+    """`C-x C-c` then `y` on a *file-visiting* modified buffer: it is written.
+
+    Stage 1's offer through the shipped executable, with disk evidence — plan
+    0018's acceptance criterion that at least one ConPTY scenario exits
+    *through* the prompt rather than around it. `Wrote …` reaches the final
+    frame because the `y` produces one outcome carrying both `BufferSaved` and
+    `EditorExited`.
+    """
+    prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+    assert type(prefix) is EpochCompleted, prefix
+    offer = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
+    assert type(offer) is EpochCompleted, offer
+    assert offer.observation is not None
+    offer_lines = _frame_lines(offer.observation)
+    assert any("Save file" in line for line in offer_lines), offer_lines
+
+    # Removed host-side so the write is *observable*: the caller's buffer may
+    # hold exactly the bytes already on disk (a kill/yank round trip does),
+    # in which case "the file changed" proves nothing and "the file exists
+    # again" proves the save ran. The child holds no handle to it.
+    expected = path.read_text(encoding="utf-8")
+    path.unlink()
+
+    final = adapter.dispatch(TextInput(ManualTime(0), "y"))
+    assert isinstance(final, TerminalResult), final
+    assert final.observation is not None
+    assert any("Wrote" in line for line in _frame_lines(final.observation)), final
+    assert path.exists(), "the offer answered `y` and wrote nothing"
+    assert path.read_text(encoding="utf-8") == expected
+    return final
+
+
+def _exit_declining_the_save(adapter: ConptyAdapter, path: Path) -> TerminalResult:
+    """`C-x C-c`, `n`, `y`: decline the offer, then confirm the loss.
+
+    Both stages in one ConPTY scenario — `n` at stage 1 does not end the run,
+    it hands over to the gate, and the file on disk is untouched at the end.
+    """
+    before = path.read_text(encoding="utf-8")
+    prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+    assert type(prefix) is EpochCompleted, prefix
+    offer = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
+    assert type(offer) is EpochCompleted, offer
+    assert offer.observation is not None
+    assert any("Save file" in line for line in _frame_lines(offer.observation)), offer
+
+    gate = adapter.dispatch(TextInput(ManualTime(0), "n"))
+    assert type(gate) is EpochCompleted, gate
+    assert gate.observation is not None
+    gate_lines = _frame_lines(gate.observation)
+    assert any("exit anyway?" in line for line in gate_lines), gate_lines
+
+    final = adapter.dispatch(TextInput(ManualTime(0), "y"))
+    assert isinstance(final, TerminalResult), final
+    assert path.read_text(encoding="utf-8") == before, "declining wrote anyway"
+    return final
+
+
 def _adapter(tmp_path: Path, argv_file: Path | None = None) -> ConptyAdapter:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir(exist_ok=True)
@@ -133,10 +217,7 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
             assert any(line.startswith("hi") for line in moved_lines), moved_lines
 
         # C-x C-c exits the editor cleanly (native end-of-stream).
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        final = _exit_through_the_gate(adapter)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
         assert final.observation is not None
         process = final.observation.process
@@ -197,10 +278,7 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
         moved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "b")))
         assert type(moved) is EpochCompleted, moved
 
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        final = _exit_through_the_gate(adapter)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
@@ -287,10 +365,9 @@ def test_shipped_editor_kill_yank_scenario(tmp_path: Path) -> None:
         assert any(line.startswith("ab") for line in yanked_lines), yanked_lines
         assert any(line.startswith("cd") for line in yanked_lines), yanked_lines
 
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        # This buffer visits a file, so the exit offers to save it — and `y`
+        # writes it. The one ConPTY scenario that exits *through* stage 1.
+        final = _exit_saving_the_file(adapter, target)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
@@ -399,10 +476,9 @@ def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
         yanked_lines = _frame_lines(yanked_observation)
         assert any(line.startswith("two") for line in yanked_lines), yanked_lines
 
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        # The other half of the exit: `n` declines the offer and hands over to
+        # the gate, and the file on disk is untouched when the run ends.
+        final = _exit_declining_the_save(adapter, target)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
@@ -509,10 +585,7 @@ def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
         assert any(line.startswith("keep") for line in aborted_lines), aborted_lines
 
         # The editor is still alive, and C-x C-c is what ends it.
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        final = _exit_through_the_gate(adapter)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
@@ -556,10 +629,7 @@ def test_shipped_editor_navigation_keys_are_inert(tmp_path: Path) -> None:
         survived_lines = _frame_lines(stepped.observation)
         assert any(line.startswith("hi") for line in survived_lines), survived_lines
 
-        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
-        assert type(prefix) is EpochCompleted, prefix
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
-        assert isinstance(final, TerminalResult), final
+        final = _exit_through_the_gate(adapter)
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 

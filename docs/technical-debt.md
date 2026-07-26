@@ -202,40 +202,8 @@ shortfall, dropping whole panes from the bottom while the echo row is
 retained. Then decide, with a parity row, whether a frame too short for even
 one pane keeps the echo row or renders empty.
 
-## TD-11 (2026-07-26) — `C-x C-c` discards unsaved work with no prompt
-
-**Location:** `src/drei/commands.py` — `ExitEditor`.
-**Severity:** medium — silent, unrecoverable data loss; no longer reachable by
-reflex, but still one confirmed keystroke away.
-
-`C-x C-c` ends the run and drops every modified buffer without asking. Emacs's
-`save-buffers-kill-terminal` offers to save each one first.
-
-**Half of this entry is paid.** As written on 2026-07-26 it described
-something worse: `C-g` exited, so the reference editor's safest key — the one
-you press when you do not know what is happening, guaranteed to destroy
-nothing — was Drei's most destructive. Muscle memory carried over from Emacs
-caused data loss. Slice 17 rebound the keys, and losing work now takes a
-deliberate sequence that means "quit" in every editor the user has met. That
-is most of the safety and none of the fix.
-
-**Why still deferred:** it was two behavior changes with different risk
-profiles, and only the risky one has shipped. The rebinding carried a ~50-site
-test sweep across four files — the kind of change where an assertion quietly
-stops asserting what it used to — and pairing it with a new prompt would have
-put both in one slice. Slice 18 has the prompt as its whole subject.
-
-**Claimed:** slice 18 (issue #48), plan
-`agent/plans/0018-save-buffers-on-exit.md`. The plan's D2 goes one step past
-the reference editor at the user's direction: Emacs counts only file-visiting
-buffers when it asks "exit anyway?", which would leave a modified `scratch` —
-where a new user's first keystrokes land, and which Drei cannot save at all —
-discarded in silence.
-
-**Suggested approach:** the choice minibuffer built for the approval bridge
-(B.8) already presents options and maps a key to a decision, so this is a use
-of existing machinery rather than new machinery. Per-buffer `y`/`n`, plus an
-escape that quits without saving, matching `save-buffers-kill-terminal`.
-
-**Do not close this entry for a partial fix.** It has been narrowed once
-already; the remaining behavior is the one a user actually loses work to.
+*TD-11 (`C-x C-c` discards unsaved work with no prompt) was paid by slice 18
+(issue #48, plan `agent/plans/0018-save-buffers-on-exit.md`) and removed here
+rather than narrowed again — the entry's own instruction. What `C-x C-c` does
+now, and the six differences from `save-buffers-kill-terminal` that remain,
+are recorded in `knowledge/emacs-parity.md`.*

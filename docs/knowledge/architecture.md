@@ -107,7 +107,13 @@ What remains unwired is turn **cancellation** — the machine's sweep and
 `AbortPendingPermissions` both exist and nothing triggers them
 (`docs/technical-debt.md` TD-2). Slice 17 removed the blocker: `C-g` is
 `keyboard-quit` now rather than the exit key, so it is free to mean "cancel
-the turn in flight".
+the turn in flight". Slice 18 took one claim on that key without settling the
+question: `C-g` at an exit prompt abandons the exit, and the cancellation
+slice owns the choice for the state where both readings apply. It also fixed
+what an exit owes the agent — a `session/request_permission` that queues
+behind an exit prompt is presented if the exit is abandoned and dropped if it
+completes, because a request left pending hangs the agent for the rest of a
+run that did not end after all.
 
 Where a transcript lands is decided separately in
 [design 0004](../agent/design/0004-agent-buffer-identity.md): one **agent

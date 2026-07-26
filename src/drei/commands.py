@@ -82,8 +82,9 @@ class KeyboardQuit:
     Emacs's `keyboard-quit` — the key a user presses when they do not know
     what is happening, and the one key guaranteed to destroy nothing. Until
     slice 17 this ended the editor and discarded every modified buffer, which
-    inverted the reference editor's safest key into its most destructive one
-    (TD-11). Exiting is :class:`ExitEditor`.
+    inverted the reference editor's safest key into its most destructive one.
+    Exiting is :class:`ExitEditor` — and since slice 18 that asks first, so
+    `C-g` is also what abandons an exit half-way through its prompts.
     """
 
 
@@ -96,10 +97,10 @@ class ExitEditor:
     is what made `C-g` destructive. The session records the request and the
     terminal loop acts on it; nothing here decides *how* the process ends.
 
-    TODO: [tech-debt] TD-11 — this exits with modified buffers unsaved and
-    unmentioned, where Emacs's `save-buffers-kill-terminal` offers to save
-    each one first. Slice 17 moved the data loss behind a deliberate two-key
-    sequence; slice 18 adds the prompt. See docs/technical-debt.md.
+    Since slice 18 the request is not automatically granted: the session
+    offers to save each modified file-visiting buffer and confirms the exit
+    if anything is still modified, so `EditorExited` follows this command by
+    one keystroke or by several — or not at all (plan 0018 D1).
     """
 
 
