@@ -7,6 +7,7 @@ from drei.commands import (
     CopyRegionAsKill,
     DeleteOtherWindows,
     ExchangePointAndMark,
+    ExitEditor,
     FindFile,
     ForwardChar,
     InsertText,
@@ -48,6 +49,11 @@ _PREFIXES = frozenset({"C-x", "C-c"})
 
 _PREFIX_COMMANDS: dict[tuple[str, str], Command] = {
     ("C-c", "a"): PromptAgent(),
+    # `C-c` is also a prefix in its own right, and this pair wins: while a
+    # prefix is pending, `resolve` returns from the pending branch before the
+    # prefix SET is ever consulted, so `C-x C-c` completes rather than opening
+    # a nested prefix.
+    ("C-x", "C-c"): ExitEditor(),
     ("C-x", "C-s"): SaveBuffer(),
     ("C-x", "C-x"): ExchangePointAndMark(),
     ("C-x", "u"): Undo(),
@@ -82,9 +88,17 @@ def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingK
         completed = _PREFIX_COMMANDS.get((pending, key))
         if completed is not None:
             return completed
-        # TODO: [tech-debt] TD-5 — C-g lands here too, so "C-x C-g" is one
-        # silent unresolved key: no quit, no echo, and the mark survives.
-        # Emacs cancels the prefix and quits. See docs/technical-debt.md.
+        if key == "C-g":
+            # Cancel the prefix and quit, as Emacs does. Dropping the pending
+            # prefix is implicit: the caller clears it for anything that is
+            # not a `PendingKey`. A user who has half-typed a chord and wants
+            # out presses this key, so something has to happen — it used to
+            # become one silent `UnresolvedKey("C-x C-g")`.
+            return KeyboardQuit()
+        # Every *other* unbound key after a prefix is still swallowed
+        # silently, where Emacs echoes "C-x <key> is undefined". That needs
+        # the echo mechanism TD-4 tracks, and it is a question about prefix
+        # semantics rather than about this key.
         return UnresolvedKey(f"{pending} {key}")
     if key in _PREFIXES:
         return PendingKey(key)

@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass
 from typing import Literal
 
-from drei.commands import KeyboardQuitEvent
+from drei.commands import EditorExited
 from drei.files import FilePort
 from drei.harness import EditorHarness
 from drei.input import (
@@ -375,22 +375,15 @@ def run_editor(
                         port.write(READINESS_MARKER)
                         port.flush()
                         continue
-                    quit_requested = any(
-                        isinstance(e, KeyboardQuitEvent) for e in outcome.events
-                    )
+                    exiting = any(isinstance(e, EditorExited) for e in outcome.events)
                     # Before the frame: the command may owe the agent an answer
                     # (a permission response) or a prompt, and both can change
                     # what the frame should show.
                     pump.after_command(outcome, harness)
-                    # On quit the run ends: quiescence is the process exit
+                    # On exit the run ends: quiescence is the process exit
                     # itself, so the final frame carries no marker.
-                    _write_frame(port, harness, mark_ready=not quit_requested)
-                    if quit_requested:
-                        # TODO: [tech-debt] TD-11 — this ends the run and drops
-                        # every modified buffer with no prompt, and the key
-                        # that reaches it is `C-g`, which in Emacs is the one
-                        # key guaranteed to destroy nothing. See
-                        # docs/technical-debt.md.
+                    _write_frame(port, harness, mark_ready=not exiting)
+                    if exiting:
                         return
     finally:
         # The child goes first: a leaked `hermes acp` holding a pipe outlives a

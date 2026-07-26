@@ -3,8 +3,9 @@
 **Status:** implemented except **D5** (cancellation). D2 (the injection point)
 and D4 (atomic delivery) shipped in plan `0015-input-events-and-resize.md`;
 D1 (streaming port), D3 (fairness), D6 (launcher and lifecycle) and D7 (the
-pump owns the machine) shipped in plan `0016-acp-pump.md`. D5 stays proposed
-and is blocked on the `C-g` overload recorded in it. Where a slice departed
+pump owns the machine) shipped in plan `0016-acp-pump.md`. D5 stays proposed;
+the `C-g` overload that blocked it was resolved by plan
+`0017-keyboard-quit-and-exit.md`, so what remains is the wiring. Where a slice departed
 from this record, the departure is noted in place below.
 **Builds on:** `0003-hermes-drei-integration.md`, `0004-agent-buffer-identity.md`
 **Does not revise:** 0001/0002/0003. It supplies the §C boundary 0003 assumed
@@ -169,13 +170,12 @@ pump calls both, in that order, on turn cancellation: answer the agent first
 Trigger: `C-g` **while a turn is in flight** cancels the turn. Otherwise `C-g`
 keeps its current meaning.
 
-That current meaning is itself a problem this record must name rather than
-inherit silently: `C-g` presently *exits the editor*, a slice-1 shortcut that
-Emacs does not share (`C-g` is `keyboard-quit`; `C-x C-c` exits). Overloading
-an exit key with turn cancellation is a bad end state. The pump slice should
-not fix it by accident either — it is a keymap decision that deserves its own
-change, with the registry row it will falsify. Recorded here as the blocking
-question for the cancellation slice.
+**Unblocked by slice 17.** This record used to name `C-g` as the blocking
+question: it *exited the editor*, a slice-1 shortcut Emacs does not share, and
+overloading an exit key with turn cancellation would have been a bad end
+state. Plan `0017-keyboard-quit-and-exit.md` took that as its own change, with
+the registry rows it falsified. `C-g` is now `keyboard-quit` and `C-x C-c`
+exits, so the trigger above is available and means what it says.
 
 ### D6. Child lifecycle and failure
 
@@ -305,8 +305,10 @@ verifier is still waiting for.
 
 ## Open questions
 
-- **`C-g` overloading.** See D5. Blocking for the cancellation slice, not for
-  the pump's first slice.
+- ~~**`C-g` overloading.**~~ **Resolved by slice 17:** `C-g` is
+  `keyboard-quit` and `C-x C-c` exits, so D5's trigger is free. What the
+  cancellation slice still owes is a decision for `C-g` while a permission
+  prompt is open during a turn — see D5.
 - **Which key sends a prompt.** No key binds an agent command today. The
   text-prompt variant of §A.4 is the prerequisite; the binding itself is a
   keymap decision the slice owns.

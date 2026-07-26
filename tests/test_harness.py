@@ -29,6 +29,34 @@ def test_harness_produces_exact_evidence() -> None:
     assert harness.outcomes[-1].events == (KeyboardQuitEvent(),)
 
 
+def test_c_g_after_a_prefix_cancels_it_and_quits() -> None:
+    """TD-5, through the routing the user actually goes through.
+
+    The mark is the observable that used to survive: `C-x C-g` produced one
+    silent `UnresolvedKey` and nothing else happened at all.
+    """
+    harness = EditorHarness(width=20, height=5, initial_text="hello")
+    harness.send("C-@")  # set the mark at 0
+    harness.send("C-f")
+    assert harness.observation.mark == 0
+
+    harness.send("C-x")  # prefix pending
+    outcome = harness.send("C-g")
+
+    assert outcome is not None
+    assert outcome.events == (KeyboardQuitEvent(),)
+    assert harness.frame.rows[-1].startswith("Quit")
+    assert harness.unresolved == ()  # not recorded as an unresolved chord
+    # The prefix is gone: the next key is an ordinary self-insert, not the
+    # second half of a chord.
+    harness.send("z")
+    assert harness.observation.text == "hzello"
+    # Last, because `is None` narrows the observation for everything after it
+    # under mypy's reachability analysis (the same bleed the minibuffer test
+    # below documents); the runtime state is unaffected.
+    assert harness.observation.mark is None
+
+
 def test_harness_records_unresolved_keys() -> None:
     harness = EditorHarness(width=10, height=3)
     # Bare C-x opens a prefix: nothing recorded yet.
@@ -87,8 +115,8 @@ def test_harness_outcome_sequence() -> None:
 def test_harness_routes_minibuffer_keys() -> None:
     """C-x C-f opens the prompt; keys route to the minibuffer; a pending
     prefix typed before activation is dropped; RET accepts (missing file
-    through the null port → empty buffer); C-g aborts and a second C-g
-    quits."""
+    through the null port → empty buffer); C-g aborts the prompt without
+    touching the buffer or the mark."""
     harness = EditorHarness(width=40, height=6)
     harness.send("z")  # dirty the buffer: text "z"
     harness.send("C-x")  # pending prefix...

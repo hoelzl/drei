@@ -145,7 +145,9 @@ def test_shipped_editor_windows_scenario(tmp_path: Path) -> None:
         collapsed_lines = _frame_lines(_dispatch_key(adapter, "1"))
         assert _modeline_count(collapsed_lines) == 1, collapsed_lines
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -193,6 +195,8 @@ def test_shipped_editor_switch_buffer_scenario(tmp_path: Path) -> None:
         assert any("Drei: alpha" in line for line in alpha_lines), alpha_lines
         assert any(line.startswith("AA") for line in alpha_lines), alpha_lines
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final

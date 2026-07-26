@@ -2,7 +2,7 @@
 
 Drives the real `drei` process through TermVerify's ConPTY adapter on
 Windows: wait for the cooperation readiness marker, insert text, move
-backward/forward, send C-g, and assert clean exit plus frame evidence.
+backward/forward, exit with C-x C-c, and assert clean exit plus frame evidence.
 
 The semantic oracle remains the direct tests; this scenario proves the
 shipped terminal integration (raw mode, key decoding, frame writes,
@@ -132,8 +132,10 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
             moved_lines = _frame_lines(moved.observation)
             assert any(line.startswith("hi") for line in moved_lines), moved_lines
 
-        # C-g: keyboard quit exits the editor cleanly (native end-of-stream).
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        # C-x C-c exits the editor cleanly (native end-of-stream).
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
         assert final.observation is not None
@@ -195,7 +197,9 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
         moved = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "b")))
         assert type(moved) is EpochCompleted, moved
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -236,7 +240,9 @@ def test_shipped_editor_save_scenario(tmp_path: Path) -> None:
         # The file exists on disk with the buffer content.
         assert target.read_text(encoding="utf-8") == "hi"
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -281,7 +287,9 @@ def test_shipped_editor_kill_yank_scenario(tmp_path: Path) -> None:
         assert any(line.startswith("ab") for line in yanked_lines), yanked_lines
         assert any(line.startswith("cd") for line in yanked_lines), yanked_lines
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -348,7 +356,9 @@ def test_shipped_editor_undo_scenario(tmp_path: Path) -> None:
         probed_lines = _frame_lines(probed_observation)
         assert not any(line.startswith("a") for line in probed_lines), probed_lines
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -389,7 +399,9 @@ def test_shipped_editor_yank_pop_scenario(tmp_path: Path) -> None:
         yanked_lines = _frame_lines(yanked_observation)
         assert any(line.startswith("two") for line in yanked_lines), yanked_lines
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -458,15 +470,23 @@ def test_shipped_editor_find_file_scenario(tmp_path: Path) -> None:
         assert any("Wrote" in line for line in _frame_lines(saved.observation))
         assert target.read_text(encoding="utf-8") == "!found me"
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
 def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
-    """C-x C-f C-g aborts the minibuffer: prompt gone, buffer unchanged,
-    no quit — a second C-g exits cleanly (abort must not consume the quit
-    or emit one itself)."""
+    """C-x C-f C-g aborts the minibuffer: prompt gone, buffer unchanged, and
+    no quit event — the abort must not emit one.
+
+    Since slice 17 the second half is a weaker claim than it used to be:
+    `C-g` no longer exits at all, so "the abort did not quit" is true of
+    every `C-g`. What still matters is that the abort leaves the *main*
+    buffer's mark alone, which `MinibufferAbort` guarantees by not emitting
+    `KeyboardQuitEvent`.
+    """
     adapter = _adapter(tmp_path)
 
     with _reaped(adapter):
@@ -488,9 +508,10 @@ def test_shipped_editor_find_file_abort_scenario(tmp_path: Path) -> None:
         assert not any("Find file:" in line for line in aborted_lines), aborted_lines
         assert any(line.startswith("keep") for line in aborted_lines), aborted_lines
 
-        # The abort was NOT a quit: the editor is still alive; a second
-        # C-g (minibuffer closed) is the real keyboard quit.
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        # The editor is still alive, and C-x C-c is what ends it.
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
@@ -535,7 +556,9 @@ def test_shipped_editor_navigation_keys_are_inert(tmp_path: Path) -> None:
         survived_lines = _frame_lines(stepped.observation)
         assert any(line.startswith("hi") for line in survived_lines), survived_lines
 
-        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
         assert isinstance(final, TerminalResult), final
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 

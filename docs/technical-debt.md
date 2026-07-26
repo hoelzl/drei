@@ -29,8 +29,7 @@ that review's. Later entries name the slice that found them instead.
 **Deferred to:** the cancellation slice. Design record:
 `agent/design/0005-acp-pump.md` D5.
 **Location:** `src/drei/acp/machine.py` (`cancel`), `src/drei/session.py`
-(`AbortPendingPermissions`), `src/drei/keys.py` (`C-g` is bound to
-`KeyboardQuit`, which exits the editor).
+(`AbortPendingPermissions`).
 **Severity:** medium — a turn in flight cannot be stopped except by quitting.
 
 **Most of this entry is paid.** Plan 0016 shipped the pump: a
@@ -46,17 +45,20 @@ the `cancelled` outcome, and the session's `AbortPendingPermissions` closes an
 open choice prompt and drains the queue. The pump calls the second (on child
 exit) but never the first, and nothing at all triggers a turn cancel.
 
-**Why deferred:** the trigger is a keymap decision, not a wiring one. 0005 D5
-wants `C-g` *while a turn is in flight* to cancel the turn — but `C-g`
-currently **exits the editor**, a slice-1 shortcut Emacs does not share
-(`C-g` is `keyboard-quit`; `C-x C-c` exits). Overloading an exit key with turn
-cancellation by accident is the bad end state 0005 names, and fixing the
-binding falsifies a parity registry row. That is its own change.
+**Why deferred:** the trigger was a keymap decision before it was a wiring
+one. 0005 D5 wants `C-g` *while a turn is in flight* to cancel the turn, and
+`C-g` used to **exit the editor** — overloading an exit key with turn
+cancellation is the bad end state 0005 names. **Slice 17 removed that
+blocker:** `C-g` is `keyboard-quit` now and `C-x C-c` exits, with the registry
+rows rewritten. What is left is only the wiring.
 
-**Suggested approach:** decide the `C-g`/`C-x C-c` binding first, with its
-registry row; then have the pump call `cancel()` and dispatch
+**Suggested approach:** have the pump call `cancel()` and then dispatch
 `AbortPendingPermissions`, in that order — answer the agent, which is blocked,
-before clearing the UI.
+before clearing the UI. One design question remains: a permission prompt is
+open *precisely* when a turn is in flight, so `C-g` in that state is
+ambiguous. Aborting the innermost thing is the Emacs instinct, and denying one
+permission is narrower than killing the turn, which argues for the first
+`C-g` denying and a second cancelling.
 
 ## TD-3 (finding 18) — trailing-slash find-file creates an unreachable `""` buffer
 
@@ -97,24 +99,6 @@ Fixing it one event at a time entrenches the ad-hoc shape.
 **Suggested approach:** a small echo-message slice: a `Message`/`Error`
 event class the session emits, one rendering site, and a pass over the
 registry rows that currently say "Drei has no echo-error mechanism yet".
-
-## TD-5 (finding 20) — `C-g` after a `C-x` prefix is swallowed
-
-**Location:** `src/drei/keys.py` — `resolve`, the pending-prefix branch.
-**Severity:** low — recoverable by pressing `C-g` again.
-
-Any non-completing key after a prefix becomes one `UnresolvedKey("C-x C-g")`.
-Emacs cancels the prefix *and* quits: the mark is deactivated and `Quit` is
-echoed. In Drei nothing happens — the prefix is dropped silently and the mark
-survives. Unregistered deviation.
-
-**Why deferred:** minor, and the honest fix touches prefix semantics
-generally (which keys abort a prefix, what the echo shows) rather than
-special-casing `C-g`.
-
-**Suggested approach:** handle `C-g` in the pending branch as
-`KeyboardQuit()`, and register the resulting behavior. Then decide whether
-any *other* non-completing key should echo something rather than vanish.
 
 ## TD-7 (finding 22) — frozen dataclasses over aliased mutable dicts
 
@@ -218,54 +202,33 @@ shortfall, dropping whole panes from the bottom while the echo row is
 retained. Then decide, with a parity row, whether a frame too short for even
 one pane keeps the echo row or renders empty.
 
-## TD-11 (2026-07-26) — quitting discards unsaved work, on one keystroke, with no prompt
+## TD-11 (2026-07-26) — `C-x C-c` discards unsaved work with no prompt
 
-**Location:** `src/drei/keys.py` — `C-g` is bound to `KeyboardQuit`;
-`src/drei/terminal.py` — the loop returns on `KeyboardQuitEvent`, ending the
-run.
-**Severity:** high — silent, unrecoverable data loss reachable by habit.
+**Location:** `src/drei/commands.py` — `ExitEditor`.
+**Severity:** medium — silent, unrecoverable data loss; no longer reachable by
+reflex, but still one confirmed keystroke away.
 
-`C-g` exits the editor, and exiting drops every modified buffer without
-asking. There is no confirmation, no prompt, and no way back.
+`C-x C-c` ends the run and drops every modified buffer without asking. Emacs's
+`save-buffers-kill-terminal` offers to save each one first.
 
-This is worse than an ordinary missing feature, because of *which* key it is.
-In GNU Emacs `C-g` is `keyboard-quit` — the key you press when you do not know
-what is happening, and the one key guaranteed to destroy nothing. Exiting is
-`C-x C-c`, which offers to save each modified buffer first. Drei inverted the
-safest key in the reference editor into its most destructive one, so muscle
-memory carried over from Emacs actively causes data loss. It shipped in slice
-1 as a shortcut and went unregistered in the parity registry for sixteen
-slices (now recorded — see `knowledge/emacs-parity.md`).
+**Half of this entry is paid.** As written on 2026-07-26 it described
+something worse: `C-g` exited, so the reference editor's safest key — the one
+you press when you do not know what is happening, guaranteed to destroy
+nothing — was Drei's most destructive. Muscle memory carried over from Emacs
+caused data loss. Slice 17 rebound the keys, and losing work now takes a
+deliberate sequence that means "quit" in every editor the user has met. That
+is most of the safety and none of the fix.
 
-**Why deferred:** it is two behavior changes, not one, and they have different
-risk profiles.
-
-1. *The binding.* `C-g` becomes `keyboard-quit` (clears the mark, echoes
-   `Quit`, changes nothing else) and `C-x C-c` exits. The loop needs its own
-   exit event so `KeyboardQuitEvent` can go back to meaning "the user aborted
-   something". Roughly 50 edit sites across four files end with "C-g quits"
-   and have to be rewritten — mechanical, but the kind of sweep where an
-   assertion can quietly stop asserting what it used to. (An earlier version
-   of this entry said "~113 references across 15 test files"; that was a count
-   of every `C-g`/`KeyboardQuit` mention in the repository, most of them
-   minibuffer aborts and mark clears that this change does not touch. Plan
-   0017 §4 has the measured breakdown. An overstated risk in a debt record
-   argues for further deferral just as effectively as an understated one hides
-   the debt.)
-2. *The prompt.* `C-x C-c` with modified buffers should offer to save them.
-
-Doing both at once puts two behavior changes and a 15-file test sweep in one
-slice. Doing (1) first is a large safety win on its own — quitting stops being
-a single keystroke and becomes a sequence the user has to mean — but it does
-**not** close this entry, and taking (1) as licence to close it is the failure
-this entry exists to prevent.
+**Why still deferred:** it was two behavior changes with different risk
+profiles, and only the risky one has shipped. The rebinding carried a ~50-site
+test sweep across four files — the kind of change where an assertion quietly
+stops asserting what it used to — and pairing it with a new prompt would have
+put both in one slice. Slice 18 has the prompt as its whole subject.
 
 **Suggested approach:** the choice minibuffer built for the approval bridge
-(B.8) already presents options and maps a key to a decision, so the
-save-buffers prompt is a use of existing machinery rather than new machinery.
-Per-buffer `y`/`n`, plus an escape that quits without saving, matching
-`save-buffers-kill-terminal`.
+(B.8) already presents options and maps a key to a decision, so this is a use
+of existing machinery rather than new machinery. Per-buffer `y`/`n`, plus an
+escape that quits without saving, matching `save-buffers-kill-terminal`.
 
-**This entry is edited, not removed, by the binding slice.** After (1) it
-reads "`C-x C-c` discards unsaved work with no prompt"; it is removed when the
-prompt ships.
+**Do not close this entry for a partial fix.** It has been narrowed once
+already; the remaining behavior is the one a user actually loses work to.
