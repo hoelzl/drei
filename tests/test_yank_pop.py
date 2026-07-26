@@ -7,6 +7,7 @@ from drei.commands import (
     InsertText,
     KeyboardQuit,
     KillLine,
+    KillRegion,
     Message,
     TextYanked,
     TextYankPopped,
@@ -33,6 +34,21 @@ def _two_entry_session() -> EditorSession:
 
 
 # --- Replacement ---------------------------------------------------------
+
+
+def test_a_speaking_no_op_between_yank_and_pop_keeps_the_pop_active() -> None:
+    """D2, the `yank_active` arm: a speaking no-op between a yank and its
+    pop leaves the pop active. This is the session-side pin for the
+    transcript shape — `TextYanked, Message, TextYankPopped` — that the
+    slice-19 review (finding 1) caught the property tier's coherence fold
+    rejecting."""
+    session = _two_entry_session()
+    session.dispatch(Yank())  # inserts "two"; the pop is active
+    outcome = session.dispatch(KillRegion())  # no mark: speaks, nothing else
+    assert outcome.events == (Message("mark-not-set"),)
+    popped = session.dispatch(YankPop())
+    assert TextYankPopped("two", "one", 1, 4) in popped.events
+    assert session.buffer.current.text == "\none\nthree"
 
 
 def test_pop_replaces_with_next_older_entry() -> None:

@@ -105,8 +105,11 @@ class EditorHarness:
         if isinstance(resolved, UnresolvedKey):
             self._unresolved.append(resolved)
             # Row 134 (plan 0019 D7): "<chord> is undefined" is composed here,
-            # in the harness — no command ever reaches the session, so there
-            # is no Message event; the echo is the whole behavior.
+            # in the harness — no command reaches the session for it to speak
+            # about. `_note` is deliberately NOT recomputed: it is non-empty
+            # only while a minibuffer is open, and an open minibuffer routes
+            # keys to `_minibuffer_command` before `resolve` ever runs — so
+            # the note is always "" at this point (slice-19 review finding 5).
             self._echo = f"{resolved.key} is undefined"
             self._frame = self._render_frame()
             return None

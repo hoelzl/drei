@@ -565,8 +565,10 @@ def test_successful_kill_then_yank_restores_text(history: list[object]) -> None:
             # no-op kill: chain state unchanged
         else:
             outcome = session.dispatch(command)  # type: ignore[arg-type]
-            if outcome.events:
-                # Only event-emitting commands break the session's chain.
+            if any(not isinstance(e, Message) for e in outcome.events):
+                # Only semantically-acting commands break the session's
+                # chain; a Message describes rather than acts (plan 0019
+                # D2 — slice-19 review finding 1).
                 chain_open = False
 
 
@@ -587,8 +589,12 @@ def test_yank_pop_transcript_coherence(history: list[object]) -> None:
     transcript = session.transcript
     for i, event in enumerate(transcript):
         if isinstance(event, TextYankPopped):
-            assert i > 0
-            assert isinstance(transcript[i - 1], (TextYanked, TextYankPopped))
+            # A Message may sit between yank and pop — it describes rather
+            # than acts and never clears yank_active (plan 0019 D2), so
+            # coherence is over semantic events (slice-19 review finding 1).
+            semantic_before = [e for e in transcript[:i] if not isinstance(e, Message)]
+            assert semantic_before
+            assert isinstance(semantic_before[-1], (TextYanked, TextYankPopped))
 
 
 @given(command_history())
@@ -616,7 +622,9 @@ def test_yank_pop_replaces_with_ring_entry(history: list[object]) -> None:
                 assert event.after == event.before + len(event.new_text)
                 last_yank = (event.before, event.after)
             # no-op pop: active state unchanged (still whatever it was)
-        elif outcome.events:
+        elif any(not isinstance(e, Message) for e in outcome.events):
+            # A Message-only outcome does not deactivate the pop (D2 —
+            # slice-19 review finding 1).
             last_yank = None
 
 
