@@ -243,10 +243,15 @@ risk profiles.
 1. *The binding.* `C-g` becomes `keyboard-quit` (clears the mark, echoes
    `Quit`, changes nothing else) and `C-x C-c` exits. The loop needs its own
    exit event so `KeyboardQuitEvent` can go back to meaning "the user aborted
-   something". Roughly 113 `C-g` references across 15 test files plus every
-   TermVerify scenario end with "C-g quits" and have to be rewritten — wide,
-   mechanical, and exactly the kind of sweep where an assertion quietly stops
-   asserting what it used to.
+   something". Roughly 50 edit sites across four files end with "C-g quits"
+   and have to be rewritten — mechanical, but the kind of sweep where an
+   assertion can quietly stop asserting what it used to. (An earlier version
+   of this entry said "~113 references across 15 test files"; that was a count
+   of every `C-g`/`KeyboardQuit` mention in the repository, most of them
+   minibuffer aborts and mark clears that this change does not touch. Plan
+   0017 §4 has the measured breakdown. An overstated risk in a debt record
+   argues for further deferral just as effectively as an understated one hides
+   the debt.)
 2. *The prompt.* `C-x C-c` with modified buffers should offer to save them.
 
 Doing both at once puts two behavior changes and a 15-file test sweep in one
