@@ -43,6 +43,11 @@ What the plan got wrong or did not foresee:
   property tests must ignore messages; V2 migrated two folds and the review
   found three more in the same file. The warning was right; the counting
   was incomplete.
+- **And one tier short.** The differential tier had a silence pin of its
+  own (`test_undo_parity`'s exhausted-undo `== ()`), invisible locally
+  because `DREI_PARITY=1` needs the pinned Emacs — CI's parity job caught
+  it on the PR. The sweep count above is the unit tier; the honest total
+  is 27 silence assertions across 17 files.
 
 **Architecture gate:** none — no design record owns the echo area, and this
 slice does not need one. It is `docs/technical-debt.md` **TD-4**, the parity
