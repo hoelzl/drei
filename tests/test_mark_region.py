@@ -12,6 +12,7 @@ from drei.commands import (
     KillRegion,
     MarkExchanged,
     MarkSet,
+    Message,
     RegionCopied,
     RegionKilled,
     SetMark,
@@ -129,7 +130,8 @@ def test_kill_region_backward() -> None:
 def test_kill_region_without_mark_is_noop() -> None:
     session = _session("hello", 2)
     outcome = session.dispatch(KillRegion())
-    assert outcome.events == ()
+    # No mark: speaks (row 72), changes nothing.
+    assert outcome.events == (Message("mark-not-set"),)
     assert session.buffer.current.text == "hello"
 
 
@@ -179,7 +181,8 @@ def test_copy_region_pushes_ring_without_changing_text() -> None:
 def test_copy_region_without_mark_is_noop() -> None:
     session = _session("hello", 2)
     outcome = session.dispatch(CopyRegionAsKill())
-    assert outcome.events == ()
+    # No mark: speaks (row 72), ring untouched.
+    assert outcome.events == (Message("mark-not-set"),)
     assert session.kill_ring == ()
 
 

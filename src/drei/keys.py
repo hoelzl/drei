@@ -95,10 +95,10 @@ def resolve(pending: str | None, key: str) -> Command | UnresolvedKey | PendingK
             # out presses this key, so something has to happen — it used to
             # become one silent `UnresolvedKey("C-x C-g")`.
             return KeyboardQuit()
-        # Every *other* unbound key after a prefix is still swallowed
-        # silently, where Emacs echoes "C-x <key> is undefined". That needs
-        # the echo mechanism TD-4 tracks, and it is a question about prefix
-        # semantics rather than about this key.
+        # Every *other* unbound key after a prefix resolves to one
+        # UnresolvedKey for the whole sequence; the harness owns the echo —
+        # "C-x <key> is undefined" (row 134, plan 0019 D7) — because no
+        # command exists for the session to speak about.
         return UnresolvedKey(f"{pending} {key}")
     if key in _PREFIXES:
         return PendingKey(key)

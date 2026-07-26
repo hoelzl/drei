@@ -19,6 +19,7 @@ from drei.commands import (
     BufferDisplayed,
     CreateGeneratedBuffer,
     DisplayBuffer,
+    Message,
     SplitWindow,
     WindowSplit,
 )
@@ -98,7 +99,9 @@ def test_a_frame_too_small_to_split_shows_nothing_and_breaks_nothing() -> None:
 
     outcome = session.dispatch(DisplayBuffer(SHOWN))
 
-    assert outcome.events == ()
+    # Nothing is shown — and the refusal says why (row 98): a Message that
+    # breaks nothing.
+    assert outcome.events == (Message("too-small-for-splitting"),)
     assert len(session.windows) == 1
     assert session.windows[0].buffer_id == FOCUSED
 

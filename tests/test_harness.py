@@ -58,17 +58,22 @@ def test_c_g_after_a_prefix_cancels_it_and_quits() -> None:
 
 
 def test_harness_records_unresolved_keys() -> None:
-    harness = EditorHarness(width=10, height=3)
+    # Wide enough that the echo row isn't clipped: the undefined-chord text
+    # is asserted in full below.
+    harness = EditorHarness(width=30, height=3)
     # Bare C-x opens a prefix: nothing recorded yet.
     harness.send("C-x")
     unresolved_before = harness.unresolved
     assert len(unresolved_before) == 0
     assert len(harness.outcomes) == 0
-    # A non-completing second key records the whole sequence as unresolved.
+    # A non-completing second key records the whole sequence as unresolved —
+    # and says so (row 134, D7): the harness composes "<chord> is undefined"
+    # itself, since no command ever reaches the session.
     harness.send("C-z")
     assert harness.observation.text == ""
     assert harness.unresolved == (UnresolvedKey("C-x C-z"),)
     assert len(harness.outcomes) == 0
+    assert harness.frame.rows[-1].startswith("C-x C-z is undefined")
 
 
 def test_harness_save_via_prefix() -> None:

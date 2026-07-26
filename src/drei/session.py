@@ -1392,11 +1392,13 @@ class EditorSession:
         halves over the same buffer; both inherit the buffer's current
         point/mark (probed vs pinned 29.3, evidence 4). Needs at least
         MIN_WINDOW_ROWS per window plus the shared echo row when the frame
-        size is known; otherwise a silent no-op (deviation: Emacs errors
-        'too small for splitting', evidence 6)."""
+        size is known; a too-small frame says so (row 98 — Emacs errors
+        'too small for splitting', evidence 6) and splits nothing. An unknown
+        frame size stays unconstrained and silent."""
         if self._frame_size is not None:
             _, height = self._frame_size
             if height < (len(self._windows) + 1) * MIN_WINDOW_ROWS + 1:
+                events.append(Message("too-small-for-splitting"))
                 return self.buffer.current
         focused = self._windows[self._focused]
         # The new window copies the FOCUSED WINDOW's point/mark (not the
@@ -1782,7 +1784,10 @@ class EditorSession:
         point = current.point
         text = current.text
         if point == len(text):
-            return current  # no-op at buffer end: no event, ring untouched
+            # Nothing to kill: says so (row 66), ring untouched, chain
+            # unbroken (the Message must not count as intervening, D2).
+            events.append(Message("end-of-buffer"))
+            return current
         if text[point] == "\n":
             killed, end = "\n", point + 1
         else:
@@ -1808,8 +1813,14 @@ class EditorSession:
         )
 
     def _kill_region(self, current: BufferValue, events: list[Event]) -> BufferValue:
-        if current.mark is None or current.mark == current.point:
-            return current  # no mark / empty region: silent no-op
+        if current.mark is None:
+            # No mark: says so (row 72), changes nothing. An *empty* region
+            # (mark == point) stays a deliberately silent no-op — a separate,
+            # older pin, unchanged by the message work.
+            events.append(Message("mark-not-set"))
+            return current
+        if current.mark == current.point:
+            return current  # empty region: silent no-op
         lo = min(current.point, current.mark)
         hi = max(current.point, current.mark)
         killed = current.text[lo:hi]
@@ -1826,8 +1837,13 @@ class EditorSession:
         )
 
     def _copy_region(self, current: BufferValue, events: list[Event]) -> BufferValue:
-        if current.mark is None or current.mark == current.point:
-            return current  # no mark / empty region: silent no-op
+        if current.mark is None:
+            # No mark: says so (row 72), ring untouched. Empty region (mark ==
+            # point) stays silent, as before — see _kill_region.
+            events.append(Message("mark-not-set"))
+            return current
+        if current.mark == current.point:
+            return current  # empty region: silent no-op
         lo = min(current.point, current.mark)
         hi = max(current.point, current.mark)
         self._kill_ring.insert(0, current.text[lo:hi])

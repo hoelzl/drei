@@ -104,6 +104,11 @@ class EditorHarness:
         self._pending = None
         if isinstance(resolved, UnresolvedKey):
             self._unresolved.append(resolved)
+            # Row 134 (plan 0019 D7): "<chord> is undefined" is composed here,
+            # in the harness — no command ever reaches the session, so there
+            # is no Message event; the echo is the whole behavior.
+            self._echo = f"{resolved.key} is undefined"
+            self._frame = self._render_frame()
             return None
         outcome = self._session.dispatch(resolved)
         self._outcomes.append(outcome)

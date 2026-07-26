@@ -16,6 +16,7 @@ from drei.commands import (
     ForwardChar,
     FrameResized,
     KillLine,
+    Message,
     OtherWindow,
     ResizeFrame,
     SetMark,
@@ -103,11 +104,12 @@ def test_delete_other_windows_with_one_window_is_a_quiet_noop() -> None:
 
 
 def test_split_too_small_is_a_noop() -> None:
-    """Deviation: Emacs errors 'Window too small for splitting'; Drei has no
-    error-echo channel yet, so the split is a silent no-op (plan 0012
-    evidence 6)."""
+    """Emacs errors 'too small for splitting' here; Drei now says so too
+    (row 98), as a Message that changes nothing (plan 0012 evidence 6)."""
     session = _session(height=5)  # two windows need >= 2*3+1 = 7 rows
-    assert session.dispatch(SplitWindow()).events == ()
+    assert session.dispatch(SplitWindow()).events == (
+        Message("too-small-for-splitting"),
+    )
     assert len(session.windows) == 1
 
 
@@ -256,9 +258,12 @@ class TestResizeFrame:
         assert FrameResized(100, 40) in outcome.events
 
     def test_a_grown_frame_permits_a_split_the_old_size_refused(self) -> None:
-        # height 6 < (1+1)*3+1 = 7, so C-x 2 is a silent no-op...
+        # height 6 < (1+1)*3+1 = 7, so C-x 2 is refused — and says so (row
+        # 98): a Message that changes nothing...
         session = _session(height=6)
-        assert session.dispatch(SplitWindow()).events == ()
+        assert session.dispatch(SplitWindow()).events == (
+            Message("too-small-for-splitting"),
+        )
         assert len(session.windows) == 1
         # ...and the same C-x 2 succeeds once the frame is tall enough. This
         # is the property that makes the size an input to a command's outcome.
@@ -270,7 +275,9 @@ class TestResizeFrame:
         session = _session(height=24)
         session.dispatch(SplitWindow())
         session.dispatch(ResizeFrame(80, 6))
-        assert session.dispatch(SplitWindow()).events == ()
+        assert session.dispatch(SplitWindow()).events == (
+            Message("too-small-for-splitting"),
+        )
         assert len(session.windows) == 2  # the shrink split nothing off
 
     def test_shrinking_below_the_split_minimum_keeps_every_window(self) -> None:
@@ -314,10 +321,15 @@ class TestResizeFrame:
         """D3's reason for making this a command: a transcript that omitted
         the resize could not reproduce the split-or-no-op decision."""
         session = _session(height=6)
-        session.dispatch(SplitWindow())  # refused at height 6: no events
+        session.dispatch(SplitWindow())  # refused at height 6: speaks (row 98)
         session.dispatch(ResizeFrame(80, 24))
         session.dispatch(SplitWindow())  # succeeds at height 24
         # The resize is in the transcript and precedes the split it enabled,
         # so a replay sees the same height the split decision saw. Without
-        # the FrameResized row the replay would refuse the split.
-        assert session.transcript == (FrameResized(80, 24), WindowSplit(2))
+        # the FrameResized row the replay would refuse the split. The leading
+        # Message records the refusal the replay will also make.
+        assert session.transcript == (
+            Message("too-small-for-splitting"),
+            FrameResized(80, 24),
+            WindowSplit(2),
+        )

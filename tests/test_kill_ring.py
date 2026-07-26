@@ -9,6 +9,7 @@ from drei.commands import (
     ForwardChar,
     InsertText,
     KillLine,
+    Message,
     TextKilled,
     TextYanked,
     Yank,
@@ -47,14 +48,15 @@ def test_kill_line_at_buffer_end_is_noop() -> None:
     session = _session("ab\ncd", 5)
     outcome = session.dispatch(KillLine())
     assert session.buffer.current.text == "ab\ncd"
-    assert outcome.events == ()
+    # Nothing to kill: speaks (row 66), ring untouched, chain unbroken.
+    assert outcome.events == (Message("end-of-buffer"),)
     assert session.kill_ring == ()
 
 
 def test_kill_line_empty_buffer_is_noop() -> None:
     session = _session("", 0)
     outcome = session.dispatch(KillLine())
-    assert outcome.events == ()
+    assert outcome.events == (Message("end-of-buffer"),)
 
 
 def test_kill_line_on_lone_newline_kills_it() -> None:
