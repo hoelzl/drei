@@ -20,7 +20,10 @@ Rules for this file:
 TD-2 through TD-9 were found by [adversarial review
 0001](agent/reviews/0001-adversarial-review-2026-07-24.md) (2026-07-24) and
 deferred in that review's triage on the same date; their finding numbers are
-that review's. Later entries name the slice that found them instead.
+that review's. TD-10 and TD-11 name the slice that found them. TD-12 through
+TD-17 were found by [adversarial review
+0002](agent/reviews/0002-adversarial-review-2026-07-27.md) (2026-07-27) and
+deferred in that review's triage; their finding numbers are that review's.
 
 ---
 
@@ -126,12 +129,132 @@ shortfall, dropping whole panes from the bottom while the echo row is
 retained. Then decide, with a parity row, whether a frame too short for even
 one pane keeps the echo row or renders empty.
 
+---
+
+## TD-12 (review 0002 finding 5) — the startup path still mints the unreachable `""` buffer
+
+**Location:** `src/drei/cli.py` — the `FileNotFoundError` arm of the startup
+read.
+**Severity:** minor; the buffer TD-3 named verbatim, reachable only from the
+command line.
+
+TD-3 was paid at the find-file boundary (slice 20): an empty basename is
+refused with `OpenFailed(path, "empty-basename")` before the filesystem is
+asked. The *startup* boundary never got the refusal: `drei missing-dir/`
+raises `FileNotFoundError` out of the port read, lands in the missing-file
+arm, and `harness.py`'s basename derivation mints a buffer literally named
+`""` — unaddressable by any typed `C-x b` name, edits stranded, exactly the
+hazard TD-3 recorded. Review 0002 caught the paid note overclaiming the class.
+
+**Why deferred:** the fix is small (apply the empty-basename check before the
+startup read, or route startup through the session's visit path — TD-9's
+fix), but TD-9 already owns "startup bypasses the command boundary", and
+doing the refusal twice invites divergence; the two should be paid together.
+**Suggested approach:** fold into the TD-9 fix; refuse with the same
+`empty-basename` vocabulary (exit 2 with the token on stderr — the startup
+path has no echo row).
+
+## TD-13 (review 0002 finding 6) — `DisplayBuffer`'s "silent no-op" records a message anyway
+
+**Location:** `src/drei/session.py` `_display_buffer` → `_split_window`;
+contract at `src/drei/commands.py` (`DisplayBuffer` docstring).
+**Severity:** minor; transcript pollution only — the message never reaches
+the echo row.
+
+The docstring and design 0005 D6 promise "shows nothing and breaks nothing"
+on a frame too small to split, but the dispatch records
+`Message("too-small-for-splitting")` — a message about a command the user
+never issued — into the event record. It is invisible only because
+`harness.apply` does not recompute the echo for pump-dispatched commands;
+replay and the transcript see it.
+
+**Why deferred:** the choice — suppress the message for non-user dispatches,
+or amend the contract to admit it — interacts with cluster A's
+user-command classification (review 0002 finding 1): once commands carry a
+user/internal distinction, the message emission can key on it.
+**Suggested approach:** fix with cluster A; suppress the message when the
+split was not user-issued.
+
+## TD-14 (review 0002 finding 7) — the initial frame size is not in the event record
+
+**Location:** `src/drei/session.py` — the `frame_size` constructor argument.
+**Severity:** minor; a replay gap, pre-dating the range (plan 0012) but
+sharpened by two in-range consumers.
+
+`ResizeFrame`'s own docstring states the derivability rule: a transcript that
+omitted a resize could not reproduce a later split-or-no-op decision on
+replay. The *initial* size is exactly such an input — consumed by the `C-x 2`
+gate and by `DisplayBuffer`'s split — and it enters the state at construction
+with no event. A replay from the event record starts not knowing the frame
+geometry.
+
+**Why deferred:** the fix shape (a `FrameSized` initial event, or making the
+initial size part of the session's genesis record) touches the replay
+contract and deserves the verification-model treatment, not a drive-by.
+**Suggested approach:** record the initial geometry as the transcript's first
+event; pin a replay-reproduces-split-decision property.
+
+## TD-15 (review 0002 finding 16) — parked codec frames die with the child, and effects render out of order
+
+**Location:** `src/drei/pump.py` `_drain`; `src/drei/acp/codec.py`.
+**Severity:** nit-to-minor; requires a malformed line from the peer in the
+same chunk as valid frames.
+
+Frames parsed before a malformed line in one chunk are parked until the
+*next* `receive` — so a protocol error can render in the transcript *before*
+the turn completion that preceded it — and `exited()` → `_reset()` discards
+parked frames, so a turn completion in the child's final output is never
+recorded. The codec's no-loss docstring is true only across calls, not across
+child death.
+
+**Why deferred:** only reachable with a misbehaving peer, and the wedge class
+(cluster C) is the same area of the machine; one slice should take both.
+**Suggested approach:** flush parked frames through the fold before reporting
+the decode error, and drain the park on `exited()` before `_reset()`.
+
+## TD-16 (review 0002 finding 17) — out-of-turn permission requests are accepted
+
+**Location:** `src/drei/acp/machine.py` — the `session/request_permission`
+phase gate.
+**Severity:** nit; fail-closed and survivable, flagged for a decision.
+
+The gate admits a permission request in `SESSION_ACTIVE`, so a request
+arriving *after* its turn completed opens a live choice prompt for a dead
+turn — and resolves normally. ACP ties permission requests to a turn ("during
+a turn"); Drei's docstring says "only meaningful inside a live session",
+which is broader. Neither answer is obviously wrong (refusing risks hanging
+an agent that legitimately asks late), so the gate needs a decision and a
+pin, not a drive-by tightening.
+
+**Why deferred:** a protocol-semantics decision for the cluster-C slice.
+**Suggested approach:** decide with the liveness work; if refused, the
+machine answers `cancelled` so the agent never hangs.
+
+## TD-17 (review 0002 finding 12) — registry row numbers are unstable citations
+
+**Location:** `docs/knowledge/emacs-parity.md` (the rows); every "row N"
+citation in prose.
+**Severity:** nit; process debt, no behavior.
+
+Rows have no stable IDs, so every inserted row renumbers its downstream
+neighbours and silently rots every positional citation — slice 20's two
+inserts rotted four. This sweep converted the live citations (in
+`tests/test_harness.py`, `tests/test_exit_prompt.py`) to title-based
+references, but nothing stops the next "row N" from appearing.
+
+**Why deferred:** the durable fix — stable row anchors the machine check can
+resolve, or a lint rule banning positional citations — is tooling work, not
+a docs edit.
+**Suggested approach:** give each row an explicit anchor (`<a id="row-quit">`
+or a `#`-slug convention) and extend `tests/test_parity_registry.py` to
+resolve title/anchor citations; until then, cite rows by title.
+
 ## Paid and removed
 
 *TD-2 (the pump calls nothing on a `KeyboardQuitEvent` — turn cancellation
 wired to nothing) was paid by slice 20 (issue #56, plan
 `agent/plans/0020-turn-cancellation-and-trailing-slash.md`), the last of
-design 0005's five items: the pump reads `KeyboardQuitEvent` out of the
+design 0005's seven decisions: the pump reads `KeyboardQuitEvent` out of the
 command outcome and, with the phase at `PROMPT_IN_FLIGHT`, calls
 `AcpMachine.cancel()` and applies `AbortPendingPermissions`, in 0005 D5's
 order. The ambiguity the entry carried is settled by composition rather than

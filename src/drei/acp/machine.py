@@ -628,6 +628,11 @@ def _handle_inbound_request(
         # Phase gating (B.8, 0010's last deferred note): a permission request
         # is only meaningful inside a live session. Out-of-phase requests are
         # a protocol violation, not a trackable inbound request.
+        # TODO: [tech-debt] TD-16 — "a live session" here is broader than
+        # ACP's "during a turn": a request arriving in SESSION_ACTIVE after
+        # its turn completed opens a live choice prompt for a dead turn.
+        # Fail-closed and survivable, but undecided. See
+        # docs/technical-debt.md.
         if machine.phase not in ("SESSION_ACTIVE", "PROMPT_IN_FLIGHT"):
             return (
                 machine,

@@ -322,12 +322,13 @@ verifier is still waiting for.
 ## Open questions
 
 - ~~**`C-g` overloading.**~~ **Resolved by slice 17:** `C-g` is
-  `keyboard-quit` and `C-x C-c` exits, so D5's trigger is free. What the
+  `keyboard-quit` and `C-x C-c` exits, so D5's trigger is free. ~~What the
   cancellation slice still owes is a decision for `C-g` while a permission
-  prompt is open during a turn — see D5.
-- **Which key sends a prompt.** No key binds an agent command today. The
-  text-prompt variant of §A.4 is the prerequisite; the binding itself is a
-  keymap decision the slice owns.
+  prompt is open during a turn — see D5.~~ **Resolved by slice 20** (D5's
+  banner: at a permission prompt `C-g` denies; the turn is the second `C-g`).
+- ~~**Which key sends a prompt.**~~ **Resolved by slice 16:** `C-c a` opens a
+  text prompt whose accepted text becomes a `session/prompt` (parity
+  registry, `README.md`).
 - **Backpressure toward the agent.** D3 bounds Drei's *rendering* cost, not
   the child's output rate. If a real agent can outrun the pump, the answer is
   ACP-level flow control, not a Drei-side buffer cap. *Trigger:* only if

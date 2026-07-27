@@ -47,6 +47,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         try:
             initial_text = file_port.read(file_path)
         except FileNotFoundError:
+            # TODO: [tech-debt] TD-12 — a missing path with a trailing
+            # separator lands here too, and the empty basename then mints a
+            # buffer literally named "" that no typed C-x b name matches:
+            # the startup boundary never got TD-3's refusal. Fix is to apply
+            # the empty-basename check before this read. See
+            # docs/technical-debt.md.
             # Emacs find-file semantics: a missing file opens an empty
             # buffer that still visits the path.
             initial_text = ""
