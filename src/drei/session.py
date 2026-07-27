@@ -986,7 +986,18 @@ class EditorSession:
         # *semantic* events only. Without this a speaking no-op breaks the
         # kill-append chain, yank_active, and the undo descent — the last is
         # review 0001 finding 2's exact bug, now with a voice.
-        intervened = any(not isinstance(e, Message) for e in events)
+        #
+        # And only a USER command intervenes (plan 0021 D1/D2): peer and
+        # housekeeping dispatches — a resize, an agent-side DisplayBuffer, a
+        # permission presentation — carry semantic events but run no command
+        # in Emacs's last-command sense, so they must not flip an undo
+        # descent into a redo or split a kill-append chain (review 0002
+        # finding 1: finding 2's class again, driven by terminal/peer
+        # timing). Default True so a command that forgets the classification
+        # keeps the pre-slice behavior rather than silently not intervening.
+        intervened = getattr(type(command), "user_issued", True) and any(
+            not isinstance(e, Message) for e in events
+        )
 
         if isinstance(command, KillLine):
             # A kill that emits an event starts/continues the append chain;

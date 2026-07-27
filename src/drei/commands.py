@@ -155,6 +155,10 @@ class ResizeFrame:
     what fits, so the operation is reversible.
     """
 
+    # Plan 0021 D2: never touches last-command bookkeeping (kill chain,
+    # yank-pop, undo descent) — a resize runs no command in Emacs either.
+    user_issued: ClassVar[bool] = False
+
     width: int
     height: int
 
@@ -203,6 +207,9 @@ class DeliverSessionEffects:
     focused is review 0001 finding 5.
     """
 
+    # Plan 0021 D2: peer-dispatched, never touches last-command bookkeeping.
+    user_issued: ClassVar[bool] = False
+
     effects: tuple[SessionEffect, ...]
     buffer_id: BufferId
 
@@ -233,6 +240,9 @@ class InsertAgentText:
     :class:`DeliverSessionEffects`.
     """
 
+    # Plan 0021 D2: peer-dispatched, never touches last-command bookkeeping.
+    user_issued: ClassVar[bool] = False
+
     text: str
     buffer_id: BufferId
 
@@ -253,6 +263,10 @@ class CreateAgentBuffer:
     D3. It does **not** switch focus — the agent buffer appearing must not
     yank the user out of their work.
     """
+
+    # Plan 0021 D2: peer-dispatched, never touches last-command bookkeeping
+    # (its events land on the fresh buffer's state regardless).
+    user_issued: ClassVar[bool] = False
 
     acp_session_id: str
 
@@ -284,6 +298,10 @@ class DisplayBuffer:
     a prompt happened to be open would leave the transcript invisible for the
     rest of the run.
     """
+
+    # Plan 0021 D2: peer-dispatched (the pump shows the agent buffer on
+    # session bind), never touches last-command bookkeeping.
+    user_issued: ClassVar[bool] = False
 
     buffer_id: BufferId
 
@@ -338,6 +356,11 @@ class PromptPermission:
     ``Cancelled`` on abort), recorded as ``PermissionDecided``.
     """
 
+    # Plan 0021 D2: the peer's presentation is not a user command and never
+    # touches last-command bookkeeping; the user's ANSWER (a minibuffer
+    # command) still intervenes (D4).
+    user_issued: ClassVar[bool] = False
+
     request: PermissionRequested
 
 
@@ -354,6 +377,10 @@ class AbortPendingPermissions:
     queue so no prompt is ever presented for a dead turn. An open *text*
     prompt is user state, not turn state, and is left untouched.
     """
+
+    # Plan 0021 D2: turn-initiated, not a user command — never touches
+    # last-command bookkeeping.
+    user_issued: ClassVar[bool] = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,6 +515,9 @@ class DeliverProcessOutput:
     machine-generated deliveries (the ACP pump) cannot record corrupt
     provenance into the transcript.
     """
+
+    # Plan 0021 D2: peer-dispatched, never touches last-command bookkeeping.
+    user_issued: ClassVar[bool] = False
 
     argv: tuple[str, ...]
     result: ProcessResult | None = None  # None on launch failure

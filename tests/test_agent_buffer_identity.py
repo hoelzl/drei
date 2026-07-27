@@ -146,14 +146,16 @@ class TestDeliveryLeavesTheFocusedBufferBookkeepingAlone:
         assert session._states[FOCUSED].undo_descending is False
         assert len(session._states[FOCUSED].undo_history) == 1
 
-    def test_a_delivery_breaks_the_targets_chain_not_the_users(self) -> None:
-        """Both halves of plan 0014 pin 1.
+    def test_a_delivery_breaks_neither_chain(self) -> None:
+        """Both halves of plan 0014 pin 1, restated by plan 0021 D2.
 
-        A delivery of silent effects appends no text, but it is still an
-        event-emitting command, so it intervenes in the kill-append chain — of
-        the buffer it targeted. Before this slice it broke whichever chain the
-        human happened to have open, which is the same ambient-focus defect as
-        the text arm, one block over.
+        Plan 0014's pin was that the delivery intervenes in the TARGET's
+        bookkeeping rather than the focused buffer's. Plan 0021 went
+        further: a delivery is not a user command at all (Emacs's
+        last-command model — process output runs no command), so it
+        intervenes in NEITHER buffer's chain. What survives of the original
+        pin is the ambient-focus defect it guarded: the delivery must still
+        land on its target, never on whichever buffer the human is in.
         """
         session = _session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())  # the human's chain is open
@@ -163,7 +165,7 @@ class TestDeliveryLeavesTheFocusedBufferBookkeepingAlone:
             DeliverSessionEffects((AgentTextChunk(text="x"),), buffer_id=AGENT)
         )
 
-        assert session._states[AGENT].last_was_kill is False  # target's: broken
+        assert session._states[AGENT].last_was_kill is True  # target's: intact
         assert session._states[FOCUSED].last_was_kill is True  # the human's: intact
 
 

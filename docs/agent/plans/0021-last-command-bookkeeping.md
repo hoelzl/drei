@@ -197,14 +197,13 @@ removal note lands in `docs/technical-debt.md`.
 
 ## 8. Risks / open questions
 
-- **Q1 — does a permission *answer* breaking the undo descent need a parity
-  row?** Drei's answers are commands and intervene (D4); Emacs reads answers
-  inside the prompting command, so `last-command` survives. Options: (a)
-  keep + no row (the answer's command-ness is drei's established minibuffer
-  model, already deviation-adjacent); (b) keep + a registry row naming the
-  difference; (c) re-scope answers as non-intervening (minibuffer
-  semantics — a bigger slice). **Recommendation: (b)** — cheap honesty, no
-  behavior risk.
+- ~~**Q1 — does a permission *answer* breaking the undo descent need a parity
+  row?**~~ **Resolved by the owner (2026-07-27): option (b)** — keep the
+  behavior (answers are commands and intervene, D4) and add a registry row
+  naming the difference from Emacs, which reads answers inside the prompting
+  command. Original options: (a) keep + no row; (b) keep + a registry row;
+  (c) re-scope answers as non-intervening (minibuffer semantics — a bigger
+  slice).
 - **Q2 — `ClassVar` on frozen dataclasses.** The command dataclasses are
   frozen with slots; a `ClassVar[bool]` is class-level, unaffected. No
   question, noted for the reviewer.

@@ -259,21 +259,25 @@ class TestMinibufferDoesNotSwallowDeliveries:
 
 
 class TestDeliveriesAndTheKillChain:
-    """An event-emitting delivery breaks the kill-append chain of the buffer
-    it targeted (the chain rule is 'event-emitting commands intervene'), and
-    a command that emits nothing intervenes in nothing. Pinned as deliberate.
+    """A delivery is not a user command (plan 0021 D2): it intervenes in no
+    buffer's kill-append chain — not the focused buffer's (plan 0014 pin 1,
+    pinned in ``test_agent_buffer_identity.py`` where the two buffers are
+    distinct) and not its own target's (here the agent buffer is the focused
+    one). Emacs agrees: process output runs no command and leaves
+    last-command alone. Only a command that emits semantic events *and* is
+    user-issued intervenes; a command that emits nothing intervenes in
+    nothing. Pinned as deliberate.
 
-    That the broken chain is the *target's* and not the focused buffer's is
-    plan 0014 pin 1, pinned in ``test_agent_buffer_identity.py`` where the two
-    buffers are distinct; here the agent buffer is the focused one.
+    Pre-slice the target's chain WAS pinned as broken — the old event-shape
+    rule, and review 0002 finding 1's bug class pinned as behavior.
     """
 
-    def test_fold_only_delivery_breaks_its_targets_chain(self) -> None:
+    def test_fold_only_delivery_does_not_break_its_targets_chain(self) -> None:
         session = make_session(text="aa\nbb\n", point=0)
         session.dispatch(KillLine())
         session.dispatch(DeliverSessionEffects((AgentTextChunk(text="x"),), AGENT))
         session.dispatch(KillLine())
-        assert session.kill_ring == ("\n", "aa")  # two entries: chain broken
+        assert session.kill_ring == ("aa\n",)  # one entry: chain intact
 
     def test_a_silent_noop_does_not_break_the_chain(self) -> None:
         """Plan 0014 pin 2. This rule used to be pinned *through* a delivery:
