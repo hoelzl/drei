@@ -196,6 +196,56 @@ def test_shipped_editor_runs_an_agent_turn(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_cancels_a_held_turn_with_c_g(tmp_path: Path) -> None:
+    """Plan 0020 §1's first acceptance scenario: `C-g` stops a turn.
+
+    The fake agent holds its answer, so the turn is genuinely in flight when
+    `C-g` lands: `Quit` on the echo row, `session/cancel` on the wire, and
+    the transcript's `── end turn (cancelled) ──` read off the shipped
+    frame. A fresh `ping` turn afterwards proves the editor and the agent
+    both survived.
+
+    The pre-`C-g` settle is sound: the `*agent*` modeline is written only
+    after the pump's `receive` returns, and the same receive binds the
+    session and sends the prompt — so a visible `Drei: *agent*` means the
+    phase is already PROMPT_IN_FLIGHT, never a race against it.
+    """
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-agent-cancel", _configuration())
+        assert type(started) is Started, started
+
+        _chord(adapter, "Control", "c")
+        _type(adapter, "a")
+        _type(adapter, "hold")
+        submitted = _chord(adapter, "Enter")
+        assert all("Agent: " not in line for line in submitted), submitted
+
+        # The buffer appears ⟹ the prompt is in flight (docstring).
+        _settle_until(adapter, "Drei: *agent*")
+
+        quit_lines = _chord(adapter, "Control", "g")
+        assert quit_lines[-1].startswith("Quit"), quit_lines
+
+        cancelled = _settle_until(adapter, "end turn (cancelled)")
+        assert any("end turn (cancelled)" in line for line in cancelled), cancelled
+
+        # Recovery: a fresh turn runs and answers.
+        _chord(adapter, "Control", "c")
+        _type(adapter, "a")
+        _type(adapter, "ping")
+        _chord(adapter, "Enter")
+        answered = _settle_until(adapter, "echo ping")
+        assert any("echo ping" in line for line in answered), answered
+
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_survives_an_agent_that_will_not_start(tmp_path: Path) -> None:
     """`drei` on a machine with no agent installed is still an editor.
 

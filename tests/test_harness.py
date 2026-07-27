@@ -133,6 +133,31 @@ def test_harness_find_file_failure_echoes_token_then_clears() -> None:
     assert harness.observation.text == "a"
 
 
+def test_harness_trailing_slash_find_file_echoes_the_refusal() -> None:
+    """Plan 0020 §1's second acceptance scenario (TD-3).
+
+    `C-x C-f notes/ RET` closes the prompt and says `notes/:
+    empty-basename` on the echo row, where it used to open a buffer named
+    `""` that unsaved edits could never be reached from again. The buffer
+    is untouched — and, being a name judgment, the refusal needs no file
+    port at all (a read would answer `permission-denied`).
+    """
+    from conftest import FakeFilePort
+
+    port = FakeFilePort(fail_read="permission")
+    harness = EditorHarness(width=40, height=6, file_port=port)
+    harness.send("C-x")
+    harness.send("C-f")
+    for char in "notes/":
+        harness.send(char)
+    outcome = harness.send("RET")
+
+    assert outcome is not None
+    assert harness.observation.minibuffer is None  # the prompt CLOSES
+    assert harness.observation.text == ""  # the buffer is untouched
+    assert harness.frame.rows[-1].startswith("notes/: empty-basename")
+
+
 def test_message_text_formats_through_the_token_table() -> None:
     """The one formatting seam (plan 0019 D1).
 

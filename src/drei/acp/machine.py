@@ -296,11 +296,11 @@ def cancel(
     recorded as ``PermissionResolved(granted=False)``. Only permission
     requests are ever tracked in ``in_flight_incoming`` (fs/terminal requests
     are refused immediately), so the sweep answers every entry.
+
+    The trigger (TD-2, paid by slice 20): the pump calls this on a
+    ``KeyboardQuitEvent`` while the phase is ``PROMPT_IN_FLIGHT`` — `C-g`
+    while a turn is in flight (design 0005 D5, plan 0020 D1).
     """
-    # TODO: [tech-debt] TD-2 — nothing calls this. The pump (plan 0016) drives
-    # everything else in design 0005, but a turn in flight still cannot be
-    # stopped except by quitting the editor, because the trigger 0005 D5 wants
-    # is `C-g` and `C-g` currently *exits*. See docs/technical-debt.md.
     if machine.phase != "PROMPT_IN_FLIGHT":
         raise AcpStateError(f"cancel() requires PROMPT_IN_FLIGHT, got {machine.phase}")
     out: list[Message] = [

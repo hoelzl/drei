@@ -112,6 +112,55 @@ def test_a_real_child_answers_a_real_prompt(tmp_path: Path) -> None:
         consumer.thread.join(timeout=5)
 
 
+def test_c_g_cancels_a_held_turn_and_the_next_prompt_still_works(
+    tmp_path: Path,
+) -> None:
+    """Design 0005 D5 end to end (plan 0020 V3): a real child holding a turn
+    open, a real `C-g`, `session/cancel` on the real wire, and the protocol's
+    `cancelled` answer ending the turn in the transcript. The wire *order*
+    (cancel before any further prompt) is pinned at layer 1
+    (`test_pump.TestTurnCancellation`); what this proves is that nothing
+    between the key and the child drops it — and that the editor and agent
+    both survive to run the next turn."""
+    stream = EventQueue()
+    harness = EditorHarness(width=60, height=10)
+    pump = AgentPump(
+        SystemStreamingProcessPort(),
+        stream,
+        argv=AGENT_ARGV,
+        cwd=str(tmp_path),
+        start_channel=AgentIo,
+    )
+    consumer = _Consumer(stream, pump, harness)
+    try:
+        pump.submit("hold", harness)
+        _await(consumer, lambda: pump.phase == "PROMPT_IN_FLIGHT")
+
+        outcome = harness.send("C-g")
+        assert outcome is not None
+        pump.after_command(outcome, harness)
+
+        _await(
+            consumer,
+            lambda: (
+                "end turn (cancelled)"
+                in _text(harness, harness.agent_buffer_id("fake-session"))
+            ),
+        )
+
+        pump.submit("ping", harness)
+        _await(
+            consumer,
+            lambda: (
+                "echo ping" in _text(harness, harness.agent_buffer_id("fake-session"))
+            ),
+        )
+    finally:
+        pump.close()
+        stream.close()
+        consumer.thread.join(timeout=5)
+
+
 def test_the_childs_stderr_reaches_the_diagnostics_buffer(tmp_path: Path) -> None:
     """The line the fake agent writes before it answers anything. A real
     `hermes acp` on a misconfigured machine says why it is dying here, and a

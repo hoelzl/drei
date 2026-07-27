@@ -217,6 +217,39 @@ def test_open_failed_on_read_error_leaves_buffer_untouched() -> None:
     assert session.buffer.current.text == "untouched"
 
 
+def test_trailing_slash_find_file_is_refused_before_any_read() -> None:
+    """TD-3 (plan 0020 D5): an empty basename is refused at the boundary.
+
+    `C-x C-f notes/ RET` used to create a buffer named `""` that no
+    `C-x b` input could ever address again. The accept now emits
+    `OpenFailed` with a Drei-owned token — and the port is never asked to
+    read: a trailing slash is a *name* judgment, not a filesystem result
+    (`fail_read` would answer `permission-denied` if the read happened).
+    """
+    files = FakeFilePort(fail_read="permission")
+    session = _session(files=files, text="untouched")
+    session.dispatch(FindFile())
+    for char in "notes/":
+        session.dispatch(MinibufferInput(char))
+    outcome = session.dispatch(MinibufferAccept())
+    assert outcome.events == (OpenFailed("notes/", "empty-basename"),)
+    assert session.minibuffer is None
+    assert session.buffer.current.text == "untouched"
+    assert set(session._buffers) == {BufferId("scratch")}
+
+
+def test_trailing_backslash_find_file_is_refused_the_same_way() -> None:
+    """The Windows separator normalizes before the basename check."""
+    files = FakeFilePort(fail_read="permission")
+    session = _session(files=files, text="keep")
+    session.dispatch(FindFile())
+    for char in "C:\\docs\\":
+        session.dispatch(MinibufferInput(char))
+    outcome = session.dispatch(MinibufferAccept())
+    assert outcome.events == (OpenFailed("C:\\docs\\", "empty-basename"),)
+    assert set(session._buffers) == {BufferId("scratch")}
+
+
 def test_binary_file_open_fails_without_crash() -> None:
     files = FakeFilePort(fail_read="binary")
     session = _session(files=files, text="keep")
