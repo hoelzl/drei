@@ -103,13 +103,14 @@ from the shipped editor, along the boundaries
   stderr and any launch failure go to an `*agent-log*` buffer as normalized
   tokens, and `run_editor`'s `finally` terminates it.
 
-What remains unwired is turn **cancellation** — the machine's sweep and
-`AbortPendingPermissions` both exist and nothing triggers them
-(`docs/technical-debt.md` TD-2). Slice 17 removed the blocker: `C-g` is
-`keyboard-quit` now rather than the exit key, so it is free to mean "cancel
-the turn in flight". Slice 18 took one claim on that key without settling the
-question: `C-g` at an exit prompt abandons the exit, and the cancellation
-slice owns the choice for the state where both readings apply. It also fixed
+Turn **cancellation** is wired (slice 20, TD-2 paid): with a turn in flight,
+`C-g` writes `session/cancel`, answers every pending permission request
+`cancelled`, and clears the presentation, in design 0005 D5's order — the
+pump reads `KeyboardQuitEvent` out of the command outcome, so the session
+still holds no machine. One `C-g` peels one layer: at a permission prompt it
+is the shipped deny (slice 18 left one claim on that key: `C-g` at an exit
+prompt abandons the exit), so the turn is the second `C-g`; an exit or text
+prompt peels first; a pending prefix peels with the turn. Slice 18 also fixed
 what an exit owes the agent — a `session/request_permission` that queues
 behind an exit prompt is presented if the exit is abandoned and dropped if it
 completes, because a request left pending hangs the agent for the rest of a

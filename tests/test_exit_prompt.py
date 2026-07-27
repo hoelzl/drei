@@ -180,7 +180,8 @@ def test_n_at_the_offer_leads_to_the_exit_gate() -> None:
 
 
 def test_c_g_at_the_gate_says_quit() -> None:
-    """Plan 0019 acceptance scenario 3 (row 92): `C-g` at the gate abandons
+    """Plan 0019 acceptance scenario 3 (the Quit/MinibufferAborted registry
+    row): `C-g` at the gate abandons
     the exit, and the echo says `Quit` — because that is what happened. The
     refusal (`n`) is silent, which is now *honest* silence: the transcript
     carries `ExitRefused` for it."""

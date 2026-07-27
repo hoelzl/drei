@@ -444,6 +444,10 @@ class EditorSession:
         self._buffers: dict[BufferId, Buffer] = {buffer.buffer_id: buffer}
         self._current_id: BufferId = buffer.buffer_id
         self._states: dict[BufferId, _BufferState] = {buffer.buffer_id: initial_state}
+        # TODO: [tech-debt] TD-14 — the initial frame size enters the state
+        # with no event, so a replay cannot reproduce a split-or-no-op
+        # decision made before the first FrameResized. See
+        # docs/technical-debt.md.
         self._frame_size = frame_size
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
         self._processes: ProcessPort = (
@@ -478,7 +482,8 @@ class EditorSession:
         # untouched. The path is carried alongside the id rather than re-read
         # at prompt time: it is what made the buffer eligible, so pairing them
         # makes "a pending buffer always has a path" a type rather than an
-        # invariant a later slice could quietly break (review 0002 finding 10).
+        # invariant a later slice could quietly break (a slice-18 review
+        # observation; review 0002 finding 15 maps these citations).
         self._exit_pending: list[tuple[BufferId, str]] = []
         # Permission requests that arrived while a prompt was open, in order.
         # Grows only while a prompt is open and drains on resolution; in

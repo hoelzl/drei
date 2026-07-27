@@ -67,7 +67,8 @@ def test_harness_records_unresolved_keys() -> None:
     assert len(unresolved_before) == 0
     assert len(harness.outcomes) == 0
     # A non-completing second key records the whole sequence as unresolved —
-    # and says so (row 134, D7): the harness composes "<chord> is undefined"
+    # and says so (the composed-unresolved-key registry row, D7): the
+    # harness composes "<chord> is undefined"
     # itself, since no command ever reaches the session.
     harness.send("C-z")
     assert harness.observation.text == ""
@@ -191,7 +192,9 @@ def test_message_text_formats_through_the_token_table() -> None:
 def test_an_exhausted_undo_speaks_on_the_echo_row_then_clears() -> None:
     """The end-to-end pin for `_echo_for`'s Message branch (plan 0019 D1/D6).
 
-    Registry rows 66/68/72/80/98 each pin their token at the session and the
+    The token-table registry rows (end-of-buffer, previous-command-not-a-yank,
+    mark-not-set, no-further-undo, too-small-for-splitting) each pin their
+    token at the session and the
     table in `test_message_text_formats_through_the_token_table`; this is
     the one that drives a plain message — no prompt involved — from a key to
     the echo row, so the "echoed as …" half of those rows is not pinned

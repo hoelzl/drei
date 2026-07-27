@@ -2,10 +2,10 @@
 
 **Status:** accepted — the binding (D2), the buffer kind (D3), no-file (D4),
 tail-follow (D5) and the per-buffer fold shipped in plan
-`0014-agent-buffer-identity.md`, which paid TD-1. Two parts remain open by
-design: D1's **trigger** — nothing folds `SessionEstablished` into a creation
-yet; `CreateAgentBuffer` exists and has no production caller until the pump
-(design 0005) — and D6 (editability), which belongs to §A.3.
+`0014-agent-buffer-identity.md`, which paid TD-1. D1's **trigger** shipped in
+slice 16: the pump folds `SessionEstablished` into `CreateAgentBuffer`
+(`pump.py:423-424,440-441`). One part remains open by design: D6
+(editability), which belongs to §A.3.
 **Builds on:** `0003-hermes-drei-integration.md`
 **Does not revise:** 0001/0002/0003. It supplies a binding 0003 named but never
 defined.
@@ -74,9 +74,9 @@ Rejected alternatives:
   `C-x b *agent*` works or does not depending on timing. Existence should
   depend on the session, which is an event, not on output, which is a race.
 
-**Implementation note (plan 0014).** The trigger is not wired: creation is the
-`CreateAgentBuffer` command, which the pump will dispatch. One ordering fact
-the pump must handle, found while implementing: `initialize` emits
+**Implementation note (plan 0014).** The trigger was wired by slice 16 (the
+pump dispatches `CreateAgentBuffer` on `SessionEstablished`). One ordering
+fact the pump must handle, found while implementing: `initialize` emits
 `Initialized` **before** any session id exists, so at that moment there is no
 agent buffer to deliver it to, and a delivery now *requires* a target. Both
 `Initialized` and `SessionEstablished` render the empty string, so dropping

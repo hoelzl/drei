@@ -224,8 +224,10 @@ class InsertAgentText:
 
     Not a user edit: the buffer's ``modified`` flag is untouched and no undo
     group is created (undo of an external stream is incoherent with the
-    fold-of-effects invariant — parity registry row). Point moves to the new
-    end so a visible agent buffer tracks the stream.
+    fold-of-effects invariant — parity registry row). Point follows the
+    stream only when it was already at the tail (tail-follow, design 0004
+    D5), so a user scrolled back in a visible agent buffer is not dragged to
+    the end.
 
     ``buffer_id`` names the target explicitly — see
     :class:`DeliverSessionEffects`.
@@ -270,9 +272,12 @@ class DisplayBuffer:
     buffer's *identity* is bound when the ACP session is established, and where
     it is *shown* is a presentation decision the caller makes.
 
-    A frame too small to split is a silent no-op. The buffer still exists and
-    `C-x b` still reaches it; what it does not do is destroy the user's only
-    window to make room.
+    A frame too small to split is a silent no-op — on screen. TODO:
+    [tech-debt] TD-13 — the dispatch records ``Message("too-small-for-splitting")``
+    into the transcript even though the user issued no command; invisible
+    only because ``harness.apply`` does not recompute the echo. The buffer
+    still exists and `C-x b` still reaches it; what it does not do is
+    destroy the user's only window to make room.
 
     Delivery-class (agent-initiated), exempt from the minibuffer gate: the
     session is established on the peer's schedule, and swallowing this because

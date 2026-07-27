@@ -392,6 +392,10 @@ class AgentPump:
         return True
 
     def _drain(self, effects: list[SessionEffect]) -> list[JsonValue]:
+        # TODO: [tech-debt] TD-15 — frames parked across a malformed line
+        # flush only on the NEXT receive (so a protocol error can render
+        # before the turn completion that preceded it) and are silently
+        # discarded if the child dies first. See docs/technical-debt.md.
         try:
             return self._decoder.messages()
         except AcpDecodeError as error:
