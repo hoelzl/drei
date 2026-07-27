@@ -130,6 +130,13 @@ class EditorHarness:
         as the prompt stayed open, and the prompt itself lives on the echo row
         whose position depends on the height.
 
+        TODO: [tech-debt] TD-18 — the paragraph above is ASPIRATION, not fact:
+        the harness bypasses its own key-routing gate, but the session-level
+        gate (ResizeFrame is not exempt) still swallows the dispatch while a
+        prompt is open, and this method then records the new size locally
+        anyway — harness and session disagree about the frame for as long as
+        the prompt stays open.
+
         The echo message is left alone: a resize is not a user action and must
         not wipe an outstanding message the way a command does.
         """

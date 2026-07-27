@@ -87,6 +87,23 @@ class TestUserCommandBookkeeping:
         session.dispatch(Undo())
         assert session.buffer.current.text == ""
 
+    def test_a_display_buffer_through_the_pump_seam_does_not_flip_the_descent(
+        self,
+    ) -> None:
+        """Pump-seam arm (plan 0021's acceptance criterion: "pinned at session
+        and pump level"): harness.apply is exactly how the pump dispatches
+        DisplayBuffer — review 0002's repro path. The split SUCCEEDS here, so
+        the dispatch carries a WindowSplit semantic event, and the descent
+        still survives."""
+        harness = EditorHarness(width=80, height=24)
+        for char in "abc":
+            harness.send(char)
+        harness.send("C-/")
+        harness.send("C-/")
+        harness.apply(DisplayBuffer(BufferId("scratch")))
+        harness.send("C-/")
+        assert harness.observation.text == ""
+
     def test_a_permission_presentation_and_its_abort_do_not_flip_the_descent(
         self,
     ) -> None:
