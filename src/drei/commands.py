@@ -286,10 +286,9 @@ class DisplayBuffer:
     buffer's *identity* is bound when the ACP session is established, and where
     it is *shown* is a presentation decision the caller makes.
 
-    A frame too small to split is a silent no-op — on screen. TODO:
-    [tech-debt] TD-13 — the dispatch records ``Message("too-small-for-splitting")``
-    into the transcript even though the user issued no command; invisible
-    only because ``harness.apply`` does not recompute the echo. The buffer
+    A frame too small to split is a silent no-op (plan 0021 D3 made this
+    true — TD-13: it used to record ``Message("too-small-for-splitting")``
+    into the transcript although the user issued no command). The buffer
     still exists and `C-x b` still reaches it; what it does not do is
     destroy the user's only window to make room.
 
