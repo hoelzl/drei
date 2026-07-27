@@ -19,7 +19,6 @@ from drei.commands import (
     BufferDisplayed,
     CreateGeneratedBuffer,
     DisplayBuffer,
-    Message,
     SplitWindow,
     WindowSplit,
 )
@@ -94,14 +93,17 @@ def test_the_displayed_window_starts_at_the_top_of_the_buffer() -> None:
 def test_a_frame_too_small_to_split_shows_nothing_and_breaks_nothing() -> None:
     """The buffer still exists and `C-x b` still reaches it. Destroying the
     user's only window to make room for agent output would be a worse answer
-    than not showing it."""
+    than not showing it.
+
+    Genuinely silent (plan 0021 D3, TD-13 paid): the user issued no command,
+    so the transcript records no Message — the row-98 refusal sentence
+    belongs to the user's own `C-x 2`
+    (`test_windows.py::test_split_too_small_is_a_noop`, unchanged)."""
     session = _session(frame=(40, 4))  # below (1 + 1) * 3 + 1
 
     outcome = session.dispatch(DisplayBuffer(SHOWN))
 
-    # Nothing is shown — and the refusal says why (row 98): a Message that
-    # breaks nothing.
-    assert outcome.events == (Message("too-small-for-splitting"),)
+    assert outcome.events == ()
     assert len(session.windows) == 1
     assert session.windows[0].buffer_id == FOCUSED
 

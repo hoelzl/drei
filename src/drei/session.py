@@ -986,7 +986,18 @@ class EditorSession:
         # *semantic* events only. Without this a speaking no-op breaks the
         # kill-append chain, yank_active, and the undo descent — the last is
         # review 0001 finding 2's exact bug, now with a voice.
-        intervened = any(not isinstance(e, Message) for e in events)
+        #
+        # And only a USER command intervenes (plan 0021 D1/D2): peer and
+        # housekeeping dispatches — a resize, an agent-side DisplayBuffer, a
+        # permission presentation — carry semantic events but run no command
+        # in Emacs's last-command sense, so they must not flip an undo
+        # descent into a redo or split a kill-append chain (review 0002
+        # finding 1: finding 2's class again, driven by terminal/peer
+        # timing). Default True so a command that forgets the classification
+        # keeps the pre-slice behavior rather than silently not intervening.
+        intervened = getattr(type(command), "user_issued", True) and any(
+            not isinstance(e, Message) for e in events
+        )
 
         if isinstance(command, KillLine):
             # A kill that emits an event starts/continues the append chain;
@@ -1392,18 +1403,24 @@ class EditorSession:
         events.append(AgentTextInserted(text, before, after, target.value))
         return new_value
 
-    def _split_window(self, events: list[Event]) -> BufferValue:
+    def _split_window(self, events: list[Event], *, speak: bool = True) -> BufferValue:
         """C-x 2 (plan 0012 D3): split the focused window into two stacked
         halves over the same buffer; both inherit the buffer's current
         point/mark (probed vs pinned 29.3, evidence 4). Needs at least
         MIN_WINDOW_ROWS per window plus the shared echo row when the frame
         size is known; a too-small frame says so (row 98 — Emacs errors
         'too small for splitting', evidence 6) and splits nothing. An unknown
-        frame size stays unconstrained and silent."""
+        frame size stays unconstrained and silent.
+
+        ``speak=False`` (plan 0021 D3, TD-13 paid): a caller the user did not
+        invoke — ``_display_buffer``, pump-dispatched on the peer's schedule —
+        splits nothing and says nothing; the refusal sentence belongs to the
+        user's own C-x 2."""
         if self._frame_size is not None:
             _, height = self._frame_size
             if height < (len(self._windows) + 1) * MIN_WINDOW_ROWS + 1:
-                events.append(Message("too-small-for-splitting"))
+                if speak:
+                    events.append(Message("too-small-for-splitting"))
                 return self.buffer.current
         focused = self._windows[self._focused]
         # The new window copies the FOCUSED WINDOW's point/mark (not the
@@ -1434,7 +1451,9 @@ class EditorSession:
             raise ValueError(f"display target: no such buffer {buffer_id.value!r}")
         if len(self._windows) == 1:
             before = len(self._windows)
-            self._split_window(events)
+            # Not the user's split: a refused one is genuinely silent (plan
+            # 0021 D3) — no Message about a command the user never issued.
+            self._split_window(events, speak=False)
             if len(self._windows) == before:
                 return  # the frame cannot hold two windows
         target = (self._focused + 1) % len(self._windows)

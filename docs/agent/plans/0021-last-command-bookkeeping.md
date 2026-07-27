@@ -1,6 +1,25 @@
 # Twenty-first slice: last-command bookkeeping keys on user commands (review 0002 cluster A)
 
-**Status:** ready (issue #63).
+**Status:** implemented (issue #63).
+
+> **What the plan got wrong (honesty record, amended at the gate):**
+>
+> 1. §5 predicted "**none**" for pins that change. The V1 sweep found five:
+>    four pins asserting the old event-shape rule for *deliveries* —
+>    `test_delivery_breaks_kill_append_chain` and
+>    `test_delivery_breaks_undo_descent` (process deliveries breaking the
+>    FOCUSED buffer's bookkeeping — finding 1's exact bug class, pinned as
+>    behavior when the process-session slice landed),
+>    `test_fold_only_delivery_breaks_its_targets_chain`, and
+>    `test_a_delivery_breaks_the_targets_chain_not_the_users` (slice 14's
+>    "pinned as deliberate", which recorded the old rule's mechanism rather
+>    than an Emacs semantic) — plus the TD-13 pin §5 did name as a
+>    possibility. All four delivery pins flipped to Emacs's last-command
+>    semantics with their histories in their docstrings. The §2 claim
+>    "deliveries are already safe" was true only for the *focused* buffer's
+>    state when the target is distinct; the target's own chains still broke.
+> 2. §2's claimer list omitted `run_process`'s delivery path entirely — the
+>    oldest instance of the bug, pinned since the process-session slice.
 
 **Architecture gate:** review 0002
 (`agent/reviews/0002-adversarial-review-2026-07-27.md`) **cluster A, finding
@@ -197,14 +216,13 @@ removal note lands in `docs/technical-debt.md`.
 
 ## 8. Risks / open questions
 
-- **Q1 — does a permission *answer* breaking the undo descent need a parity
-  row?** Drei's answers are commands and intervene (D4); Emacs reads answers
-  inside the prompting command, so `last-command` survives. Options: (a)
-  keep + no row (the answer's command-ness is drei's established minibuffer
-  model, already deviation-adjacent); (b) keep + a registry row naming the
-  difference; (c) re-scope answers as non-intervening (minibuffer
-  semantics — a bigger slice). **Recommendation: (b)** — cheap honesty, no
-  behavior risk.
+- ~~**Q1 — does a permission *answer* breaking the undo descent need a parity
+  row?**~~ **Resolved by the owner (2026-07-27): option (b)** — keep the
+  behavior (answers are commands and intervene, D4) and add a registry row
+  naming the difference from Emacs, which reads answers inside the prompting
+  command. Original options: (a) keep + no row; (b) keep + a registry row;
+  (c) re-scope answers as non-intervening (minibuffer semantics — a bigger
+  slice).
 - **Q2 — `ClassVar` on frozen dataclasses.** The command dataclasses are
   frozen with slots; a `ClassVar[bool]` is class-level, unaffected. No
   question, noted for the reviewer.

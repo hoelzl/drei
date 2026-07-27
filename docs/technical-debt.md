@@ -154,26 +154,33 @@ doing the refusal twice invites divergence; the two should be paid together.
 `empty-basename` vocabulary (exit 2 with the token on stderr — the startup
 path has no echo row).
 
-## TD-13 (review 0002 finding 6) — `DisplayBuffer`'s "silent no-op" records a message anyway
+## TD-18 (slice-21 review) — a resize during an open prompt is swallowed, and the harness doesn't notice
 
-**Location:** `src/drei/session.py` `_display_buffer` → `_split_window`;
-contract at `src/drei/commands.py` (`DisplayBuffer` docstring).
-**Severity:** minor; transcript pollution only — the message never reaches
-the echo row.
+**Location:** `src/drei/harness.py` `resize` (docstring carries the TODO
+marker); the swallowing gate at `src/drei/session.py` (the minibuffer gate —
+`ResizeFrame` is not on the exempt list).
+**Severity:** minor; transient presentation divergence, self-healing on the
+next resize or prompt close.
 
-The docstring and design 0005 D6 promise "shows nothing and breaks nothing"
-on a frame too small to split, but the dispatch records
-`Message("too-small-for-splitting")` — a message about a command the user
-never issued — into the event record. It is invisible only because
-`harness.apply` does not recompute the echo for pump-dispatched commands;
-replay and the transcript see it.
+`harness.resize`'s docstring promises "the minibuffer gate never sees it" —
+routing around the *harness's own* key gate. But the session-level gate still
+swallows the `ResizeFrame` dispatch while any prompt is open (the command
+emits nothing; slice-21 review probed: gate swallowed, session frame size
+unchanged). Worse, `resize` then assigns the new `self._width`/`self._height`
+unconditionally, so the harness renders against a size the session does not
+hold until the prompt closes — exactly the stale-frame hazard the docstring
+says the routing avoids, plus a harness/session disagreement. Slice 15/16
+vintage; slice 21's classification makes the *bookkeeping* side safe either
+way (a swallowed or landed resize intervenes in nothing), but the frame
+divergence is real.
 
-**Why deferred:** the choice — suppress the message for non-user dispatches,
-or amend the contract to admit it — interacts with cluster A's
-user-command classification (review 0002 finding 1): once commands carry a
-user/internal distinction, the message emission can key on it.
-**Suggested approach:** fix with cluster A; suppress the message when the
-split was not user-issued.
+**Why deferred:** pre-existing and out of the slice-21 diff; the fix touches
+the gate's exempt list, which the prompt-gating invariants pin heavily, so it
+deserves its own slice-sized look rather than a review-week drive-by.
+**Suggested approach:** exempt `ResizeFrame` from the session gate (it acts on
+frame state, not buffer state, and post-slice-21 its events intervene in
+nothing), or have `resize` read the applied size back from the session instead
+of assuming. The first matches the docstring's intent.
 
 ## TD-14 (review 0002 finding 7) — the initial frame size is not in the event record
 
@@ -250,6 +257,15 @@ or a `#`-slug convention) and extend `tests/test_parity_registry.py` to
 resolve title/anchor citations; until then, cite rows by title.
 
 ## Paid and removed
+
+*TD-13 (`DisplayBuffer`'s "silent no-op" recorded
+`Message("too-small-for-splitting")` into the transcript although the user
+issued no command) was paid by slice 21 (issue #63, plan
+`agent/plans/0021-last-command-bookkeeping.md` D3), exactly as its entry
+suggested: `_split_window` gained `speak: bool`, and `_display_buffer` —
+pump-dispatched on the peer's schedule — passes `False`. The user's own
+`C-x 2` refusal still says `too-small-for-splitting`
+(`test_windows.py::test_split_too_small_is_a_noop`, unchanged).*
 
 *TD-2 (the pump calls nothing on a `KeyboardQuitEvent` — turn cancellation
 wired to nothing) was paid by slice 20 (issue #56, plan

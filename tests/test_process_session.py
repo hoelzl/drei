@@ -148,26 +148,31 @@ def test_delivery_leaves_kill_ring_and_yank_intact() -> None:
     )
 
 
-def test_delivery_breaks_kill_append_chain() -> None:
+def test_delivery_does_not_break_kill_append_chain() -> None:
+    """A process delivery is not a user command (plan 0021 D2): it emits an
+    event but intervenes nowhere, matching Emacs, where process output runs
+    no command and leaves last-command alone. Pre-slice this pin asserted
+    the break — the old event-shape rule's own mechanism, and review 0002
+    finding 1's bug class pinned as behavior."""
     session = _session("one\ntwo\n", 0)
     session.dispatch(KillLine())  # kills "one", point stays 0
     session.dispatch(KillLine())  # chained: kills "\n", appends to ring[0]
-    session.run_process(("cmd",))  # event-emitting: breaks the chain
-    session.dispatch(KillLine())  # kills "two" as a NEW entry, not appended
-    assert session.kill_ring[0] == "two"
-    assert session.kill_ring[1] == "one\n"
+    session.run_process(("cmd",))  # not a command: the chain survives
+    session.dispatch(KillLine())  # kills "two", still appending
+    assert session.kill_ring == ("one\ntwo",)
 
 
-def test_delivery_breaks_undo_descent() -> None:
+def test_delivery_does_not_break_undo_descent() -> None:
+    """Same rule for the descent: a delivery mid-descent does not flip the
+    next undo into a redo (review 0002 finding 1, the critical arm)."""
     session = _session()
     session.dispatch(InsertText("a"))
     session.dispatch(InsertText("b"))
     session.dispatch(Undo())  # undoes "b", now descending
-    session.run_process(("cmd",))  # event-emitting: flips direction to redo
+    session.run_process(("cmd",))  # not a command: the descent continues
     outcome = session.dispatch(Undo())
-    # Direction flipped: this redo re-applies "b".
-    assert any(type(e).__name__ == "TextRedone" for e in outcome.events)
-    assert session.buffer.current.text == "ab"
+    assert any(type(e).__name__ == "TextUndone" for e in outcome.events)
+    assert session.buffer.current.text == ""
 
 
 def test_delivery_does_not_set_modified() -> None:
