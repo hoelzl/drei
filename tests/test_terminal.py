@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -22,17 +23,24 @@ from drei.input import (
 )
 from drei.terminal import (
     _CLEAR_SCREEN,
-    READINESS_MARKER,
+    READINESS_MARKER_PREFIX,
     TerminalPort,
     TerminalReaders,
     run_editor,
 )
 
 
+@pytest.fixture(autouse=True)
+def _production_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep ambient TermVerify cooperation out of direct terminal tests."""
+    monkeypatch.delenv("TERMVERIFY_SEED", raising=False)
+
+
 class FakePort(TerminalPort):
     def __init__(self, inputs: list[str]) -> None:
         self.inputs = list(inputs)
         self.outputs: list[str] = []
+        self.journal: list[tuple[str, str | None]] = []
         self.restored = False
         self.raw_entered = False
 
@@ -44,9 +52,10 @@ class FakePort(TerminalPort):
 
     def write(self, text: str) -> None:
         self.outputs.append(text)
+        self.journal.append(("write", text))
 
     def flush(self) -> None:
-        pass
+        self.journal.append(("flush", None))
 
     def get_size(self) -> tuple[int, int]:
         return (10, 3)
@@ -93,6 +102,12 @@ def run_with_keys(port: FakePort, **kwargs: object) -> None:
     run_editor(port, events=scripted(keys(*port.inputs)), **kwargs)  # type: ignore[arg-type]
 
 
+def readiness_markers(port: FakePort) -> list[str]:
+    return re.findall(
+        rf"{re.escape(READINESS_MARKER_PREFIX)}[0-9]+>>", "".join(port.outputs)
+    )
+
+
 def test_editor_writes_readiness_and_exits_on_c_x_c_c() -> None:
     port = FakePort(["\x18", "\x03"])
     run_with_keys(port)
@@ -101,7 +116,133 @@ def test_editor_writes_readiness_and_exits_on_c_x_c_c() -> None:
     assert port.raw_entered
 
 
-def test_c_g_does_not_end_the_run() -> None:
+def test_production_run_uses_full_height_and_emits_no_cooperation_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TERMVERIFY_SEED", raising=False)
+    port = FakePort(["\x18", "\x03"])
+
+    run_with_keys(port)
+
+    written = "".join(port.outputs)
+    assert "termverify.ready" not in written
+    assert "\x1b]7791;" not in written
+    assert len(_frame_rows(port)[0]) == 3
+
+
+def test_verification_run_reserves_bottom_row_and_restores_cursor_after_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Presence, not truthiness, enables cooperation.
+    monkeypatch.setenv("TERMVERIFY_SEED", "")
+    port = FakePort([])
+    port.get_size = lambda: (40, 3)  # type: ignore[method-assign]
+
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted([]))
+
+    marker_write = "\x1b[3;1H<<termverify.ready:0>>\x1b[1;1H"
+    assert len(_frame_rows(port)[0]) == 2
+    marker_index = port.journal.index(("write", marker_write))
+    assert port.journal[marker_index + 1] == ("flush", None)
+
+
+def test_verification_tokens_are_monotonic_across_completed_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
+    port = FakePort([])
+
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted(keys("a", "\x07")))
+
+    assert readiness_markers(port) == [
+        "<<termverify.ready:0>>",
+        "<<termverify.ready:1>>",
+        "<<termverify.ready:2>>",
+    ]
+
+
+def test_verification_tokens_restart_for_each_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
+    ports = [FakePort([]), FakePort([])]
+
+    for port in ports:
+        with pytest.raises(EndOfInput):
+            run_editor(port, events=scripted([]))
+
+    assert [readiness_markers(port) for port in ports] == [
+        ["<<termverify.ready:0>>"],
+        ["<<termverify.ready:0>>"],
+    ]
+
+
+def test_unresolved_key_marks_without_rewriting_and_restores_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
+    port = FakePort([])
+    port.get_size = lambda: (40, 3)  # type: ignore[method-assign]
+
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted([Key("<up>")]))
+
+    assert readiness_markers(port) == [
+        "<<termverify.ready:0>>",
+        "<<termverify.ready:1>>",
+    ]
+    assert "".join(port.outputs).count(_CLEAR_SCREEN) == 1
+    marker_write = "\x1b[3;1H<<termverify.ready:1>>\x1b[1;1H"
+    marker_index = port.journal.index(("write", marker_write))
+    assert port.journal[marker_index + 1] == ("flush", None)
+
+
+def test_held_input_prefix_stays_unmarked_until_it_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
+    port = FakePort([])
+
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted([Key("\x1b")]))
+
+    assert readiness_markers(port) == ["<<termverify.ready:0>>"]
+
+
+def test_quit_frame_emits_no_fresh_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
+    port = FakePort(["\x18", "\x03"])
+
+    run_with_keys(port)
+
+    # Startup and the completed C-x prefix mark; the exiting C-c does not.
+    assert readiness_markers(port) == [
+        "<<termverify.ready:0>>",
+        "<<termverify.ready:1>>",
+    ]
+
+
+def test_one_row_verification_terminal_leaves_zero_editor_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin subject geometry only; ConPTY cannot observe this marker (TV #287)."""
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
+    port = FakePort([])
+    port.get_size = lambda: (10, 1)  # type: ignore[method-assign]
+
+    with pytest.raises(EndOfInput):
+        run_editor(port, events=scripted([]))
+
+    assert (
+        "write",
+        "\x1b[1;1H<<termverify.ready:0>>\x1b[1;1H",
+    ) in port.journal
+    assert readiness_markers(port) == ["<<termverify.ready:0>>"]
+
+
+def test_c_g_does_not_end_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole slice, in one assertion.
 
     `C-g` is `keyboard-quit`: it aborts what is in progress and echoes `Quit`,
@@ -114,7 +255,9 @@ def test_c_g_does_not_end_the_run() -> None:
     loop would have returned before the queue ran dry and nothing would have
     been raised.
     """
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
     port = FakePort([])
+    port.get_size = lambda: (10, 4)  # type: ignore[method-assign]
     with pytest.raises(EndOfInput):
         run_editor(port, events=scripted(keys("a", "\x07")))
 
@@ -124,7 +267,7 @@ def test_c_g_does_not_end_the_run() -> None:
     # into a dying process.
     assert _frame_rows(port)[-1][0].startswith("a")
     assert any(row.startswith("Quit") for row in _frame_rows(port)[-1])
-    assert written.count(READINESS_MARKER) == 3  # startup, "a", C-g
+    assert written.count(READINESS_MARKER_PREFIX) == 3  # startup, "a", C-g
     assert port.restored
 
 
@@ -282,16 +425,19 @@ def test_editor_restores_on_exception() -> None:
     assert port.restored
 
 
-def test_unresolved_key_marks_quiescence_without_frame_rewrite() -> None:
+def test_unresolved_key_marks_quiescence_without_frame_rewrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # DEL is not bound to any command; the loop must still emit the
     # readiness marker (quiescence) but must not rewrite the frame.
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
     port = FakePort(["\x7f", "\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
     # Three markers: the initial frame, the unresolved DEL, and the `C-x`
     # prefix — which is also an unresolved key as far as the loop is
     # concerned, so exiting costs one marker more than quitting used to.
-    assert written.count("\x1b]7791;ready\x1b\\") == 3
+    assert written.count(READINESS_MARKER_PREFIX) == 3
     # Two frame rewrites: the initial frame and the final exit frame. Neither
     # the DEL nor the prefix rewrites one.
     assert written.count("\x1b[2J\x1b[H") == 2
@@ -458,14 +604,17 @@ def test_editor_arrow_keys_leave_the_buffer_untouched() -> None:
     assert all(row.startswith("hi") for row in rows), rows
 
 
-def test_editor_arrow_key_does_not_rewrite_the_frame() -> None:
+def test_editor_arrow_key_does_not_rewrite_the_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An arrow is one unresolved key: one readiness marker, no frame."""
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
     port = FakePort(list("\x1b[A") + ["\x18", "\x03"])
     run_with_keys(port)
     written = "".join(port.outputs)
     # Markers: initial frame, the arrow (unresolved), the `C-x` prefix. The
     # exit frame carries none.
-    assert written.count("\x1b]7791;ready\x1b\\") == 3
+    assert written.count(READINESS_MARKER_PREFIX) == 3
     # Frames: the initial one and the final exit frame only.
     assert written.count("\x1b[2J\x1b[H") == 2
 
@@ -499,23 +648,23 @@ def test_editor_esc_non_letter_reprocesses_byte() -> None:
     assert "1" in written
 
 
-def test_editor_esc_non_letter_marks_quiescence_for_both_inputs() -> None:
+def test_editor_esc_non_letter_emits_one_marker_per_physical_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """ESC+non-letter yields one readiness marker per consumed physical input.
 
-    The bare ESC is unresolved (no state change, no frame rewrite) but the
-    subject IS quiescent after it — the verifier needs one marker for the
-    ESC and one for the reprocessed byte, symmetric with the C-x prefix
-    path. A bare ESC as chord START is different: the subject is mid-chord
-    and correctly emits no marker until the chord resolves.
+    The first ESC leaves the subject mid-chord and emits nothing. The next
+    physical input resolves both the abandoned ESC and the reprocessed
+    non-letter, but the adapter dispatched only that one input, so the pair
+    must end in exactly one fresh marker.
     """
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
     port = FakePort(["\x1b", "1", "\x18", "\x03", "y"])
     run_with_keys(port)
     written = "".join(port.outputs)
-    # Markers: initial frame, ESC (unresolved, no frame), "1" (frame), the
-    # `C-x` prefix, and the `C-c` that opens the exit gate — an ordinary
-    # marked epoch now that it no longer ends the run. The final exit frame,
-    # produced by the `y`, carries none.
-    assert written.count("\x1b]7791;ready\x1b\\") == 5
+    # Markers: initial, the physical `1` resolving ESC+`1`, C-x, and C-c
+    # opening the exit gate. The final `y` exits unmarked.
+    assert written.count(READINESS_MARKER_PREFIX) == 4
 
 
 def test_editor_esc_consumed_as_chord_start_then_keyboard_quit() -> None:
@@ -975,7 +1124,9 @@ def test_resize_event_redraws_at_the_new_size() -> None:
     assert len(frames[-1]) == 6
 
 
-def test_resize_redraw_carries_a_readiness_marker() -> None:
+def test_resize_redraw_carries_one_fresh_marker_on_the_new_physical_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """One marker per consumed input, and a resize is one.
 
     Plan 0015 originally deviated here — deviation 2 said a resize redraw was
@@ -985,22 +1136,29 @@ def test_resize_redraw_carries_a_readiness_marker() -> None:
     unmarked resize would not be a quieter epoch, it would be an epoch that
     swallows the *next* input's marker and shifts every epoch after it.
     """
-    # Both scripts gain the `y`: the counts are *relative*, so a one-sided
-    # edit would shift the difference and fail — which is the right failure.
-    keyed = FakePort([])
-    run_editor(keyed, events=scripted(keys("a", "\x18", "\x03", "y")))
-
+    monkeypatch.setenv("TERMVERIFY_SEED", "42")
     resized = FakePort([])
-    run_editor(
-        resized,
-        events=scripted([Key("a"), Resize(30, 6), Key("\x18"), Key("\x03"), Key("y")]),
-    )
+    resized.get_size = lambda: (30, 3)  # type: ignore[method-assign]
+    with pytest.raises(EndOfInput):
+        run_editor(resized, events=scripted([Resize(30, 6)]))
 
     written = "".join(resized.outputs)
-    baseline = "".join(keyed.outputs)
-    # The resize added exactly one frame and exactly one marker with it.
-    assert written.count(_CLEAR_SCREEN) == baseline.count(_CLEAR_SCREEN) + 1
-    assert written.count(READINESS_MARKER) == baseline.count(READINESS_MARKER) + 1
+    assert written.count(_CLEAR_SCREEN) == 2
+    assert readiness_markers(resized) == [
+        "<<termverify.ready:0>>",
+        "<<termverify.ready:1>>",
+    ]
+    assert len(_frame_rows(resized)[0]) == 2
+    assert len(_frame_rows(resized)[1]) == 5
+    marker_writes = [
+        entry
+        for entry in resized.journal
+        if entry[0] == "write" and READINESS_MARKER_PREFIX in (entry[1] or "")
+    ]
+    assert marker_writes == [
+        ("write", "\x1b[3;1H<<termverify.ready:0>>\x1b[1;1H"),
+        ("write", "\x1b[6;1H<<termverify.ready:1>>\x1b[1;1H"),
+    ]
 
 
 def test_resize_while_the_minibuffer_is_open_reaches_the_session() -> None:
@@ -1121,13 +1279,16 @@ class TestLoopAgentArms:
 
         assert ("receive", b"a lot of text\n") not in calls
 
-    def test_an_agent_redraw_carries_no_readiness_marker(self) -> None:
+    def test_agent_redraws_carry_no_readiness_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """The one deliberate gap in the cooperation protocol. An agent
         delivery is a redraw the verifier did not dispatch, so it belongs to
         no input epoch — a marker here would be counted against the *next*
         keystroke and shift every epoch after it. Design 0005 records the cost:
         an end-to-end agent scenario waits on frame content, not quiescence.
         """
+        monkeypatch.setenv("TERMVERIFY_SEED", "42")
         _, recording = self._recording()
         baseline = FakePort([])
         streamed = FakePort([])
@@ -1135,14 +1296,25 @@ class TestLoopAgentArms:
             with pytest.raises(EndOfInput):
                 run_editor(baseline, events=scripted([]))
             with pytest.raises(EndOfInput):
-                run_editor(streamed, events=scripted([AgentBytes(b"{}\n")]))
+                run_editor(
+                    streamed,
+                    events=scripted(
+                        [
+                            AgentBytes(b"{}\n"),
+                            AgentStderr(b"warning\n"),
+                            AgentExited(3),
+                        ]
+                    ),
+                )
 
         written = "".join(streamed.outputs)
         quiet = "".join(baseline.outputs)
-        # The agent event added a frame...
-        assert written.count(_CLEAR_SCREEN) == quiet.count(_CLEAR_SCREEN) + 1
-        # ...and no marker with it.
-        assert written.count(READINESS_MARKER) == quiet.count(READINESS_MARKER)
+        # The three agent events added frames...
+        assert written.count(_CLEAR_SCREEN) == quiet.count(_CLEAR_SCREEN) + 3
+        # ...and no marker with them.
+        assert written.count(READINESS_MARKER_PREFIX) == quiet.count(
+            READINESS_MARKER_PREFIX
+        )
 
     def test_every_key_outcome_is_offered_to_the_pump(self) -> None:
         """`after_command` is how a permission answer and a submitted prompt

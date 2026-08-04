@@ -258,9 +258,10 @@ deliberately did **not** invent a private marker; one the verifier's epoch
 counter does not know about would corrupt every epoch after it, which is the
 failure slice 15 demonstrated from the opposite direction.
 
-**One known evidence gap, recorded rather than glossed.** Readiness markers
-(OSC 7791) currently mark quiescence after each *dispatched key*, and
-TermVerify counts input epochs. A spontaneous agent delivery has no input
+**One known evidence gap, recorded rather than glossed.** Printable,
+tokenised readiness markers (`<<termverify.ready:N>>`) mark quiescence after
+each *dispatched input* under `TERMVERIFY_SEED`, and TermVerify counts input
+epochs. A spontaneous agent delivery has no input
 epoch to belong to. The decision is to keep markers bound to input: an agent
 delivery redraws the frame **without** emitting a marker, so epoch counting
 stays honest for keystrokes. Consequence: an end-to-end agent scenario cannot

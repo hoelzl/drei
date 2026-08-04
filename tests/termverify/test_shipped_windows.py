@@ -7,7 +7,7 @@ MRU default, and C-x 1 collapses back to one pane. The semantic oracle
 remains the direct tests; this proves the shipped terminal integration
 of the new key paths end to end.
 
-Platform support: ConPTY is Windows-only in TermVerify 0.1.0, so the
+Platform support: ConPTY is Windows-only in TermVerify 0.1.1, so the
 scenario skips on other platforms (same as the other shipped scenarios).
 """
 
@@ -53,7 +53,9 @@ def _configuration() -> RunConfiguration:
         clock=ClockConfiguration(initial_ms=0),
         locale="en-US",
         timezone="UTC",
-        terminal=TerminalConfiguration(columns=_COLUMNS, rows=_ROWS, capabilities=()),
+        terminal=TerminalConfiguration(
+            columns=_COLUMNS, rows=_ROWS + 1, capabilities=()
+        ),
         filesystem=FilesystemConfiguration(root_id="drei-root"),
         network=NetworkConfiguration.deny(),
     )

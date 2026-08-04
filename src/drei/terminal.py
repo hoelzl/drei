@@ -17,6 +17,7 @@ import abc
 import os
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -155,11 +156,13 @@ def _restart(char: str, *emitted: str) -> tuple[KeyAssembler, tuple[str, ...]]:
     return assembler, (*emitted, *keys)
 
 
-# TermVerify subject-cooperation readiness marker (OSC 7791;ready ST). The
-# subject emits it after startup and after processing each input so the
-# verifier can detect quiescence without sleeps. A compliant screen model
-# does not render the unknown OSC sequence, so it is invisible in frames.
-READINESS_MARKER = "\x1b]7791;ready\x1b\\"
+# TermVerify 0.1.1's printable subject-cooperation marker prefix. Production
+# emits no marker at all; a verification run reserves the physical bottom row
+# and appends a fresh decimal token plus ``>>`` after each completed input.
+# A marker wider than the terminal is bottom-aligned across enough rows to
+# avoid a bottom-row scroll corrupting the rendered marker stream, provided
+# the screen has enough total cells to contain it (TermVerify #287).
+READINESS_MARKER_PREFIX = "<<termverify.ready:"
 
 
 class TerminalReaders:
@@ -289,6 +292,7 @@ def run_editor(
     first ``C-c a`` — and only then (design 0005 D6), so a machine with no
     agent installed pays nothing for one.
     """
+    cooperating = "TERMVERIFY_SEED" in os.environ
     # Built before raw mode: it touches nothing, and having it exist
     # unconditionally is what lets the `finally` below terminate a child
     # without asking whether there is one.
@@ -311,15 +315,24 @@ def run_editor(
             readers = TerminalReaders(port, stream)
         # The size is read once here to build the first frame; from then on
         # the source reports every change as a Resize event (plan 0015 V4).
-        width, height = port.get_size()
+        physical_width, physical_height = port.get_size()
+        editor_height = max(physical_height - 1, 0) if cooperating else physical_height
         harness = EditorHarness(
-            width=width,
-            height=height,
+            width=physical_width,
+            height=editor_height,
             file_port=file_port,
             file_path=file_path,
             initial_text=initial_text,
         )
-        _write_frame(port, harness)
+        token = 0
+
+        def mark_ready(cursor: tuple[int, int]) -> None:
+            nonlocal token
+            _write_readiness(port, physical_width, physical_height, cursor, token)
+            token += 1
+
+        readiness = mark_ready if cooperating else None
+        _write_frame(port, harness, mark_ready=readiness)
         assembler = KeyAssembler()
         while True:
             event = stream.next_event()
@@ -328,7 +341,12 @@ def run_editor(
             # no unreachable no-match arm for the coverage floor to be satisfied
             # about by a pragma.
             if isinstance(event, Resize):
-                harness.resize(event.width, event.height)
+                physical_width = event.width
+                physical_height = event.height
+                editor_height = (
+                    max(event.height - 1, 0) if cooperating else event.height
+                )
+                harness.resize(event.width, editor_height)
                 # Marked, like any other consumed input. A resize is an input
                 # epoch under the cooperation protocol itself: TermVerify
                 # dispatches it on the same ordered input stream as a key and
@@ -343,7 +361,7 @@ def run_editor(
                 # scenario must therefore change the geometry, or its epoch
                 # waits for a marker that is never coming. See the parity
                 # registry row and design 0005's evidence note.
-                _write_frame(port, harness)
+                _write_frame(port, harness, mark_ready=readiness)
             elif isinstance(event, AgentBytes):
                 # Unmarked, and this is the one place that is deliberate: an
                 # agent delivery is a redraw the verifier did not dispatch, so
@@ -352,28 +370,30 @@ def run_editor(
                 # design 0005 — an end-to-end agent scenario must wait on frame
                 # content, not on quiescence.
                 pump.receive(event.data, harness)
-                _write_frame(port, harness, mark_ready=False)
+                _write_frame(port, harness)
             elif isinstance(event, AgentStderr):
                 pump.diagnostics(event.data, harness)
-                _write_frame(port, harness, mark_ready=False)
+                _write_frame(port, harness)
             elif isinstance(event, AgentExited):
                 pump.exited(event.status, harness)
-                _write_frame(port, harness, mark_ready=False)
+                _write_frame(port, harness)
             else:
                 assembler, resolved = assembler.feed(event.char)
                 # No keys: the character was consumed mid-sequence, so the
-                # subject is mid-chord and not quiescent — no marker until the
-                # sequence resolves. Two keys: an abandoned escape prefix plus
-                # the character that broke it, each marking quiescence of its
-                # own (symmetric with the C-x prefix path).
-                for key in resolved:
+                # subject is mid-chord and not quiescent. More than one key can
+                # resolve from one physical input (an abandoned escape prefix
+                # plus the character that broke it), but the verifier still
+                # dispatched exactly one input: only the final resolution may
+                # mark that epoch complete.
+                for index, key in enumerate(resolved):
+                    input_readiness = readiness if index == len(resolved) - 1 else None
                     outcome = harness.send(key)
                     if outcome is None:
                         # Unresolved key: state did not change, so skip the
                         # frame rewrite but still mark quiescence for this
                         # input.
-                        port.write(READINESS_MARKER)
-                        port.flush()
+                        if input_readiness is not None:
+                            input_readiness(harness.frame.cursor)
                         continue
                     exiting = any(isinstance(e, EditorExited) for e in outcome.events)
                     # Before the frame: the command may owe the agent an answer
@@ -382,7 +402,9 @@ def run_editor(
                     pump.after_command(outcome, harness)
                     # On exit the run ends: quiescence is the process exit
                     # itself, so the final frame carries no marker.
-                    _write_frame(port, harness, mark_ready=not exiting)
+                    _write_frame(
+                        port, harness, mark_ready=None if exiting else input_readiness
+                    )
                     if exiting:
                         return
     finally:
@@ -397,15 +419,35 @@ def run_editor(
 
 
 def _write_frame(
-    port: TerminalPort, harness: EditorHarness, *, mark_ready: bool = True
+    port: TerminalPort,
+    harness: EditorHarness,
+    *,
+    mark_ready: Callable[[tuple[int, int]], None] | None = None,
 ) -> None:
     frame = harness.frame
     port.write(_CLEAR_SCREEN)
     port.write("\r\n".join(frame.rows))
     row, col = frame.cursor
     port.write(f"\x1b[{row + 1};{col + 1}H")
-    if mark_ready:
-        port.write(READINESS_MARKER)
+    if mark_ready is None:
+        port.flush()
+    else:
+        mark_ready(frame.cursor)
+
+
+def _write_readiness(
+    port: TerminalPort,
+    physical_width: int,
+    physical_height: int,
+    cursor: tuple[int, int],
+    token: int,
+) -> None:
+    """Atomically write one bottom-aligned marker and restore the editor cursor."""
+    marker = f"{READINESS_MARKER_PREFIX}{token}>>"
+    wrapped_rows = (len(marker) - 1) // max(physical_width, 1)
+    marker_row = max(physical_height - wrapped_rows, 1)
+    row, col = cursor
+    port.write(f"\x1b[{marker_row};1H{marker}\x1b[{row + 1};{col + 1}H")
     port.flush()
 
 
