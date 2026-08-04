@@ -1,6 +1,6 @@
 # Twenty-second slice: termverify 0.1.1 migration — printable tokenised readiness marker
 
-**Status:** ready (issue #66; migration brief #58).
+**Status:** implemented (issue #66; migration brief #58).
 
 **Architecture gate:** none — this is a verification-infrastructure migration,
 not an editor-semantics change. The editor's behavior is untouched; what
@@ -159,3 +159,52 @@ the full gate (coverage, ruff, mypy, both pre-commit stages, build) is green.
   candidate alternatives (a `DREI_`-owned env var vs the delivered
   `TERMVERIFY_SEED`; echo-row overlay vs dedicated row). Chosen as recorded;
   the reviewer may challenge them at the PR gate.
+
+## 9. Implementation honesty record
+
+1. **The written V1/V2 order was contradictory.** V1 said to implement the
+   printable marker before V2 observed the old marker fail. Execution instead
+   raised the dependency floor and lock to 0.1.1 first, then observed
+   `test_shipped_editor_terminal_scenario` fail at startup with the expected
+   10,000 ms readiness deadline before changing `terminal.py`.
+2. **A raw marker row is space-padded by the ConPTY screen model.** The one
+   physical-row assertion therefore full-matches the marker followed only by
+   padding; editor-row helpers still drop exactly one fixed bottom row and do
+   no content filtering.
+3. **Correct epoch bounding exposed the existing asynchronous-redraw gap.** In
+   `test_shipped_editor_cancels_a_held_turn_with_c_g`, an unmarked agent redraw
+   can replace the transient `Quit` frame before the completed key epoch is
+   returned. The terminal scenario now proves the durable cancelled transcript
+   and successful recovery; direct loop tests continue to pin the `Quit` echo.
+   No product behavior changed.
+4. Apart from that cancellation assertion and the explicit marker-row pin,
+   editor-frame assertions remained unchanged: every scenario adds one
+   physical row and its helper removes exactly that row. The C-/ scenario kept
+   `TextInput("\x1f")` as D5 required.
+5. **Fresh review narrowed the one-row assumption at narrow widths.** A
+   marker written from the physical bottom row scrolls when it wraps; the
+   immediate cursor restoration can then disturb its rendered stream, and a
+   width that worked for token 9 can fail when token 10 adds one cell. Marker
+   addressing is now bottom-aligned from the first row that lets the complete
+   marker end without scrolling, and address + marker + cursor restoration are
+   one write. Ordinary scenario widths still use exactly the dedicated final
+   row; unusually narrow verification frames may have marker text overlay the
+   lowest editor rows. Live ConPTY pins cover width 10 with a nine-row screen
+   at startup, token growth through 10, and resize from width 40 to 10.
+6. **Fresh review also found a cardinality error.** One physical character can
+   resolve both an abandoned escape prefix and the character that broke it.
+   The first implementation emitted a marker for each resolved logical key,
+   leaving a fresh token buffered to complete the next adapter epoch. The loop
+   now emits at most one marker, after the final resolution of each physical
+   input. This path remains undeliverable through the current Windows ConPTY
+   ESC limitation, but the subject contract is correct for future adapters.
+7. **A second fresh review found the hard screen-capacity boundary.** If the
+   complete ConPTY screen has fewer cells than the marker, no starting row can
+   prevent scrolling. Live probes reproduced startup failure (21×1, 10×1,
+   10×2, and 1×9), token-growth failure at 22×1 when token 10 reaches 23
+   cells, and wide-to-narrow resize failure. Newline framing, autowrap control,
+   and natural wrapping without cursor restoration did not make the complete
+   candidate observable. The accepted Drei scenarios all have enough capacity;
+   the adapter-level limitation is tracked as TermVerify #287 rather than
+   weakening the normal reserved-row/cursor-restoration contract or pretending
+   a fake port proves live readiness.

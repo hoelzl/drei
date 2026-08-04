@@ -72,7 +72,9 @@ def _configuration() -> RunConfiguration:
         clock=ClockConfiguration(initial_ms=0),
         locale="en-US",
         timezone="UTC",
-        terminal=TerminalConfiguration(columns=_COLUMNS, rows=_ROWS, capabilities=()),
+        terminal=TerminalConfiguration(
+            columns=_COLUMNS, rows=_ROWS + 1, capabilities=()
+        ),
         filesystem=FilesystemConfiguration(root_id="drei-root"),
         network=NetworkConfiguration.deny(),
     )
@@ -91,7 +93,8 @@ def _reaped(adapter: ConptyAdapter) -> Iterator[ConptyAdapter]:
 
 def _frame_lines(observation: Observation) -> tuple[str, ...]:
     assert observation.frame is not None, observation
-    return tuple(observation.frame.lines)
+    # Fixed geometry owns the cooperation row; never filter by marker content.
+    return tuple(observation.frame.lines[:-1])
 
 
 def _adapter(tmp_path: Path) -> ConptyAdapter:
@@ -200,10 +203,11 @@ def test_shipped_editor_cancels_a_held_turn_with_c_g(tmp_path: Path) -> None:
     """Plan 0020 §1's first acceptance scenario: `C-g` stops a turn.
 
     The fake agent holds its answer, so the turn is genuinely in flight when
-    `C-g` lands: `Quit` on the echo row, `session/cancel` on the wire, and
-    the transcript's `── end turn (cancelled) ──` read off the shipped
-    frame. A fresh `ping` turn afterwards proves the editor and the agent
-    both survived.
+    `C-g` lands: `session/cancel` on the wire and the transcript's
+    `── end turn (cancelled) ──` read off the shipped frame. A fresh `ping`
+    turn afterwards proves the editor and the agent both survived. Direct
+    loop tests pin the transient `Quit` echo: an unmarked asynchronous redraw
+    may replace that frame before TermVerify returns the completed key epoch.
 
     The pre-`C-g` settle is sound: the `*agent*` modeline is written only
     after the pump's `receive` returns, and the same receive binds the
@@ -225,8 +229,7 @@ def test_shipped_editor_cancels_a_held_turn_with_c_g(tmp_path: Path) -> None:
         # The buffer appears ⟹ the prompt is in flight (docstring).
         _settle_until(adapter, "Drei: *agent*")
 
-        quit_lines = _chord(adapter, "Control", "g")
-        assert quit_lines[-1].startswith("Quit"), quit_lines
+        _chord(adapter, "Control", "g")
 
         cancelled = _settle_until(adapter, "end turn (cancelled)")
         assert any("end turn (cancelled)" in line for line in cancelled), cancelled

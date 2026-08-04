@@ -8,13 +8,14 @@ The semantic oracle remains the direct tests; this scenario proves the
 shipped terminal integration (raw mode, key decoding, frame writes,
 readiness cooperation, clean exit) end to end.
 
-Platform support: ConPTY is Windows-only in TermVerify 0.1.0, so the
+Platform support: ConPTY is Windows-only in TermVerify 0.1.1, so the
 scenario skips on other platforms. CI runs it on the Windows leg of the
 matrix via the default `pytest --cov` invocation.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -51,13 +52,15 @@ _COLUMNS = 40
 _ROWS = 8
 
 
-def _configuration() -> RunConfiguration:
+def _configuration(*, columns: int = _COLUMNS) -> RunConfiguration:
     return RunConfiguration(
         seed=42,
         clock=ClockConfiguration(initial_ms=0),
         locale="en-US",
         timezone="UTC",
-        terminal=TerminalConfiguration(columns=_COLUMNS, rows=_ROWS, capabilities=()),
+        terminal=TerminalConfiguration(
+            columns=columns, rows=_ROWS + 1, capabilities=()
+        ),
         filesystem=FilesystemConfiguration(root_id="drei-root"),
         network=NetworkConfiguration.deny(),
     )
@@ -74,9 +77,14 @@ def _reaped(adapter: ConptyAdapter) -> Iterator[ConptyAdapter]:
             child.close(force=True)
 
 
-def _frame_lines(observation: Observation) -> tuple[str, ...]:
+def _physical_frame_lines(observation: Observation) -> tuple[str, ...]:
     assert observation.frame is not None, observation
     return tuple(observation.frame.lines)
+
+
+def _frame_lines(observation: Observation) -> tuple[str, ...]:
+    """Drei's editor rows; TermVerify cooperation owns the physical bottom row."""
+    return _physical_frame_lines(observation)[:-1]
 
 
 def _modeline_row(lines: tuple[str, ...]) -> int:
@@ -198,7 +206,9 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
 
         # Initial readiness: the editor rendered its first frame. The body is
         # empty and the modeline identifies Drei and the scratch buffer.
-        initial_lines = _frame_lines(started.observation)
+        physical_lines = _physical_frame_lines(started.observation)
+        assert re.fullmatch(r"<<termverify\.ready:[0-9]+>> *", physical_lines[-1])
+        initial_lines = physical_lines[:-1]
         assert any("Drei: scratch" in line for line in initial_lines), initial_lines
 
         # Insert "hi" one key at a time (each key is its own quiescent epoch).
@@ -223,6 +233,42 @@ def test_shipped_editor_terminal_scenario(tmp_path: Path) -> None:
         process = final.observation.process
         assert process is not None
         assert process.state == "exited", process
+
+
+def test_shipped_editor_marker_survives_wrap_and_token_growth(tmp_path: Path) -> None:
+    """Cursor restoration cannot disturb a marker that wraps on its own row."""
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-wrapped-marker", _configuration(columns=10))
+        assert type(started) is Started, started
+
+        # Startup is token 0; crossing token 10 grows the decimal marker by a
+        # cell while it already spans three physical lines at this width.
+        for _ in range(11):
+            completed = adapter.dispatch(TextInput(ManualTime(0), "a"))
+            assert type(completed) is EpochCompleted, completed
+
+        stopped = adapter.stop(Stop(ManualTime(0)))
+        assert isinstance(stopped.outcome, RunFinished), stopped
+
+
+def test_shipped_editor_marker_survives_resize_to_narrow_width(
+    tmp_path: Path,
+) -> None:
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-narrow-resize", _configuration())
+        assert type(started) is Started, started
+
+        resized = adapter.dispatch(Resize(ManualTime(0), 10, _ROWS + 1))
+        assert type(resized) is EpochCompleted, resized
+        completed = adapter.dispatch(TextInput(ManualTime(0), "a"))
+        assert type(completed) is EpochCompleted, completed
+
+        stopped = adapter.stop(Stop(ManualTime(0)))
+        assert isinstance(stopped.outcome, RunFinished), stopped
 
 
 def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
@@ -260,7 +306,7 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
 
         # Now resize the terminal itself. Wider and taller than the start.
         wider, taller = _COLUMNS + 20, _ROWS + 4
-        resized = adapter.dispatch(Resize(ManualTime(0), wider, taller))
+        resized = adapter.dispatch(Resize(ManualTime(0), wider, taller + 1))
         assert type(resized) is EpochCompleted, resized
         resized_lines = _frame_lines(resized.observation)
 
