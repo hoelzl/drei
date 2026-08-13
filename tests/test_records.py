@@ -1,5 +1,6 @@
 import pytest
 
+from drei.acp.codec import DecodedFrame, DecodeFailure
 from drei.commands import (
     BackwardChar,
     BufferObservation,
@@ -15,6 +16,8 @@ from drei.commands import (
 
 def test_records_are_frozen() -> None:
     records = [
+        (DecodedFrame({"ok": True}), "value"),
+        (DecodeFailure(b"bad"), "line"),
         (InsertText("x"), "text"),
         (ForwardChar(), None),
         (BackwardChar(), None),

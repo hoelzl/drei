@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING
 from drei.acp.codec import (
     DecodedFrame,
     DecodeFailure,
+    DecodeResult,
     JsonRpcDecoder,
+    JsonValue,
     encode,
 )
 
@@ -71,8 +73,10 @@ __all__ = [
     "TERMINAL_RELEASE",
     "TERMINAL_WAIT_FOR_EXIT",
     "AcpProtocolError",
+    "DecodeResult",
     "DecodeFailure",
     "DecodedFrame",
+    "JsonValue",
     "JsonRpcDecoder",
     "Message",
     "Notification",
