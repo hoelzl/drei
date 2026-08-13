@@ -26,6 +26,7 @@ from drei.commands import (
     ExitEditor,
     ExitRefused,
     FindFile,
+    FrameResized,
     InsertAgentText,
     InsertText,
     KeyboardQuitEvent,
@@ -37,6 +38,7 @@ from drei.commands import (
     MinibufferInput,
     MinibufferOpened,
     PromptPermission,
+    ResizeFrame,
     SaveBuffer,
     SaveDeclined,
     SaveFailed,
@@ -127,6 +129,22 @@ def test_modified_file_buffer_is_offered_before_the_run_ends() -> None:
     assert session.minibuffer_prompt == SAVE_PROMPT.format("/tmp/notes.txt")
 
 
+def test_resize_preserves_the_save_offer_stage() -> None:
+    session = _session()
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+    prompt = SAVE_PROMPT.format("/tmp/notes.txt")
+
+    outcome = session.dispatch(ResizeFrame(100, 30))
+
+    assert outcome.events == (FrameResized(100, 30),)
+    assert session.minibuffer_prompt == prompt
+    # The same pending buffer is still offered and can be declined.
+    declined = session.dispatch(MinibufferInput("n"))
+    assert SaveDeclined("notes.txt") in declined.events
+    assert session.minibuffer_prompt == EXIT_PROMPT
+
+
 def test_y_at_the_offer_writes_the_file_and_ends_the_run() -> None:
     files = FakeFilePort({"/tmp/notes.txt": "saved"})
     session = _session(files)
@@ -177,6 +195,21 @@ def test_n_at_the_offer_leads_to_the_exit_gate() -> None:
     # (plan 0019 D4, issue #51): replay can now tell a declined save from a
     # save that was never offered.
     assert SaveDeclined("notes.txt") in outcome.events
+
+
+def test_resize_preserves_the_final_exit_gate() -> None:
+    session = _session()
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+    session.dispatch(MinibufferInput("n"))
+
+    outcome = session.dispatch(ResizeFrame(100, 30))
+
+    assert outcome.events == (FrameResized(100, 30),)
+    assert session.minibuffer_prompt == EXIT_PROMPT
+    refused = session.dispatch(MinibufferInput("n"))
+    assert refused.events == (ExitRefused(),)
+    assert session.buffer.current.text == "savedx"
 
 
 def test_c_g_at_the_gate_says_quit() -> None:

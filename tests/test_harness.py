@@ -1,4 +1,7 @@
+import pytest
+
 from drei.commands import (
+    CommandOutcome,
     FrameResized,
     KeyboardQuitEvent,
     PointMoved,
@@ -292,6 +295,27 @@ class TestHarnessResize:
         harness.resize(40, 8)
         assert FrameResized(40, 8) in harness.outcomes[-1].events
 
+    def test_rejected_resize_does_not_change_render_geometry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        harness = EditorHarness(width=20, height=5)
+
+        def swallow_resize(command: object) -> CommandOutcome:
+            # A non-resize event is not authority for requested geometry.
+            return CommandOutcome((KeyboardQuitEvent(),), harness.observation)
+
+        monkeypatch.setattr(
+            harness._session,
+            "dispatch",
+            swallow_resize,  # noqa: SLF001
+        )
+
+        outcome = harness.resize(40, 8)
+
+        assert outcome.events == (KeyboardQuitEvent(),)
+        assert len(harness.frame.rows) == 5
+        assert all(len(row) == 20 for row in harness.frame.rows)
+
     def test_a_grown_frame_permits_a_split_the_old_size_refused(self) -> None:
         harness = EditorHarness(width=20, height=6)  # < (1+1)*3+1 = 7
         harness.send("C-x")
@@ -352,16 +376,28 @@ class TestHarnessResize:
         terminal, not of input focus — swallowing it would render the prompt
         against a stale width for as long as the prompt stayed open.
         """
-        harness = EditorHarness(width=20, height=5)
+        harness = EditorHarness(width=20, height=6)
         harness.send("C-x")
         harness.send("C-f")  # find-file prompt open
         assert harness.observation.minibuffer == ""
-        harness.resize(40, 8)
+        outcome = harness.resize(40, 24)
+        # The semantic resize landed exactly once; rendered width alone is not
+        # evidence because the old harness changed its local dimensions even
+        # when the session gate swallowed this command.
+        assert outcome.events == (FrameResized(40, 24),)
         # The prompt survived the resize and re-rendered at the new size...
         assert harness.observation.minibuffer == ""
         assert len(harness.frame.rows[-1]) == 40
         assert harness.frame.rows[-1].startswith("Find file:")
-        # ...and typing continues into the same prompt, so the resize was
-        # not read as minibuffer input.
-        harness.send("x")
-        assert harness.observation.minibuffer == "x"
+        # Prompt identity survives too: typed input still executes find-file,
+        # rather than merely retaining the displayed label and text.
+        for char in "/tmp/resized.txt":
+            harness.send(char)
+        accepted = harness.send("RET")
+        assert accepted is not None
+        assert harness.observation.buffer_id == "resized.txt"
+        # ...and the session, not only the renderer, owns the new geometry.
+        # Height 6 refuses a split; height 24 permits it after the prompt closes.
+        harness.send("C-x")
+        harness.send("2")
+        assert harness.outcomes[-1].events == (WindowSplit(2),)

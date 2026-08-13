@@ -659,9 +659,10 @@ class EditorSession:
         new_value: BufferValue
 
         # While the minibuffer is active, only minibuffer commands act —
-        # plus external deliveries, which are not user input and must not be
-        # swallowed while a prompt is open (a dropped delivery would desync
-        # the agent-buffer fold from the transcript; parity registry row).
+        # plus external semantic inputs, which are not user input and must not
+        # be swallowed while a prompt is open. A dropped delivery would desync
+        # the agent-buffer fold from the transcript; a dropped resize would
+        # leave session geometry stale while the terminal has already changed.
         # PromptPermission is delivery-class too: a swallowed permission
         # request would hang the agent (the same row, extended in B.8).
         # The gate runs before target resolution because resolution has
@@ -680,7 +681,8 @@ class EditorSession:
             | CreateGeneratedBuffer
             | DisplayBuffer
             | PromptPermission
-            | AbortPendingPermissions,
+            | AbortPendingPermissions
+            | ResizeFrame,
         ):
             return CommandOutcome((), self._observation(self.buffer.current))
 
