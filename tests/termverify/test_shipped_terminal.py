@@ -328,6 +328,49 @@ def test_shipped_editor_resize_scenario(tmp_path: Path) -> None:
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_editor_resizes_while_find_file_prompt_is_open(
+    tmp_path: Path,
+) -> None:
+    """A real ConPTY resize crosses Drei's open-prompt session gate.
+
+    The resized screen model is not the oracle: TermVerify changes that before
+    Drei handles the input. The modeline and `Find file:` echo row are both
+    Drei-owned landmarks, so their positions prove the editor accepted the new
+    geometry while preserving the prompt.
+    """
+    adapter = _adapter(tmp_path)
+
+    with _reaped(adapter):
+        started = adapter.start("drei-prompt-resize", _configuration())
+        assert type(started) is Started, started
+
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        prompted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "f")))
+        assert type(prompted) is EpochCompleted, prompted
+        prompted_lines = _frame_lines(prompted.observation)
+        assert prompted_lines[-1].startswith("Find file:"), prompted_lines
+
+        wider, taller = _COLUMNS + 20, _ROWS + 4
+        resized = adapter.dispatch(Resize(ManualTime(0), wider, taller + 1))
+        assert type(resized) is EpochCompleted, resized
+        resized_lines = _frame_lines(resized.observation)
+        assert _modeline_row(resized_lines) == taller - 2, resized_lines
+        assert resized_lines[taller - 1].startswith("Find file:"), resized_lines
+
+        aborted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
+        assert type(aborted) is EpochCompleted, aborted
+        assert not any(
+            "Find file:" in line for line in _frame_lines(aborted.observation)
+        )
+
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        final = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "c")))
+        assert isinstance(final, TerminalResult), final
+        assert final.outcome == RunFinished(ExitStatus("code", 0)), final
+
+
 def test_shipped_editor_save_scenario(tmp_path: Path) -> None:
     """Open a file via CLI arg, edit, C-x C-s, assert content on disk.
 

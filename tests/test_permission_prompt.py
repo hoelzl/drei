@@ -25,6 +25,7 @@ from drei.acp.machine import (
 from drei.commands import (
     AbortPendingPermissions,
     FindFile,
+    FrameResized,
     MinibufferAbort,
     MinibufferAborted,
     MinibufferAccept,
@@ -32,6 +33,7 @@ from drei.commands import (
     MinibufferInput,
     PermissionDecided,
     PromptPermission,
+    ResizeFrame,
 )
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
@@ -76,6 +78,22 @@ class TestPromptPermissionOpensChoiceMinibuffer:
         # It was not silently dropped: the request is queued for after the
         # text prompt resolves.
         assert session.pending_permission_count() == 1
+
+    def test_resize_preserves_the_exact_permission_choice(self) -> None:
+        request = _permission("permission-42")
+        session = make_session()
+        session.dispatch(PromptPermission(request))
+        prompt = session.minibuffer_prompt
+
+        outcome = session.dispatch(ResizeFrame(100, 30))
+
+        assert outcome.events == (FrameResized(100, 30),)
+        assert session.minibuffer_prompt == prompt
+        # The same request and options still govern the next answer.
+        decided = session.dispatch(MinibufferInput("s"))
+        assert decided.events == (
+            PermissionDecided("permission-42", Selected("o-sess")),
+        )
 
 
 class TestChoiceKeymap:

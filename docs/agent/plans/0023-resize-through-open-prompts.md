@@ -1,6 +1,13 @@
 # Twenty-third slice: resize through open prompts (TD-18)
 
-**Status:** ready (issue #75).
+**Status:** implemented on the code branch (issue #75). Honesty record: text,
+permission-choice, save-offer, and final-exit prompt pins all require one
+`FrameResized` while preserving the exact prompt; the text path additionally
+proves a later split uses the new session height. The harness adopts geometry
+only from an accepted event, and the real ConPTY scenario observes Drei's
+modeline and `Find file:` row at the resized bottom. The shared gate exemption
+and harness authority tests were mutation-verified against their pre-slice
+forms. Full gates and code-PR review remain the delivery gate.
 
 **Architecture gate:** design 0002 decision 4 (serialized command/session boundary), plan 0015 D3 (`ResizeFrame` records semantic geometry), and plan 0021 D1/D2 (resize is external and `user_issued = False`). Issue #74 has already selected the missing classification: terminal geometry is an external semantic input, not a user command and not input-focus state.
 

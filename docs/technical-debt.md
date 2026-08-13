@@ -154,34 +154,6 @@ doing the refusal twice invites divergence; the two should be paid together.
 `empty-basename` vocabulary (exit 2 with the token on stderr — the startup
 path has no echo row).
 
-## TD-18 (slice-21 review) — a resize during an open prompt is swallowed, and the harness doesn't notice
-
-**Location:** `src/drei/harness.py` `resize` (docstring carries the TODO
-marker); the swallowing gate at `src/drei/session.py` (the minibuffer gate —
-`ResizeFrame` is not on the exempt list).
-**Severity:** minor; transient presentation divergence, self-healing on the
-next resize or prompt close.
-
-`harness.resize`'s docstring promises "the minibuffer gate never sees it" —
-routing around the *harness's own* key gate. But the session-level gate still
-swallows the `ResizeFrame` dispatch while any prompt is open (the command
-emits nothing; slice-21 review probed: gate swallowed, session frame size
-unchanged). Worse, `resize` then assigns the new `self._width`/`self._height`
-unconditionally, so the harness renders against a size the session does not
-hold until the prompt closes — exactly the stale-frame hazard the docstring
-says the routing avoids, plus a harness/session disagreement. Slice 15/16
-vintage; slice 21's classification makes the *bookkeeping* side safe either
-way (a swallowed or landed resize intervenes in nothing), but the frame
-divergence is real.
-
-**Why deferred:** pre-existing and out of the slice-21 diff; the fix touches
-the gate's exempt list, which the prompt-gating invariants pin heavily, so it
-deserves its own slice-sized look rather than a review-week drive-by.
-**Suggested approach:** exempt `ResizeFrame` from the session gate (it acts on
-frame state, not buffer state, and post-slice-21 its events intervene in
-nothing), or have `resize` read the applied size back from the session instead
-of assuming. The first matches the docstring's intent.
-
 ## TD-14 (review 0002 finding 7) — the initial frame size is not in the event record
 
 **Location:** `src/drei/session.py` — the `frame_size` constructor argument.
