@@ -30,6 +30,18 @@ bash = shutil.which("bash")
 requires_bash = pytest.mark.skipif(bash is None, reason="bash is not available")
 
 
+def _git_local_env_names() -> frozenset[str]:
+    """The repository-local environment variables declared by Git itself."""
+    return frozenset(
+        subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    )
+
+
 def _foreign_repo_env() -> dict[str, str]:
     """Environment for Git commands that must ignore the caller repository.
 
@@ -37,14 +49,8 @@ def _foreign_repo_env() -> dict[str, str]:
     ``cwd`` for nested Git commands, so a test creating a foreign repository
     must clear the complete list Git declares rather than guessing a subset.
     """
-    local_names = subprocess.run(
-        ["git", "rev-parse", "--local-env-vars"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
     env = dict(os.environ)
-    for name in local_names:
+    for name in _git_local_env_names():
         env.pop(name, None)
     return env
 
@@ -155,6 +161,10 @@ def _run_sync_check(
     work: Path, stub_dir: Path, **env_overrides: str
 ) -> subprocess.CompletedProcess[str]:
     assert bash is not None
+    unsafe = _git_local_env_names() & env_overrides.keys()
+    if unsafe:
+        names = ", ".join(sorted(unsafe))
+        raise ValueError(f"repository-local Git environment override: {names}")
     env = _foreign_repo_env()
     env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
     env.pop("DREI_SYNC_CHECK_OFFLINE", None)
@@ -166,6 +176,16 @@ def _run_sync_check(
         capture_output=True,
         text=True,
     )
+
+
+def test_sync_check_runner_rejects_git_local_overrides(tmp_path: Path) -> None:
+    """Callers cannot undo the foreign-repository isolation by accident."""
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    _write_gh_stub(stub_dir, authenticated=True)
+
+    with pytest.raises(ValueError, match="GIT_DIR"):
+        _run_sync_check(_make_repo(tmp_path), stub_dir, GIT_DIR="caller/.git")
 
 
 @requires_bash
