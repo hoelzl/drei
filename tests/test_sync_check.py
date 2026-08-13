@@ -30,6 +30,31 @@ bash = shutil.which("bash")
 requires_bash = pytest.mark.skipif(bash is None, reason="bash is not available")
 
 
+def _git_local_env_names() -> frozenset[str]:
+    """The repository-local environment variables declared by Git itself."""
+    return frozenset(
+        subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+    )
+
+
+def _foreign_repo_env() -> dict[str, str]:
+    """Environment for Git commands that must ignore the caller repository.
+
+    Git exports repository-local variables to hooks. Those variables override
+    ``cwd`` for nested Git commands, so a test creating a foreign repository
+    must clear the complete list Git declares rather than guessing a subset.
+    """
+    env = dict(os.environ)
+    for name in _git_local_env_names():
+        env.pop(name, None)
+    return env
+
+
 def _write_gh_stub(directory: Path, *, authenticated: bool) -> None:
     """A ``gh`` that answers ``auth status`` as asked and lists nothing else.
 
@@ -50,18 +75,80 @@ def _write_gh_stub(directory: Path, *, authenticated: bool) -> None:
 
 def _make_repo(tmp_path: Path) -> Path:
     """A git repo with a local ``origin`` — ``git ls-remote`` stays offline."""
+    env = _foreign_repo_env()
     origin = tmp_path / "origin.git"
     subprocess.run(
-        ["git", "init", "--bare", "--quiet", str(origin)], check=True, cwd=tmp_path
+        ["git", "init", "--bare", "--quiet", str(origin)],
+        check=True,
+        cwd=tmp_path,
+        env=env,
     )
     work = tmp_path / "work"
     work.mkdir()
-    subprocess.run(["git", "init", "--quiet"], check=True, cwd=work)
+    subprocess.run(["git", "init", "--quiet"], check=True, cwd=work, env=env)
     subprocess.run(
-        ["git", "remote", "add", "origin", str(origin)], check=True, cwd=work
+        ["git", "remote", "add", "origin", str(origin)],
+        check=True,
+        cwd=work,
+        env=env,
     )
     (work / "docs" / "agent" / "plans").mkdir(parents=True)
     return work
+
+
+def test_make_repo_ignores_the_callers_git_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-push hook exports repository-local Git variables.
+
+    ``cwd`` does not override ``GIT_DIR``: without explicit isolation, the
+    fixture's ``git init`` and ``git remote add`` mutate the repository whose
+    push invoked pytest instead of the throwaway repository.
+    """
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    clean_env = _foreign_repo_env()
+    subprocess.run(["git", "init", "--quiet"], check=True, cwd=caller, env=clean_env)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "caller.invalid:repo.git"],
+        check=True,
+        cwd=caller,
+        env=clean_env,
+    )
+
+    monkeypatch.setenv("GIT_DIR", str(caller / ".git"))
+    subject = tmp_path / "subject"
+    subject.mkdir()
+    work = _make_repo(subject)
+
+    subject_origin = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        check=True,
+        cwd=work,
+        env=clean_env,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    caller_origin = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        check=True,
+        cwd=caller,
+        env=clean_env,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    caller_bare = subprocess.run(
+        ["git", "config", "--bool", "core.bare"],
+        check=True,
+        cwd=caller,
+        env=clean_env,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert Path(subject_origin) == subject / "origin.git"
+    assert caller_origin == "caller.invalid:repo.git"
+    assert caller_bare == "false"
 
 
 def _write_plan(work: Path, name: str, status_line: str) -> None:
@@ -74,7 +161,11 @@ def _run_sync_check(
     work: Path, stub_dir: Path, **env_overrides: str
 ) -> subprocess.CompletedProcess[str]:
     assert bash is not None
-    env = dict(os.environ)
+    unsafe = _git_local_env_names() & env_overrides.keys()
+    if unsafe:
+        names = ", ".join(sorted(unsafe))
+        raise ValueError(f"repository-local Git environment override: {names}")
+    env = _foreign_repo_env()
     env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
     env.pop("DREI_SYNC_CHECK_OFFLINE", None)
     env.update(env_overrides)
@@ -85,6 +176,16 @@ def _run_sync_check(
         capture_output=True,
         text=True,
     )
+
+
+def test_sync_check_runner_rejects_git_local_overrides(tmp_path: Path) -> None:
+    """Callers cannot undo the foreign-repository isolation by accident."""
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    _write_gh_stub(stub_dir, authenticated=True)
+
+    with pytest.raises(ValueError, match="GIT_DIR"):
+        _run_sync_check(_make_repo(tmp_path), stub_dir, GIT_DIR="caller/.git")
 
 
 @requires_bash
