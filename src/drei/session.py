@@ -1047,8 +1047,9 @@ class EditorSession:
             if intervened:
                 state.undo_descending = False
 
-        # Validation happens in BufferValue.__post_init__ before any
-        # mutation, so command failure is atomic by construction.
+        # `new_value` has passed BufferValue validation before this shared
+        # bookkeeping and commit phase. Plan 0025 applies the same ordering to
+        # undo, kill/yank, region, and save helper side effects.
         self._buffers[commit_id].replace(new_value)
 
         # The focused window tracks the buffer it displays: every command
@@ -1716,12 +1717,6 @@ class EditorSession:
         """Apply the newest group's inverse (descending) or, after any
         intervening event-emitting command, redo the newest undone group
         (Emacs's direction flip on last-command != undo).
-
-        TODO: [tech-debt] TD-8 — the undo stacks are mutated below *before*
-        the replacement BufferValue is constructed. Unreachable today (the
-        value's invariants cannot be violated from here), but if
-        __post_init__ ever raised the stacks would be mutated with no event
-        recorded. See docs/technical-debt.md.
         """
         if self._state.undo_descending or not self._state.undo_redo:
             if not self._state.undo_history:
@@ -1729,7 +1724,20 @@ class EditorSession:
                 # the Message must not count as intervening (D2).
                 events.append(Message("no-further-undo"))
                 return current
-            group = self._state.undo_history.pop()
+            group = self._state.undo_history[-1]
+            undone_text = (
+                current.text[: group.start]
+                + group.removed_text
+                + current.text[group.start + len(group.inserted_text) :]
+            )
+            new_value = replace(
+                current,
+                text=undone_text,
+                point=group.point_before,
+                mark=group.mark_before,
+                modified=self._modified_after_undo(undone_text),
+            )
+            self._state.undo_history.pop()
             self._state.undo_redo.append(group)
             events.append(
                 TextUndone(
@@ -1742,19 +1750,21 @@ class EditorSession:
                     group.mark_before,
                 )
             )
-            undone_text = (
-                current.text[: group.start]
-                + group.removed_text
-                + current.text[group.start + len(group.inserted_text) :]
-            )
-            return replace(
-                current,
-                text=undone_text,
-                point=group.point_before,
-                mark=group.mark_before,
-                modified=self._modified_after_undo(undone_text),
-            )
-        group = self._state.undo_redo.pop()
+            return new_value
+        group = self._state.undo_redo[-1]
+        redone_text = (
+            current.text[: group.start]
+            + group.inserted_text
+            + current.text[group.start + len(group.removed_text) :]
+        )
+        new_value = replace(
+            current,
+            text=redone_text,
+            point=group.point_after,
+            mark=group.mark_after,
+            modified=self._modified_after_undo(redone_text),
+        )
+        self._state.undo_redo.pop()
         self._state.undo_history.append(group)
         events.append(
             TextRedone(
@@ -1767,18 +1777,7 @@ class EditorSession:
                 group.mark_after,
             )
         )
-        redone_text = (
-            current.text[: group.start]
-            + group.inserted_text
-            + current.text[group.start + len(group.removed_text) :]
-        )
-        return replace(
-            current,
-            text=redone_text,
-            point=group.point_after,
-            mark=group.mark_after,
-            modified=self._modified_after_undo(redone_text),
-        )
+        return new_value
 
     def _save(
         self, current: BufferValue, buffer_id: BufferId, events: list[Event]
@@ -1800,6 +1799,7 @@ class EditorSession:
             # (path-prompting) slice exists.
             events.append(SaveFailed(buffer_id.value, "no-file"))
             return current
+        new_value = replace(current, modified=False)
         try:
             self._files.write(path, to_file_text(current.text, state.eol))
         except OSError as error:
@@ -1809,7 +1809,7 @@ class EditorSession:
         # The save moves the clean point: undoing past it must now report the
         # buffer modified (review 0001 finding 3).
         state.saved_text = current.text
-        return replace(current, modified=False)
+        return new_value
 
     def _kill_line(self, current: BufferValue, events: list[Event]) -> BufferValue:
         point = current.point
@@ -1827,21 +1827,19 @@ class EditorSession:
                 end = len(text)
             killed = text[point:end]
         new_text = text[:point] + text[end:]
-        # TODO: [tech-debt] TD-8 — the ring is mutated before the replacement
-        # BufferValue is constructed; same unreachable-today ordering as
-        # _undo. See docs/technical-debt.md.
+        new_value = replace(
+            current,
+            text=new_text,
+            modified=True,
+            mark=_adjust_mark_delete(current.mark, point, end),
+        )
         if self._state.last_was_kill and self._kill_ring:
             self._kill_ring[0] += killed
         else:
             self._kill_ring.insert(0, killed)
             del self._kill_ring[KILL_RING_CAPACITY:]
         events.append(TextKilled(killed, point, end, "forward"))
-        return replace(
-            current,
-            text=new_text,
-            modified=True,
-            mark=_adjust_mark_delete(current.mark, point, end),
-        )
+        return new_value
 
     def _kill_region(self, current: BufferValue, events: list[Event]) -> BufferValue:
         if current.mark is None:
@@ -1856,16 +1854,17 @@ class EditorSession:
         hi = max(current.point, current.mark)
         killed = current.text[lo:hi]
         direction = "forward" if current.point > current.mark else "backward"
-        self._kill_ring.insert(0, killed)
-        del self._kill_ring[KILL_RING_CAPACITY:]
-        events.append(RegionKilled(killed, lo, hi, direction))
-        return replace(
+        new_value = replace(
             current,
             text=current.text[:lo] + current.text[hi:],
             point=lo,
             modified=True,
             mark=None,
         )
+        self._kill_ring.insert(0, killed)
+        del self._kill_ring[KILL_RING_CAPACITY:]
+        events.append(RegionKilled(killed, lo, hi, direction))
+        return new_value
 
     def _copy_region(self, current: BufferValue, events: list[Event]) -> BufferValue:
         if current.mark is None:
@@ -1877,10 +1876,12 @@ class EditorSession:
             return current  # empty region: silent no-op
         lo = min(current.point, current.mark)
         hi = max(current.point, current.mark)
-        self._kill_ring.insert(0, current.text[lo:hi])
+        copied = current.text[lo:hi]
+        new_value = replace(current, mark=None)
+        self._kill_ring.insert(0, copied)
         del self._kill_ring[KILL_RING_CAPACITY:]
-        events.append(RegionCopied(current.text[lo:hi]))
-        return replace(current, mark=None)
+        events.append(RegionCopied(copied))
+        return new_value
 
     def _yank(self, current: BufferValue, events: list[Event]) -> BufferValue:
         if not self._kill_ring:
@@ -1889,16 +1890,17 @@ class EditorSession:
         before = current.point
         after = before + len(text)
         new_text = current.text[:before] + text + current.text[before:]
-        events.append(TextYanked(text, before, after))
-        self._state.yank_cursor = 0
-        self._state.yank_bounds = (before, after)
-        return replace(
+        new_value = replace(
             current,
             text=new_text,
             point=after,
             modified=True,
             mark=_adjust_mark_insert(current.mark, before, len(text)),
         )
+        events.append(TextYanked(text, before, after))
+        self._state.yank_cursor = 0
+        self._state.yank_bounds = (before, after)
+        return new_value
 
     def _yank_pop(self, current: BufferValue, events: list[Event]) -> BufferValue:
         if not self._state.yank_active:
@@ -1917,10 +1919,7 @@ class EditorSession:
         new = self._kill_ring[cursor]
         after = start + len(new)
         new_text = current.text[:start] + new + current.text[end:]
-        events.append(TextYankPopped(old, new, start, after))
-        self._state.yank_cursor = cursor
-        self._state.yank_bounds = (start, after)
-        return replace(
+        new_value = replace(
             current,
             text=new_text,
             point=after,
@@ -1929,3 +1928,7 @@ class EditorSession:
                 _adjust_mark_delete(current.mark, start, end), start, len(new)
             ),
         )
+        events.append(TextYankPopped(old, new, start, after))
+        self._state.yank_cursor = cursor
+        self._state.yank_bounds = (start, after)
+        return new_value

@@ -1,6 +1,16 @@
 # Twenty-fifth slice: failure-atomic history and kill-ring updates (TD-8)
 
-**Status:** ready (issue #82).
+**Status:** implemented on the code branch (issue #82). Honesty record: the
+planned four arms—undo descent, redo direction, kill-ring insertion, and
+kill-ring append—were all RED on hidden-state disagreement and GREEN after
+prepare-before-commit reordering. The required sibling-path audit found the
+same class in region kill/copy, yank/yank-pop, and successful save, so the slice
+fixed and pinned those five adjacent paths too rather than closing TD-8 around
+known twins. All nine old-order mutations fail with verified source binding;
+restored focused and wider state suites pass. The shared semantic snapshot moved to
+`tests/conftest.py`. No successful editing semantics, parity rows, public APIs,
+or TD-9 behavior changed. Full gates and exact-SHA review remain the delivery
+gate.
 
 **Architecture gate:** design 0002 decision 4 requires all changes to occur
 inside the serialized command/session boundary and requires a failed grouped

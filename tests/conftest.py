@@ -4,6 +4,33 @@ from __future__ import annotations
 
 from drei.files import FilePort
 from drei.process import ProcessResult, ProcessTimedOut
+from drei.session import EditorSession
+
+
+def semantic_state_snapshot(session: EditorSession) -> tuple[object, ...]:
+    """Authoritative editing state used by failure-atomicity probes."""
+    state = session._state
+    return (
+        id(session.buffer.current),
+        session.buffer.current,
+        session.windows,
+        session.transcript,
+        id(state.undo_history),
+        tuple(state.undo_history),
+        id(state.undo_redo),
+        tuple(state.undo_redo),
+        state.undo_descending,
+        id(session._kill_ring),
+        session.kill_ring,
+        tuple(
+            (buffer_id, state.saved_text)
+            for buffer_id, state in session._states.items()
+        ),
+        state.last_was_kill,
+        state.yank_active,
+        state.yank_cursor,
+        state.yank_bounds,
+    )
 
 
 class FakeFilePort(FilePort):

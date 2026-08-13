@@ -49,27 +49,6 @@ and the benefit is currently zero.
 into an immutable mapping type once in the codec, so every downstream alias
 is safe by construction, rather than copying at each hand-off.
 
-## TD-8 (finding 23) — `_undo` and `_kill_line` mutate session state before validating the value
-
-**Location:** `src/drei/session.py` — `_undo` (history pop / redo append
-before the `replace(...)` that constructs the new `BufferValue`), `_kill_line`
-(kill-ring mutation before construction).
-**Severity:** currently unreachable; the ordering is the debt.
-
-Both mutate session-owned state *before* the new `BufferValue` is
-constructed. If `BufferValue.__post_init__` ever raised there, the undo
-stacks or the kill ring would be mutated with no event recorded — live state
-and transcript would silently disagree. Today the inputs cannot violate the
-invariants, so the failure is unreachable; the comment claiming these paths
-are "atomic by construction" overstates what the code guarantees.
-
-**Why deferred:** no reachable failure, and the reordering is mechanical but
-touches two hot paths that are heavily pinned.
-
-**Suggested approach:** construct the new value first, then mutate — the same
-shape the other dispatch arms already use. No behavior change, so the
-existing pins are the regression test; then the comment becomes true.
-
 ## TD-9 (finding 29) — `drei FILE` bypasses the command boundary
 
 **Location:** `src/drei/cli.py` — the `OSError` arm prints

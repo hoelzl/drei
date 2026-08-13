@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from typing import NoReturn
+
+import pytest
+from conftest import semantic_state_snapshot
+
+import drei.session as session_module
 from drei.commands import (
     CopyRegionAsKill,
     ExchangePointAndMark,
@@ -127,6 +133,30 @@ def test_kill_region_backward() -> None:
     assert session.kill_ring == ("ello ",)
 
 
+def test_kill_region_construction_failure_preserves_semantic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session("hello world", 0)
+    session.buffer.replace(BufferValue(text="hello world", point=6, mark=1))
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == "hworld"
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(KillRegion())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
+
+
 def test_kill_region_without_mark_is_noop() -> None:
     session = _session("hello", 2)
     outcome = session.dispatch(KillRegion())
@@ -176,6 +206,30 @@ def test_copy_region_pushes_ring_without_changing_text() -> None:
     assert session.buffer.current.mark is None
     assert session.kill_ring == ("hello",)
     assert not session.buffer.current.modified
+
+
+def test_copy_region_construction_failure_preserves_semantic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session("hello world", 0)
+    session.buffer.replace(BufferValue(text="hello world", point=5, mark=0))
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes == {"mark": None}
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(CopyRegionAsKill())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
 
 
 def test_copy_region_without_mark_is_noop() -> None:
