@@ -339,6 +339,7 @@ def test_shipped_editor_resizes_while_find_file_prompt_is_open(
     geometry while preserving the prompt.
     """
     adapter = _adapter(tmp_path)
+    target = tmp_path / "sandbox" / "resized.txt"
 
     with _reaped(adapter):
         started = adapter.start("drei-prompt-resize", _configuration())
@@ -358,11 +359,16 @@ def test_shipped_editor_resizes_while_find_file_prompt_is_open(
         assert _modeline_row(resized_lines) == taller - 2, resized_lines
         assert resized_lines[taller - 1].startswith("Find file:"), resized_lines
 
-        aborted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "g")))
-        assert type(aborted) is EpochCompleted, aborted
-        assert not any(
-            "Find file:" in line for line in _frame_lines(aborted.observation)
-        )
+        accepted: EpochCompleted | TerminalResult
+        for char in str(target):
+            accepted = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(accepted) is EpochCompleted, accepted
+        accepted = adapter.dispatch(KeyInput(ManualTime(0), ("Enter",)))
+        assert type(accepted) is EpochCompleted, accepted
+        accepted_lines = _frame_lines(accepted.observation)
+        assert _modeline_row(accepted_lines) == taller - 2, accepted_lines
+        assert any("Drei: resized.txt --" in line for line in accepted_lines)
+        assert not any("Find file:" in line for line in accepted_lines)
 
         prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
         assert type(prefix) is EpochCompleted, prefix

@@ -150,10 +150,11 @@ None of this lives on `BufferValue`, which stays the frozen per-edit value
 - The **minibuffer** is a single slot of session state, not a buffer: a
   prompt label plus either text input or a *choice* (the permission prompt's
   option list). It is not recursive and has no keymap of its own. While it is
-  open, only its own commands act — every other command is a silent no-op —
-  with one exception: **delivery-class commands** (process output, agent
-  effects, permission requests) are exempt, because dropping a delivery would
-  desync the transcript from the model.
+  open, only its own commands and **external semantic inputs** act — every
+  user editing command is a silent no-op. Process output, agent effects,
+  permission requests, and terminal resize are exempt: dropping a delivery
+  would desync the transcript from the model, while dropping a resize would
+  leave session geometry stale after the terminal changed.
 - **Windows** are layout views over buffers, not editor state: an ordered
   tuple of `WindowValue(buffer_id, point, mark)` plus a focused index.
   Window point is distinct from `BufferValue.point`, so two windows over one

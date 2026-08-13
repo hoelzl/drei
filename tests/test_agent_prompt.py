@@ -10,7 +10,12 @@ which is what keeps the transcript a complete record of what the user did.
 
 from __future__ import annotations
 
-from drei.commands import AgentPromptSubmitted, MinibufferOpened, PromptAgent
+from drei.commands import (
+    AgentPromptSubmitted,
+    FrameResized,
+    MinibufferOpened,
+    PromptAgent,
+)
 from drei.harness import EditorHarness
 from drei.keys import PendingKey, resolve
 
@@ -56,6 +61,20 @@ class TestPrompt:
         assert outcome is not None
         assert AgentPromptSubmitted("explain this") in outcome.events
         assert harness.observation.minibuffer is None
+
+    def test_resize_preserves_agent_prompt_identity(self) -> None:
+        harness = EditorHarness(width=40, height=6)
+        harness.send("C-c")
+        harness.send("a")
+        for char in "explain this":
+            harness.send(char)
+
+        resized = harness.resize(60, 12)
+        outcome = harness.send("RET")
+
+        assert resized.events == (FrameResized(60, 12),)
+        assert outcome is not None
+        assert outcome.events == (AgentPromptSubmitted("explain this"),)
 
     def test_the_prompt_does_not_touch_the_buffer(self) -> None:
         """Typed text goes to the prompt, not the file being edited — the

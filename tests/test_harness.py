@@ -389,9 +389,15 @@ class TestHarnessResize:
         assert harness.observation.minibuffer == ""
         assert len(harness.frame.rows[-1]) == 40
         assert harness.frame.rows[-1].startswith("Find file:")
+        # Prompt identity survives too: typed input still executes find-file,
+        # rather than merely retaining the displayed label and text.
+        for char in "/tmp/resized.txt":
+            harness.send(char)
+        accepted = harness.send("RET")
+        assert accepted is not None
+        assert harness.observation.buffer_id == "resized.txt"
         # ...and the session, not only the renderer, owns the new geometry.
         # Height 6 refuses a split; height 24 permits it after the prompt closes.
-        harness.send("C-g")
         harness.send("C-x")
         harness.send("2")
         assert harness.outcomes[-1].events == (WindowSplit(2),)

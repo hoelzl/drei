@@ -15,6 +15,7 @@ from drei.commands import (
     BufferCreated,
     BufferSelected,
     ForwardChar,
+    FrameResized,
     InsertText,
     KillLine,
     Message,
@@ -22,6 +23,7 @@ from drei.commands import (
     MinibufferAccept,
     MinibufferInput,
     MinibufferOpened,
+    ResizeFrame,
     SetMark,
     SwitchBuffer,
     Undo,
@@ -96,6 +98,21 @@ def test_switch_prompt_carries_the_mru_default() -> None:
     outcome = session.dispatch(SwitchBuffer())
     assert MinibufferOpened("Switch to buffer: ") in outcome.events
     assert session.minibuffer_prompt == "Switch to buffer: "
+
+
+def test_resize_preserves_switch_prompt_identity() -> None:
+    session = _session()
+    session.dispatch(SwitchBuffer())
+    for char in "gamma":
+        session.dispatch(MinibufferInput(char))
+
+    resized = session.dispatch(ResizeFrame(100, 30))
+    accepted = session.dispatch(MinibufferAccept())
+
+    assert resized.events == (FrameResized(100, 30),)
+    assert BufferCreated("gamma", None) in accepted.events
+    assert BufferSelected("gamma") in accepted.events
+    assert session.buffer.buffer_id == BufferId("gamma")
 
 
 def test_abort_leaves_buffer_untouched() -> None:
