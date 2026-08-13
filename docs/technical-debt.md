@@ -173,24 +173,6 @@ contract and deserves the verification-model treatment, not a drive-by.
 **Suggested approach:** record the initial geometry as the transcript's first
 event; pin a replay-reproduces-split-decision property.
 
-## TD-15 (review 0002 finding 16) — parked codec frames die with the child, and effects render out of order
-
-**Location:** `src/drei/pump.py` `_drain`; `src/drei/acp/codec.py`.
-**Severity:** nit-to-minor; requires a malformed line from the peer in the
-same chunk as valid frames.
-
-Frames parsed before a malformed line in one chunk are parked until the
-*next* `receive` — so a protocol error can render in the transcript *before*
-the turn completion that preceded it — and `exited()` → `_reset()` discards
-parked frames, so a turn completion in the child's final output is never
-recorded. The codec's no-loss docstring is true only across calls, not across
-child death.
-
-**Why deferred:** only reachable with a misbehaving peer, and the wedge class
-(cluster C) is the same area of the machine; one slice should take both.
-**Suggested approach:** flush parked frames through the fold before reporting
-the decode error, and drain the park on `exited()` before `_reset()`.
-
 ## TD-16 (review 0002 finding 17) — out-of-turn permission requests are accepted
 
 **Location:** `src/drei/acp/machine.py` — the `session/request_permission`

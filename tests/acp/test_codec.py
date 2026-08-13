@@ -9,11 +9,10 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from drei.acp.codec import AcpDecodeError, JsonRpcDecoder, encode
+from drei.acp.codec import DecodedFrame, DecodeFailure, JsonRpcDecoder, encode
 
 # A representative JSON-RPC request payload.
 _REQUEST = {
@@ -68,20 +67,24 @@ def test_decoder_accepts_literal_utf8_from_peer() -> None:
     # A peer may send literal (unescaped) UTF-8; json.loads accepts both.
     decoder = JsonRpcDecoder()
     decoder.feed('{"text":"héllo"}\n'.encode())
-    assert decoder.messages() == [{"text": "héllo"}]
+    assert decoder.messages() == [DecodedFrame({"text": "héllo"})]
 
 
 def test_decoder_round_trip_single_frame() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(encode(_REQUEST))
-    assert decoder.messages() == [_REQUEST]
+    assert decoder.messages() == [DecodedFrame(_REQUEST)]
     assert decoder.messages() == []  # drained
 
 
 def test_decoder_multiple_frames_one_chunk() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(encode({"n": 1}) + encode({"n": 2}) + encode({"n": 3}))
-    assert decoder.messages() == [{"n": 1}, {"n": 2}, {"n": 3}]
+    assert decoder.messages() == [
+        DecodedFrame({"n": 1}),
+        DecodedFrame({"n": 2}),
+        DecodedFrame({"n": 3}),
+    ]
 
 
 def test_decoder_partial_line_across_feeds() -> None:
@@ -91,7 +94,7 @@ def test_decoder_partial_line_across_feeds() -> None:
     decoder.feed(frame[:mid])
     assert decoder.messages() == []  # incomplete: nothing yet
     decoder.feed(frame[mid:])
-    assert decoder.messages() == [_REQUEST]
+    assert decoder.messages() == [DecodedFrame(_REQUEST)]
 
 
 def test_decoder_split_inside_multibyte_utf8() -> None:
@@ -100,24 +103,19 @@ def test_decoder_split_inside_multibyte_utf8() -> None:
     # Feed byte-by-byte so a multibyte char is split across feeds.
     for i in range(len(frame)):
         decoder.feed(frame[i : i + 1])
-    assert decoder.messages() == [{"text": "世界"}]
+    assert decoder.messages() == [DecodedFrame({"text": "世界"})]
 
 
-def test_decoder_malformed_line_raises_acp_decode_error() -> None:
+def test_decoder_malformed_line_is_an_ordered_failure() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(b"{not json}\n")
-    with pytest.raises(AcpDecodeError) as excinfo:
-        decoder.messages()
-    assert excinfo.value.line == b"{not json}"  # carries the offending bytes
+    assert decoder.messages() == [DecodeFailure(b"{not json}")]
 
 
-def test_decoder_invalid_utf8_raises_acp_decode_error_not_unicode_error() -> None:
-    # A peer sending bytes that aren't valid UTF-8 must surface as AcpDecodeError,
-    # not a raw UnicodeDecodeError leaking across the normalized boundary.
+def test_decoder_invalid_utf8_is_an_ordered_failure() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(b'{"t":"\xff\xfe"}\n')
-    with pytest.raises(AcpDecodeError):
-        decoder.messages()
+    assert decoder.messages() == [DecodeFailure(b'{"t":"\xff\xfe"}')]
 
 
 def test_decoder_literal_utf8_split_mid_multibyte_char() -> None:
@@ -127,34 +125,52 @@ def test_decoder_literal_utf8_split_mid_multibyte_char() -> None:
     frame = '{"text":"世界"}\n'.encode()
     for i in range(len(frame)):
         decoder.feed(frame[i : i + 1])
-    assert decoder.messages() == [{"text": "世界"}]
+    assert decoder.messages() == [DecodedFrame({"text": "世界"})]
 
 
 def test_decoder_recovers_after_malformed_line() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(b"garbage\n" + encode({"ok": True}))
-    with pytest.raises(AcpDecodeError):
-        decoder.messages()
-    # The bad line is consumed; the following valid frame still decodes.
-    assert decoder.messages() == [{"ok": True}]
+    assert decoder.messages() == [
+        DecodeFailure(b"garbage"),
+        DecodedFrame({"ok": True}),
+    ]
+    assert decoder.messages() == []
 
 
 def test_decoder_preserves_frames_parsed_before_malformed_line() -> None:
-    # Review 0001 finding 8: frames parsed before a malformed line in the same
-    # drain must survive the error — a lost initialize response would wedge
-    # the machine; a lost permission request would hang the agent.
     decoder = JsonRpcDecoder()
     decoder.feed(encode({"a": 1}) + b"notjson\n" + encode({"b": 2}))
-    with pytest.raises(AcpDecodeError):
-        decoder.messages()
-    # The bad line is consumed; every valid frame is still delivered, in order.
-    assert decoder.messages() == [{"a": 1}, {"b": 2}]
+    assert decoder.messages() == [
+        DecodedFrame({"a": 1}),
+        DecodeFailure(b"notjson"),
+        DecodedFrame({"b": 2}),
+    ]
+
+
+def test_decoder_preserves_multiple_failures_in_wire_order() -> None:
+    decoder = JsonRpcDecoder()
+    decoder.feed(b"bad-one\nbad-two\n" + encode({"ok": 3}))
+    assert decoder.messages() == [
+        DecodeFailure(b"bad-one"),
+        DecodeFailure(b"bad-two"),
+        DecodedFrame({"ok": 3}),
+    ]
+
+
+def test_decoder_returns_complete_results_once_and_keeps_only_partial_bytes() -> None:
+    decoder = JsonRpcDecoder()
+    decoder.feed(encode({"a": 1}) + b'{"b":')
+    assert decoder.messages() == [DecodedFrame({"a": 1})]
+    assert decoder.messages() == []
+    decoder.feed(b"2}\n")
+    assert decoder.messages() == [DecodedFrame({"b": 2})]
 
 
 def test_decoder_blank_lines_ignored() -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(b"\n" + encode({"x": 1}) + b"\n\n")
-    assert decoder.messages() == [{"x": 1}]
+    assert decoder.messages() == [DecodedFrame({"x": 1})]
 
 
 @settings(max_examples=100, deadline=None, derandomize=True)
@@ -162,7 +178,7 @@ def test_decoder_blank_lines_ignored() -> None:
 def test_encode_decode_round_trip(value: object) -> None:
     decoder = JsonRpcDecoder()
     decoder.feed(encode(value))
-    assert decoder.messages() == [value]
+    assert decoder.messages() == [DecodedFrame(value)]
 
 
 @st.composite
@@ -201,5 +217,9 @@ def test_chunked_delivery_yields_all_messages_in_order(
     out: list[object] = []
     for chunk in chunks:
         decoder.feed(chunk)
-        out.extend(decoder.messages())
+        results = decoder.messages()
+        assert all(isinstance(result, DecodedFrame) for result in results)
+        out.extend(
+            result.value for result in results if isinstance(result, DecodedFrame)
+        )
     assert out == values

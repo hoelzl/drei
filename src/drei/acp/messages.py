@@ -15,7 +15,8 @@ JSON-RPC 2.0 envelope rules enforced here:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+
+from drei.acp.codec import JsonValue as JsonValue
 
 # ACP method names (the subset Drei's client speaks or handles). Constants so
 # downstream dispatch is never stringly-typed against literals.
@@ -35,7 +36,6 @@ TERMINAL_RELEASE = "terminal/release"
 TERMINAL_WAIT_FOR_EXIT = "terminal/wait_for_exit"
 TERMINAL_KILL = "terminal/kill"
 
-JsonValue = Any
 type RequestId = int | str
 
 

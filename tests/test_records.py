@@ -1,5 +1,6 @@
 import pytest
 
+from drei.acp.codec import DecodedFrame, DecodeFailure
 from drei.commands import (
     BackwardChar,
     BufferObservation,
@@ -15,6 +16,8 @@ from drei.commands import (
 
 def test_records_are_frozen() -> None:
     records = [
+        (DecodedFrame({"ok": True}), "value"),
+        (DecodeFailure(b"bad"), "line"),
         (InsertText("x"), "text"),
         (ForwardChar(), None),
         (BackwardChar(), None),
@@ -38,6 +41,16 @@ def test_records_are_frozen() -> None:
         # exception type varies by CPython version).
         with pytest.raises((AttributeError, TypeError)):
             record.other = None  # type: ignore[attr-defined]
+
+
+def test_decode_result_records_are_slotted() -> None:
+    records = (
+        (DecodedFrame({"ok": True}), ("value",)),
+        (DecodeFailure(b"bad"), ("line",)),
+    )
+    for record, fields in records:
+        assert type(record).__slots__ == fields
+        assert not hasattr(record, "__dict__")
 
 
 def test_structural_equality() -> None:
