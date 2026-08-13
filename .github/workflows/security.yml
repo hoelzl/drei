@@ -39,5 +39,7 @@ jobs:
         with:
           version: "0.11.29"
           python-version: "3.12"
+          # Preserve the pre-v9 cache-size policy explicitly.
+          prune-cache: true
       - name: Audit locked dependencies
         run: uv --no-config --preview-features audit-command audit --locked

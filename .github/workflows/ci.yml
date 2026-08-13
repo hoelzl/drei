@@ -27,6 +27,8 @@ jobs:
           version: "0.11.29"
           python-version: ${{ matrix.python-version }}
           enable-cache: true
+          # Preserve the pre-v9 cache-size policy explicitly.
+          prune-cache: true
       - run: uv --no-config sync --all-groups --locked
       - run: uv --no-config run pre-commit run --all-files
       - run: uv --no-config run pytest --cov --cov-report=term-missing
@@ -43,6 +45,8 @@ jobs:
         with:
           version: "0.11.29"
           python-version: "3.12"
+          # Preserve the pre-v9 cache-size policy explicitly.
+          prune-cache: true
       - run: uv --no-config build
       - name: Smoke-test wheel
         run: uv --no-config run --no-project --with ./dist/*.whl drei --version
@@ -70,6 +74,8 @@ jobs:
         with:
           version: "0.11.29"
           python-version: "3.13"
+          # Preserve the pre-v9 cache-size policy explicitly.
+          prune-cache: true
       - run: uv --no-config sync --all-groups --locked
       - name: Run differential scenarios
         env:
