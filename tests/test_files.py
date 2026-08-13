@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-from conftest import FakeFilePort
+from typing import NoReturn
 
+import pytest
+from conftest import FakeFilePort, semantic_state_snapshot
+
+import drei.session as session_module
 from drei.commands import (
     BackwardChar,
     BufferSaved,
@@ -57,6 +60,33 @@ def test_save_writes_through_port_and_clears_modified() -> None:
     assert session.buffer.current.modified is False
     assert outcome.observation.modified is False
     assert BufferSaved("/tmp/notes.txt") in outcome.events
+
+
+def test_save_construction_failure_prevents_write_and_preserves_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = FakeFilePort({"/tmp/notes.txt": "old"})
+    session = _session("old", 3, file_path="/tmp/notes.txt", port=port)
+    session.dispatch(InsertText("new"))
+    before = semantic_state_snapshot(session)
+    files_before = dict(port.files)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes == {"modified": False}
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(SaveBuffer())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
+    assert port.files == files_before
 
 
 def test_save_without_file_path_is_failure_event_not_crash() -> None:

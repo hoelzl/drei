@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+from typing import NoReturn
+
+import pytest
+from conftest import semantic_state_snapshot
+
+import drei.session as session_module
 from drei.commands import (
     ForwardChar,
     InsertText,
@@ -57,6 +63,31 @@ def test_pop_replaces_with_next_older_entry() -> None:
     outcome = session.dispatch(YankPop())
     assert TextYankPopped("two", "one", 1, 4) in outcome.events
     assert session.buffer.current.text == "\none\nthree"
+
+
+def test_yank_pop_construction_failure_preserves_semantic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _two_entry_session()
+    session.dispatch(Yank())
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == "\none\nthree"
+        assert changes["point"] == 4
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(YankPop())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
 
 
 def test_pop_cycles_and_wraps() -> None:

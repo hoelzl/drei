@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from conftest import FakeFilePort
+from typing import NoReturn
 
+import pytest
+from conftest import FakeFilePort, semantic_state_snapshot
+
+import drei.session as session_module
 from drei.commands import (
     BackwardChar,
     ForwardChar,
@@ -42,6 +46,29 @@ def test_kill_line_at_eol_kills_newline() -> None:
     assert session.buffer.current.text == "abcd"
     assert session.buffer.current.point == 2
     assert TextKilled("\n", 2, 3, "forward") in outcome.events
+
+
+def test_kill_line_construction_failure_preserves_empty_ring_and_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session("ab", 0)
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == ""
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(KillLine())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
 
 
 def test_kill_line_at_buffer_end_is_noop() -> None:
@@ -86,6 +113,30 @@ def test_consecutive_kills_append_into_one_entry() -> None:
     assert session.kill_ring == ("ab\n",)
 
 
+def test_kill_line_append_failure_preserves_ring_and_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session("ab\ncd", 0)
+    session.dispatch(KillLine())  # ring: ("ab",), text: "\ncd"
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == "cd"
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(KillLine())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
+
+
 def test_non_kill_command_breaks_chain() -> None:
     session = _session("ab\ncd", 0)
     session.dispatch(KillLine())
@@ -115,6 +166,31 @@ def test_yank_inserts_newest_and_moves_point_past() -> None:
     assert session.buffer.current.point == 2
     assert TextYanked("ab", 0, 2) in outcome.events
     assert outcome.observation.point == 2
+
+
+def test_yank_construction_failure_preserves_semantic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session("ab\ncd", 0)
+    session.dispatch(KillLine())  # ring: ("ab",), text: "\ncd"
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == "ab\ncd"
+        assert changes["point"] == 2
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(Yank())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
 
 
 def test_noop_insert_does_not_break_chain() -> None:

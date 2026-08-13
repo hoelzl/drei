@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from conftest import FakeFilePort
+from typing import NoReturn
 
+import pytest
+from conftest import FakeFilePort, semantic_state_snapshot
+
+import drei.session as session_module
 from drei.commands import (
     BackwardChar,
     ForwardChar,
@@ -50,6 +54,30 @@ def test_undo_reverts_insert() -> None:
     assert not session.buffer.current.modified
 
 
+def test_undo_construction_failure_preserves_semantic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    session.dispatch(InsertText("hello"))
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == ""
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(Undo())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
+
+
 def test_undo_twice_descends() -> None:
     session = _session()
     session.dispatch(InsertText("ab"))
@@ -59,6 +87,32 @@ def test_undo_twice_descends() -> None:
     session.dispatch(Undo())  # removes "ab"
     assert session.buffer.current.text == ""
     assert session.buffer.current.point == 0
+
+
+def test_redo_construction_failure_preserves_semantic_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    session.dispatch(InsertText("hello"))
+    session.dispatch(Undo())
+    session.dispatch(BackwardChar())  # event-emitting command flips to redo
+    before = semantic_state_snapshot(session)
+    calls = 0
+
+    def fail_replace(instance: object, /, **changes: object) -> NoReturn:
+        nonlocal calls
+        assert isinstance(instance, BufferValue)
+        assert changes["text"] == "hello"
+        calls += 1
+        raise RuntimeError("injected BufferValue construction failure")
+
+    monkeypatch.setattr(session_module, "replace", fail_replace)
+
+    with pytest.raises(RuntimeError, match="injected BufferValue"):
+        session.dispatch(Undo())
+
+    assert calls == 1
+    assert semantic_state_snapshot(session) == before
 
 
 def test_undo_restores_point() -> None:
