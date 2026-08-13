@@ -25,7 +25,7 @@ import threading
 from collections.abc import Callable
 from typing import Protocol
 
-from drei.acp.codec import AcpDecodeError, JsonRpcDecoder, encode
+from drei.acp.codec import DecodeFailure, JsonRpcDecoder, encode
 from drei.acp.machine import (
     AcpMachine,
     AcpStateError,
@@ -44,7 +44,6 @@ from drei.acp.machine import (
 )
 from drei.acp.messages import (
     AcpProtocolError,
-    JsonValue,
     Message,
     parse_message,
     to_json,
@@ -276,7 +275,13 @@ class AgentPump:
             return
         self._decoder.feed(data)
         effects: list[SessionEffect] = []
-        for frame in self._drain(effects):
+        for result in self._decoder.messages():
+            if isinstance(result, DecodeFailure):
+                effects.append(
+                    ProtocolError(detail=f"invalid JSON on ACP wire: {result.line!r}")
+                )
+                continue
+            frame = result.value
             try:
                 message = parse_message(frame)
             except AcpProtocolError as error:
@@ -390,20 +395,6 @@ class AgentPump:
         self._machine, request = start(self._machine)
         self._write(request, harness)
         return True
-
-    def _drain(self, effects: list[SessionEffect]) -> list[JsonValue]:
-        # TODO: [tech-debt] TD-15 — frames parked across a malformed line
-        # flush only on the NEXT receive (so a protocol error can render
-        # before the turn completion that preceded it) and are silently
-        # discarded if the child dies first. See docs/technical-debt.md.
-        try:
-            return self._decoder.messages()
-        except AcpDecodeError as error:
-            # The offending line is consumed and frames already parsed from
-            # the same drain are retained for the next call, so nothing valid
-            # is lost by reporting this and moving on.
-            effects.append(ProtocolError(detail=str(error)))
-            return []
 
     def _apply(self, effects: list[SessionEffect], harness: EditorHarness) -> None:
         """Split the drain's effects into what the pump acts on and what the

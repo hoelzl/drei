@@ -1,6 +1,15 @@
 # Twenty-fourth slice: ordered ACP decode results (TD-15)
 
-**Status:** ready (issue #79).
+**Status:** implemented on the code branch (issue #79). Honesty record: the
+machine-valid final-chunk acceptance trace is update → malformed line → prompt
+completion → immediate exit, avoiding the plan's warned ambiguity around a
+post-completion update. The codec now returns frozen `DecodedFrame` and
+`DecodeFailure` values for every complete nonblank line, retains only a partial
+trailing line, and the pump folds one ordered result sequence through one
+delivery. `AcpDecodeError` was removed rather than retained as uncovered dead
+exception control flow. Regroup-failures-first and stop-at-first-failure
+mutations both fail the focused codec/pump order tests. Full gates and code-PR
+review remain the delivery gate.
 
 **Architecture gate:** design 0003 consequences 2/3 and feature B.5 put ACP
 framing in a pure transport-independent codec and require asynchronous peer

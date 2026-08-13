@@ -9,23 +9,27 @@ SDK (the real ``hermes acp`` peer): one JSON-RPC value per line,
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 JsonValue = Any
 
 
-class AcpDecodeError(Exception):
-    """A wire line was not valid JSON. Carries the offending bytes.
+@dataclass(frozen=True, slots=True)
+class DecodedFrame:
+    """One complete, valid JSON value from the ACP wire."""
 
-    Raised instead of letting a bare ``json.JSONDecodeError`` escape across
-    the boundary — the same normalized-error discipline as ``drei.files`` /
-    ``drei.process``.
-    """
+    value: JsonValue
 
-    def __init__(self, line: bytes, cause: Exception) -> None:
-        super().__init__(f"invalid JSON on ACP wire: {line!r} ({cause})")
-        self.line = line
-        self.__cause__ = cause
+
+@dataclass(frozen=True, slots=True)
+class DecodeFailure:
+    """One complete ACP wire line that was not valid JSON."""
+
+    line: bytes
+
+
+DecodeResult = DecodedFrame | DecodeFailure
 
 
 def encode(message: JsonValue) -> bytes:
@@ -42,33 +46,26 @@ class JsonRpcDecoder:
 
     Bytes arrive from the child in arbitrary chunks, not line-aligned (the
     §C streaming pump feeds whatever the pipe delivered). ``feed`` buffers;
-    ``messages`` drains and returns each complete parsed frame in order. A
-    malformed line raises :class:`AcpDecodeError`; the offending line is
-    consumed, and frames already parsed from the same drain are retained and
-    returned by the next ``messages()`` call — no valid frame is ever lost
-    (a dropped initialize response would wedge the machine; a dropped
-    permission request would hang the agent).
+    ``messages`` drains every complete line as an ordered decoded-frame or
+    decode-failure result. Only an incomplete trailing line remains buffered.
     """
 
     def __init__(self) -> None:
         self._buffer = bytearray()
-        self._parsed: list[JsonValue] = []
 
     def feed(self, data: bytes) -> None:
         self._buffer.extend(data)
 
-    def messages(self) -> list[JsonValue]:
-        """Drain and parse every complete ``\\n``-terminated frame buffered so far."""
+    def messages(self) -> list[DecodeResult]:
+        """Drain every complete ``\n``-terminated wire line in order."""
+        out: list[DecodeResult] = []
         while (idx := self._buffer.find(b"\n")) != -1:
             line = bytes(self._buffer[:idx])
             del self._buffer[: idx + 1]
             if not line.strip():
                 continue  # tolerate blank lines between frames
             try:
-                self._parsed.append(json.loads(line))
-            except (json.JSONDecodeError, UnicodeDecodeError) as error:
-                # Parsed frames stay parked on the instance for the next call.
-                raise AcpDecodeError(line, error) from error
-        out = self._parsed
-        self._parsed = []
+                out.append(DecodedFrame(json.loads(line)))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                out.append(DecodeFailure(line))
         return out

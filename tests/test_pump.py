@@ -373,6 +373,42 @@ class TestDelivery:
 
         assert "protocol error" in _agent_text(harness)
 
+    def test_valid_frames_and_multiple_decode_failures_share_wire_order_and_delivery(
+        self,
+    ) -> None:
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        _handshake(pump, harness, port)
+        before = len(harness.outcomes)
+
+        pump.receive(
+            _frames(_chunk("sess-1", "first-valid"))
+            + b"bad-one\n"
+            + _frames(_chunk("sess-1", "second-valid"))
+            + b"bad-two\n",
+            harness,
+        )
+
+        transcript = _agent_text(harness)
+        markers = (
+            "first-valid",
+            "invalid JSON on ACP wire: b'bad-one'",
+            "second-valid",
+            "invalid JSON on ACP wire: b'bad-two'",
+        )
+        assert all(transcript.count(marker) == 1 for marker in markers), transcript
+        assert [transcript.index(marker) for marker in markers] == sorted(
+            transcript.index(marker) for marker in markers
+        )
+        deliveries = [
+            event
+            for outcome in harness.outcomes[before:]
+            for event in outcome.events
+            if isinstance(event, AgentTranscriptUpdated)
+        ]
+        assert len(deliveries) == 1
+
     def test_a_frame_that_is_not_a_jsonrpc_envelope_is_recorded(self) -> None:
         """Valid JSON, invalid envelope: the codec is happy and the message
         layer is not. Both failures land in the same place."""
@@ -537,6 +573,36 @@ class TestPermissions:
 
 
 class TestChildFailure:
+    def test_final_complete_frames_survive_a_malformed_line_and_immediate_exit(
+        self,
+    ) -> None:
+        port = FakeStreamingPort()
+        pump = _pump(port)
+        harness = EditorHarness(width=40, height=8)
+        child = _handshake(pump, harness, port)
+
+        pump.receive(
+            _frames(_chunk("sess-1", "final-before-error"))
+            + b"{not json}\n"
+            + _frames(_completed(child.sent()[2]["id"])),
+            harness,
+        )
+        pump.exited(1, harness)
+
+        transcript = _agent_text(harness)
+        markers = (
+            "final-before-error",
+            "protocol error: invalid JSON on ACP wire: b'{not json}'",
+            "── end turn (end_turn) ──",
+            "agent exited (status 1)",
+        )
+        assert all(transcript.count(marker) == 1 for marker in markers), transcript
+        assert [transcript.index(marker) for marker in markers] == sorted(
+            transcript.index(marker) for marker in markers
+        )
+        harness.send("x")
+        assert harness.observation.text == "x"
+
     def test_a_child_that_exits_mid_turn_leaves_the_editor_usable(self) -> None:
         """0005 D6: a peer failure, not a crash. Recorded in the transcript,
         the machine back to DISCONNECTED, and the next prompt starts fresh."""

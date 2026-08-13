@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import drei.acp as acp_pkg
-from drei.acp import AcpDecodeError, JsonRpcDecoder, encode
+from drei.acp import (
+    DecodedFrame,
+    DecodeFailure,
+    JsonRpcDecoder,
+    encode,
+)
 
 
 def test_top_level_reexports_codec() -> None:
     assert acp_pkg.encode is encode
     assert acp_pkg.JsonRpcDecoder is JsonRpcDecoder
-    assert acp_pkg.AcpDecodeError is AcpDecodeError
+    assert acp_pkg.DecodedFrame is DecodedFrame
+    assert acp_pkg.DecodeFailure is DecodeFailure
 
 
 def test_lazy_method_constants_resolve() -> None:
@@ -29,5 +35,11 @@ def test_message_layer_is_typed_not_object() -> None:
 
 
 def test_dir_lists_public_surface() -> None:
-    expected = {"encode", "JsonRpcDecoder", "AcpDecodeError", "messages"}
+    expected = {
+        "encode",
+        "JsonRpcDecoder",
+        "DecodedFrame",
+        "DecodeFailure",
+        "messages",
+    }
     assert set(dir(acp_pkg)) >= expected

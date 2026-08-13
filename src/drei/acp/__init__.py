@@ -16,7 +16,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from drei.acp.codec import AcpDecodeError, JsonRpcDecoder, encode
+from drei.acp.codec import (
+    DecodedFrame,
+    DecodeFailure,
+    JsonRpcDecoder,
+    encode,
+)
 
 if TYPE_CHECKING:
     # Re-export the message-layer symbols for static typing without importing
@@ -65,8 +70,9 @@ __all__ = [
     "TERMINAL_OUTPUT",
     "TERMINAL_RELEASE",
     "TERMINAL_WAIT_FOR_EXIT",
-    "AcpDecodeError",
     "AcpProtocolError",
+    "DecodeFailure",
+    "DecodedFrame",
     "JsonRpcDecoder",
     "Message",
     "Notification",
