@@ -43,6 +43,16 @@ def test_records_are_frozen() -> None:
             record.other = None  # type: ignore[attr-defined]
 
 
+def test_decode_result_records_are_slotted() -> None:
+    records = (
+        (DecodedFrame({"ok": True}), ("value",)),
+        (DecodeFailure(b"bad"), ("line",)),
+    )
+    for record, fields in records:
+        assert type(record).__slots__ == fields
+        assert not hasattr(record, "__dict__")
+
+
 def test_structural_equality() -> None:
     assert InsertText("x") == InsertText("x")
     assert ForwardChar() == ForwardChar()

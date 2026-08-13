@@ -11,8 +11,8 @@ exception control flow. Regroup-failures-first and stop-at-first-failure
 mutations both fail the focused codec/pump order tests. Full gates and code-PR
 review remain the delivery gate. Round-one review added package-level runtime
 and strict-type exports for `DecodeResult` and the canonical `JsonValue` alias,
-and placed both result records in the frozen/slotted record matrix; the exact
-mutable-record mutation now fails that matrix.
+and placed both result records in the frozen/slotted record matrix. Independent
+mutable-record and slots-only mutations now fail the focused matrix.
 
 **Architecture gate:** design 0003 consequences 2/3 and feature B.5 put ACP
 framing in a pure transport-independent codec and require asynchronous peer
