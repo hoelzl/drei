@@ -22,7 +22,20 @@ from dataclasses import dataclass
 from typing import Literal
 
 from drei.commands import EditorExited
-from drei.files import FilePort
+from drei.files import (
+    FilePort,
+    SystemFilePort,
+    VisitOpened,
+    VisitRejected,
+    resolve_visit,
+)
+from drei.genesis import (
+    KnownFrame,
+    SessionGenesisV1,
+    opened_genesis,
+    provided_genesis,
+    scratch_genesis,
+)
 from drei.harness import EditorHarness
 from drei.input import (
     AgentBytes,
@@ -32,6 +45,7 @@ from drei.input import (
     Key,
     Resize,
 )
+from drei.model import Buffer, BufferId, BufferValue
 from drei.pump import DEFAULT_AGENT_ARGV, AgentIo, AgentPump
 from drei.streaming import StreamingProcessPort, SystemStreamingProcessPort
 
@@ -277,7 +291,7 @@ def run_editor(
     agent_port: StreamingProcessPort | None = None,
     agent_argv: tuple[str, ...] = DEFAULT_AGENT_ARGV,
     agent_cwd: str | None = None,
-) -> None:
+) -> VisitRejected | SessionGenesisV1:
     """Run the editor loop over an explicit terminal port.
 
     Input arrives as one totally ordered stream of :class:`InputEvent` from
@@ -293,6 +307,14 @@ def run_editor(
     agent installed pays nothing for one.
     """
     cooperating = "TERMVERIFY_SEED" in os.environ
+    opened: VisitOpened | None = None
+    if file_path is not None:
+        startup = resolve_visit(
+            file_port if file_port is not None else SystemFilePort(), file_path
+        )
+        if isinstance(startup, VisitRejected):
+            return startup
+        opened = startup
     # Built before raw mode: it touches nothing, and having it exist
     # unconditionally is what lets the `finally` below terminate a child
     # without asking whether there is one.
@@ -317,13 +339,17 @@ def run_editor(
         # the source reports every change as a Resize event (plan 0015 V4).
         physical_width, physical_height = port.get_size()
         editor_height = max(physical_height - 1, 0) if cooperating else physical_height
-        harness = EditorHarness(
-            width=physical_width,
-            height=editor_height,
-            file_port=file_port,
-            file_path=file_path,
-            initial_text=initial_text,
-        )
+        frame = KnownFrame(physical_width, editor_height)
+        if opened is not None:
+            genesis = opened_genesis(opened, frame)
+        elif initial_text:
+            genesis = provided_genesis(
+                Buffer(BufferId("scratch"), BufferValue(text=initial_text, point=0)),
+                frame,
+            )
+        else:
+            genesis = scratch_genesis(frame)
+        harness = EditorHarness.from_genesis(genesis, file_port=file_port)
         token = 0
 
         def mark_ready(cursor: tuple[int, int]) -> None:
@@ -406,7 +432,7 @@ def run_editor(
                         port, harness, mark_ready=None if exiting else input_readiness
                     )
                     if exiting:
-                        return
+                        return harness.genesis
     finally:
         # The child goes first: a leaked `hermes acp` holding a pipe outlives a
         # garbled terminal, and terminating it is what releases the agent

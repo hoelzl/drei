@@ -8,7 +8,8 @@ CLI boundary (startup load and saves in the shipped executable).
 
 from __future__ import annotations
 
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
 
 class FilePort(Protocol):
@@ -25,11 +26,68 @@ class FilePort(Protocol):
     def write(self, path: str, text: str) -> None: ...
 
 
-LF = "\n"
-CRLF = "\r\n"
+@dataclass(frozen=True, slots=True)
+class VisitOpened:
+    """Canonical semantic facts for a valid literal visit target."""
+
+    origin: Literal["existing_file", "missing_file"]
+    path: str
+    buffer_id: str
+    text: str
+    saved_text: str
+    line_ending: LineEnding
 
 
-def detect_line_ending(text: str) -> str:
+@dataclass(frozen=True, slots=True)
+class VisitRejected:
+    """A path that cannot become an ordinary visiting buffer."""
+
+    path: str
+    error: str
+
+
+VisitResolution = VisitOpened | VisitRejected
+
+
+def resolve_visit(port: FilePort, path: str) -> VisitResolution:
+    """Resolve one literal visit request through ``port``."""
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if not name:
+        return VisitRejected(path, "empty-basename")
+    try:
+        file_text = port.read(path)
+    except FileNotFoundError:
+        return VisitOpened(
+            origin="missing_file",
+            path=path,
+            buffer_id=name,
+            text="",
+            saved_text="",
+            line_ending=LF,
+        )
+    except UnicodeDecodeError:
+        return VisitRejected(path, "io-error")
+    except OSError as error:
+        return VisitRejected(path, normalize_os_error(error))
+    line_ending = detect_line_ending(file_text)
+    text = to_buffer_text(file_text, line_ending)
+    return VisitOpened(
+        origin="existing_file",
+        path=path,
+        buffer_id=name,
+        text=text,
+        saved_text=text,
+        line_ending=line_ending,
+    )
+
+
+type LineEnding = Literal["\n", "\r\n"]
+
+LF: Literal["\n"] = "\n"
+CRLF: Literal["\r\n"] = "\r\n"
+
+
+def detect_line_ending(text: str) -> LineEnding:
     """The line ending a save should write back for this file text.
 
     ``CRLF`` only when *every* line separator in the text is CRLF; ``LF``

@@ -14,9 +14,10 @@ scenario skips on other platforms (same as the other shipped scenarios).
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 from termverify import (
@@ -31,6 +32,7 @@ from termverify import (
     RunConfiguration,
     RunFinished,
     Started,
+    StartTerminated,
     TerminalConfiguration,
     TextInput,
 )
@@ -72,15 +74,36 @@ def _reaped(adapter: ConptyAdapter) -> Iterator[ConptyAdapter]:
             child.close(force=True)
 
 
-def _adapter(tmp_path: Path) -> ConptyAdapter:
+def _adapter(tmp_path: Path, *argv: str) -> ConptyAdapter:
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir(exist_ok=True)
     return ConptyAdapter(
-        [sys.executable, "-c", "from drei.cli import main; main()"],
+        [sys.executable, "-c", "from drei.cli import main; main()", *argv],
         binding=ConptyBinding(),
         abort_deadline_ms=10_000,
         constraint_ports=CooperationConstraintPorts({"drei-root": str(sandbox)}),
     )
+
+
+def test_invalid_utf8_startup_terminates_before_readiness(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    (sandbox / "invalid.bin").write_bytes(b"\xff")
+    adapter = _adapter(tmp_path, "invalid.bin")
+
+    with _reaped(adapter):
+        terminated = adapter.start("drei-invalid-startup", _configuration())
+
+    assert type(terminated) is StartTerminated, terminated
+    assert terminated.result.outcome == RunFinished(ExitStatus("code", 2))
+    assert terminated.result.observation is not None
+    output = "".join(
+        str(cast(Mapping[str, object], event.data)["chunk"])
+        for event in terminated.result.observation.events
+        if event.type == "terminal.output"
+    )
+    assert "DREI:READY" not in output
+    assert output.count("drei: invalid.bin: io-error") == 1
 
 
 def _dispatch_key(adapter: ConptyAdapter, chord: tuple[str, str] | str) -> Observation:

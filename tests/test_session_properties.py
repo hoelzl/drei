@@ -10,6 +10,7 @@ from drei.commands import (
     BufferSaved,
     CopyRegionAsKill,
     CreateAgentBuffer,
+    DeleteOtherWindows,
     DeliverProcessOutput,
     DeliverSessionEffects,
     ExchangePointAndMark,
@@ -31,8 +32,10 @@ from drei.commands import (
     ProcessOutputRecorded,
     RegionCopied,
     RegionKilled,
+    ResizeFrame,
     SaveBuffer,
     SetMark,
+    SplitWindow,
     SwitchBuffer,
     TextKilled,
     TextRedone,
@@ -43,6 +46,7 @@ from drei.commands import (
     Yank,
     YankPop,
 )
+from drei.genesis import UNKNOWN_FRAME, KnownFrame, provided_genesis
 from drei.model import Buffer, BufferId, BufferValue
 from drei.process import ProcessResult
 from drei.session import EditorSession
@@ -399,6 +403,43 @@ def test_replay_produces_identical_evidence(history: list[object]) -> None:
     assert modified1 == modified2
     assert ring1 == ring2
     assert mark1 == mark2
+
+
+_GENESIS_HISTORY = st.lists(
+    st.one_of(
+        st.builds(InsertText, st.text(min_size=0, max_size=4)),
+        st.just(ForwardChar()),
+        st.just(BackwardChar()),
+        st.builds(
+            ResizeFrame,
+            st.integers(min_value=0, max_value=100),
+            st.integers(min_value=0, max_value=30),
+        ),
+        st.just(SplitWindow()),
+        st.just(DeleteOtherWindows()),
+    ),
+    max_size=20,
+)
+
+
+@given(
+    _GENESIS_HISTORY,
+    st.sampled_from((UNKNOWN_FRAME, KnownFrame(80, 5), KnownFrame(80, 24))),
+)
+def test_genesis_plus_generated_inputs_replays_identically(
+    history: list[object], frame: object
+) -> None:
+    genesis = provided_genesis(
+        Buffer(BufferId("provided"), BufferValue(text="abc", point=1)),
+        frame,  # type: ignore[arg-type]
+    )
+
+    def run() -> tuple[tuple[object, ...], object, object]:
+        session = EditorSession.from_genesis(genesis)
+        outcomes = tuple(session.dispatch(command) for command in history)  # type: ignore[arg-type]
+        return outcomes, session.session_observation(), session._frame_size
+
+    assert run() == run()
 
 
 @given(command_history())

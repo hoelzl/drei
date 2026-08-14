@@ -17,6 +17,7 @@ from drei.commands import (
     SaveFailed,
 )
 from drei.files import FilePort
+from drei.genesis import KnownFrame, SessionGenesisV1
 from drei.keys import PendingKey, UnresolvedKey, resolve
 from drei.model import Buffer, BufferId, BufferValue
 from drei.render import Frame, render_session
@@ -71,6 +72,32 @@ class EditorHarness:
             file_port=file_port,
             frame_size=(width, height),
         )
+        self._initialize_adapter(width, height)
+
+    @classmethod
+    def from_genesis(
+        cls,
+        genesis: SessionGenesisV1,
+        *,
+        file_port: FilePort | None = None,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> EditorHarness:
+        harness = cls.__new__(cls)
+        harness._session = EditorSession.from_genesis(genesis, file_port=file_port)
+        frame_width = (
+            genesis.frame.width if isinstance(genesis.frame, KnownFrame) else 80
+        )
+        frame_height = (
+            genesis.frame.height if isinstance(genesis.frame, KnownFrame) else 24
+        )
+        harness._initialize_adapter(
+            frame_width if width is None else width,
+            frame_height if height is None else height,
+        )
+        return harness
+
+    def _initialize_adapter(self, width: int, height: int) -> None:
         self._width = width
         self._height = height
         self._pending: str | None = None
@@ -225,6 +252,10 @@ class EditorHarness:
             if isinstance(event, Message):
                 return _message_text(event.token, event.subject)
         return ""
+
+    @property
+    def genesis(self) -> SessionGenesisV1:
+        return self._session.genesis
 
     @property
     def observation(self) -> BufferObservation:

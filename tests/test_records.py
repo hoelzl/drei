@@ -12,9 +12,12 @@ from drei.commands import (
     PointMoved,
     TextInserted,
 )
+from drei.files import VisitOpened, VisitRejected
+from drei.genesis import UNKNOWN_FRAME, KnownFrame, scratch_genesis
 
 
 def test_records_are_frozen() -> None:
+    genesis = scratch_genesis(UNKNOWN_FRAME)
     records = [
         (DecodedFrame({"ok": True}), "value"),
         (DecodeFailure(b"bad"), "line"),
@@ -32,6 +35,16 @@ def test_records_are_frozen() -> None:
             ),
             "events",
         ),
+        (
+            VisitOpened("existing_file", "f", "f", "x", "x", "\n"),
+            "text",
+        ),
+        (VisitRejected("f", "io-error"), "error"),
+        (genesis.initial_buffer, "text"),
+        (genesis.initial_windows[0], "point"),
+        (KnownFrame(80, 24), "width"),
+        (UNKNOWN_FRAME, None),
+        (genesis, "focused_window"),
     ]
     for record, field in records:
         if field is not None:
@@ -50,6 +63,21 @@ def test_decode_result_records_are_slotted() -> None:
     )
     for record, fields in records:
         assert type(record).__slots__ == fields
+        assert not hasattr(record, "__dict__")
+
+
+def test_genesis_and_visit_records_are_slotted() -> None:
+    genesis = scratch_genesis(UNKNOWN_FRAME)
+    records = (
+        VisitOpened("existing_file", "f", "f", "x", "x", "\n"),
+        VisitRejected("f", "io-error"),
+        genesis.initial_buffer,
+        genesis.initial_windows[0],
+        KnownFrame(80, 24),
+        UNKNOWN_FRAME,
+        genesis,
+    )
+    for record in records:
         assert not hasattr(record, "__dict__")
 
 
