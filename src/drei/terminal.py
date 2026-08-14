@@ -348,7 +348,7 @@ def run_editor(
         frame = KnownFrame(physical_width, editor_height)
         if opened is not None:
             genesis = opened_genesis(opened, frame)
-        elif initial_text:
+        elif initial_text is not None:
             genesis = provided_genesis(
                 Buffer(BufferId("scratch"), BufferValue(text=initial_text, point=0)),
                 frame,

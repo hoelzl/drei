@@ -26,10 +26,7 @@ class KnownFrame:
 
     def __post_init__(self) -> None:
         dimensions = (self.width, self.height)
-        if any(
-            isinstance(value, bool) or not isinstance(value, int) or value < 0
-            for value in dimensions
-        ):
+        if any(type(value) is not int or value < 0 for value in dimensions):
             raise ValueError("known frame dimensions must be non-negative integers")
 
 
@@ -62,7 +59,7 @@ class InitialBufferGenesis:
             raise TypeError("initial buffer origin must be a string")
         # Dynamic callers can bypass annotations; the malformed-kind test pins
         # this guard even though mypy treats annotated ``str`` as exact here.
-        if self.kind.__class__ is not str:  # type: ignore[unreachable]
+        if type(self.kind) is not str:  # type: ignore[unreachable]
             raise TypeError("initial buffer kind must be a string")
         if type(self.text) is not str:
             raise TypeError("initial buffer text must be a string")
@@ -86,7 +83,9 @@ class InitialBufferGenesis:
             raise ValueError("initial mark outside canonical text")
         if self.line_ending not in (LF, CRLF):
             raise ValueError("unsupported initial line ending")
-        if self.line_ending == CRLF and CRLF in self.text:
+        if detect_line_ending(self.text) == CRLF or (
+            self.line_ending == CRLF and CRLF in self.text
+        ):
             raise ValueError("CRLF genesis text must already be canonical")
 
         clean_basis = not self.modified and self.saved_text == self.text

@@ -203,6 +203,18 @@ def test_scratch_startup_never_reads_the_file_port() -> None:
     assert result.initial_buffer.origin == "scratch"
 
 
+def test_explicit_empty_initial_text_remains_provided_genesis() -> None:
+    result = run_editor(
+        FakePort([]),
+        events=scripted([Key("\x18"), Key("\x03")]),
+        initial_text="",
+    )
+
+    assert isinstance(result, SessionGenesisV1)
+    assert result.initial_buffer.origin == "provided"
+    assert result.initial_buffer.text == ""
+
+
 def test_production_run_uses_full_height_and_emits_no_cooperation_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

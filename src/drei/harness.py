@@ -84,6 +84,12 @@ class EditorHarness:
         height: int | None = None,
     ) -> EditorHarness:
         harness = cls.__new__(cls)
+        dimensions = (width, height)
+        if any(
+            value is not None and (type(value) is not int or value < 0)
+            for value in dimensions
+        ):
+            raise ValueError("adapter geometry must be non-negative integers")
         if isinstance(genesis.frame, KnownFrame) and (
             (width is not None and width != genesis.frame.width)
             or (height is not None and height != genesis.frame.height)

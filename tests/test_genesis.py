@@ -24,6 +24,25 @@ from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession
 
 
+class _IntSubclass(int):
+    pass
+
+
+class _NeverUnequalInt(int):
+    def __ne__(self, other: object) -> bool:
+        return False
+
+
+class _SpoofKind:
+    def __getattribute__(self, name: str) -> object:
+        if name == "__class__":
+            return str
+        return super().__getattribute__(name)
+
+    def __eq__(self, other: object) -> bool:
+        return other == "ordinary"
+
+
 def test_scratch_genesis_is_exact_and_closed() -> None:
     genesis = scratch_genesis(UNKNOWN_FRAME)
 
@@ -125,6 +144,7 @@ def test_direct_constructor_records_known_and_unknown_geometry() -> None:
         lambda: KnownFrame(80, -1),
         lambda: KnownFrame(cast(int, True), 24),
         lambda: KnownFrame(cast(int, "80"), 24),
+        lambda: KnownFrame(_IntSubclass(80), 24),
     ],
 )
 def test_invalid_known_geometry_is_rejected(invalid: Callable[[], object]) -> None:
@@ -142,6 +162,7 @@ def _scratch_buffer() -> InitialBufferGenesis:
         lambda: replace(_scratch_buffer(), buffer_id=""),
         lambda: replace(_scratch_buffer(), origin=cast(Any, 1)),
         lambda: replace(_scratch_buffer(), kind=cast(Any, 1)),
+        lambda: replace(_scratch_buffer(), kind=cast(Any, _SpoofKind())),
         lambda: replace(_scratch_buffer(), text=cast(Any, 1)),
         lambda: replace(_scratch_buffer(), buffer_id="other"),
         lambda: replace(_scratch_buffer(), kind=cast(Any, "generated")),
@@ -168,6 +189,15 @@ def _scratch_buffer() -> InitialBufferGenesis:
             text="a\r\nb\r\n",
             saved_text="a\r\nb\r\n",
             line_ending="\r\n",
+        ),
+        lambda: replace(
+            _scratch_buffer(),
+            origin="existing_file",
+            buffer_id="f",
+            file_path="f",
+            text="a\r\nb\r\n",
+            saved_text="a\r\nb\r\n",
+            line_ending="\n",
         ),
         lambda: replace(
             _scratch_buffer(),
@@ -262,3 +292,15 @@ def test_known_genesis_rejects_mismatched_harness_geometry() -> None:
 
     with pytest.raises(ValueError, match="known genesis geometry"):
         EditorHarness.from_genesis(genesis, width=80, height=5)
+
+
+@pytest.mark.parametrize("width", [_NeverUnequalInt(79), -1])
+def test_harness_rejects_invalid_geometry_before_comparison(width: int) -> None:
+    genesis = scratch_genesis(KnownFrame(80, 24))
+
+    with pytest.raises(ValueError, match="geometry.*integers"):
+        EditorHarness.from_genesis(
+            genesis,
+            width=width,
+            height=24,
+        )

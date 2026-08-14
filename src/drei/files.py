@@ -9,7 +9,7 @@ CLI boundary (startup load and saves in the shipped executable).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 
 class FilePort(Protocol):
@@ -24,6 +24,13 @@ class FilePort(Protocol):
     def read(self, path: str) -> str: ...
 
     def write(self, path: str, text: str) -> None: ...
+
+
+type LineEnding = Literal["\n", "\r\n"]
+type VisitError = Literal["empty-basename", "permission-denied", "io-error"]
+
+LF: Literal["\n"] = "\n"
+CRLF: Literal["\r\n"] = "\r\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +50,19 @@ class VisitRejected:
     """A path that cannot become an ordinary visiting buffer."""
 
     path: str
-    error: str
+    error: VisitError
+
+    def __post_init__(self) -> None:
+        if type(self.path) is not str:
+            raise TypeError("rejected visit path must be a string")
+        if type(self.error) is not str:
+            raise TypeError("rejected visit error must be a string")
+        if self.error not in (  # type: ignore[unreachable]
+            "empty-basename",
+            "permission-denied",
+            "io-error",
+        ):
+            raise ValueError("unsupported rejected visit error")
 
 
 VisitResolution = VisitOpened | VisitRejected
@@ -68,7 +87,7 @@ def resolve_visit(port: FilePort, path: str) -> VisitResolution:
     except UnicodeDecodeError:
         return VisitRejected(path, "io-error")
     except OSError as error:
-        return VisitRejected(path, normalize_os_error(error))
+        return VisitRejected(path, cast(VisitError, normalize_os_error(error)))
     line_ending = detect_line_ending(file_text)
     text = to_buffer_text(file_text, line_ending)
     return VisitOpened(
@@ -79,12 +98,6 @@ def resolve_visit(port: FilePort, path: str) -> VisitResolution:
         saved_text=text,
         line_ending=line_ending,
     )
-
-
-type LineEnding = Literal["\n", "\r\n"]
-
-LF: Literal["\n"] = "\n"
-CRLF: Literal["\r\n"] = "\r\n"
 
 
 def detect_line_ending(text: str) -> LineEnding:

@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
-from drei.files import CRLF, FilePort, VisitOpened, VisitRejected, resolve_visit
+from drei.files import (
+    CRLF,
+    FilePort,
+    VisitError,
+    VisitOpened,
+    VisitRejected,
+    resolve_visit,
+)
 
 
 class RecordingFilePort(FilePort):
@@ -76,10 +85,21 @@ def test_missing_valid_path_resolves_as_an_empty_visiting_buffer() -> None:
     ],
 )
 def test_unreadable_path_resolves_to_a_normalized_rejection(
-    failure: BaseException, token: str
+    failure: BaseException, token: VisitError
 ) -> None:
     port = RecordingFilePort(failure=failure)
 
     result = resolve_visit(port, "notes.txt")
 
     assert result == VisitRejected("notes.txt", token)
+
+
+@pytest.mark.parametrize("token", ["not-found", "invalid", 1])
+def test_visit_rejection_requires_a_closed_error_token(token: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        VisitRejected("notes.txt", cast(Any, token))
+
+
+def test_visit_rejection_requires_a_literal_string_path() -> None:
+    with pytest.raises(TypeError):
+        VisitRejected(cast(Any, 1), "io-error")
