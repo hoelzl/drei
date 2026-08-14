@@ -7,8 +7,10 @@ already-open path it SELECTS that buffer instead of re-reading.
 
 from __future__ import annotations
 
+import pytest
 from conftest import FakeFilePort
 
+import drei.session as session_module
 from drei.commands import (
     BufferCreated,
     BufferOpened,
@@ -21,6 +23,7 @@ from drei.commands import (
     Undo,
     Yank,
 )
+from drei.files import VisitOpened
 from drei.model import Buffer, BufferId, BufferValue
 from drei.session import EditorSession, Event
 
@@ -114,6 +117,32 @@ def test_find_file_same_path_as_current_buffer_is_a_quiet_select() -> None:
     session.dispatch(InsertText("x"))
     events = _find_file(session, "/tmp/a.txt")
     assert events == ()
+
+
+def test_find_file_uses_the_shared_visit_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    calls: list[str] = []
+
+    def fake_resolve(port: object, path: str) -> VisitOpened:
+        calls.append(path)
+        return VisitOpened(
+            origin="existing_file",
+            path=path,
+            buffer_id="shared.txt",
+            text="shared body",
+            saved_text="shared body",
+            line_ending="\n",
+        )
+
+    monkeypatch.setattr(session_module, "resolve_visit", fake_resolve)
+
+    events = _find_file(session, "/tmp/shared.txt")
+
+    assert calls == ["/tmp/shared.txt"]
+    assert session.buffer.current.text == "shared body"
+    assert BufferOpened("/tmp/shared.txt", 11) in events
 
 
 def test_kill_ring_is_global_across_buffers() -> None:

@@ -38,6 +38,16 @@ An owner may use controlled private mutation where measured needs justify it, bu
 
 Direct/in-process and terminal profiles must exercise the same production command path. Structured observation records are authoritative for semantic assertions; terminal frames prove presentation and integration.
 
+Session construction starts from an immutable `SessionGenesisV1`, not from
+ambient constructor defaults. It records the initial ordinary buffer's origin,
+identity, canonical text, point/mark, clean basis and line-ending policy; the
+single initial window and focus; and known or explicitly unknown frame
+geometry. The legacy `EditorSession(Buffer(...))` API is a pure adapter that
+prepares this evidence before installation. Startup and interactive find-file
+share `resolve_visit`; startup rejection occurs before readiness/raw mode,
+while a successful startup adds measured geometry after the existing
+readiness → flush → raw → size lifecycle.
+
 ## Effect ports
 
 Native filesystem, process, and terminal access is mediated by narrow explicit
@@ -45,7 +55,8 @@ ports — Protocol definitions in the core, `System*` implementations at the
 edge, injected by the harness or `run_editor`. Four have shipped:
 
 - **`FilePort`** (`src/drei/files.py`) — `read`/`write` over text. It
-  translates nothing: newline handling is the session's, per buffer, so a
+  translates nothing. The shared visit resolver canonicalizes file text once
+  and records the per-buffer line-ending policy in genesis/session state, so a
   save cannot silently rewrite a file's line endings.
 - **`ProcessPort`** (`src/drei/process.py`) — blocking run-to-completion
   (`run(argv) -> ProcessResult`), with launch failures normalized to tokens

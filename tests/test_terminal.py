@@ -10,7 +10,8 @@ from unittest.mock import patch
 import pytest
 
 import drei.terminal
-from drei.files import SystemFilePort
+from drei.files import SystemFilePort, VisitRejected
+from drei.genesis import KnownFrame, SessionGenesisV1
 from drei.input import (
     AgentBytes,
     AgentExited,
@@ -46,6 +47,7 @@ class FakePort(TerminalPort):
 
     def enter_raw(self) -> None:
         self.raw_entered = True
+        self.journal.append(("raw", None))
 
     def read_key(self) -> str:
         return self.inputs.pop(0)
@@ -58,6 +60,7 @@ class FakePort(TerminalPort):
         self.journal.append(("flush", None))
 
     def get_size(self) -> tuple[int, int]:
+        self.journal.append(("size", None))
         return (10, 3)
 
     def restore(self) -> None:
@@ -114,6 +117,102 @@ def test_editor_writes_readiness_and_exits_on_c_x_c_c() -> None:
     assert port.outputs[0] == "DREI:READY\n"
     assert port.restored
     assert port.raw_entered
+
+
+def test_startup_rejection_precedes_terminal_lifecycle() -> None:
+    port = FakePort([])
+
+    result = run_editor(port, events=scripted([]), file_path="notes/")
+
+    assert result == VisitRejected("notes/", "empty-basename")
+    assert port.journal == []
+    assert port.outputs == []
+    assert not port.raw_entered
+    assert not port.restored
+
+
+def test_file_path_and_initial_text_are_rejected_as_ambiguous() -> None:
+    port = FakePort([])
+
+    with pytest.raises(ValueError, match="initial_text.*file_path"):
+        run_editor(
+            port,
+            events=scripted([]),
+            file_path="notes.txt",
+            initial_text="PAYLOAD",
+        )
+
+    assert port.journal == []
+
+
+def test_successful_startup_preserves_lifecycle_and_installs_opened_genesis() -> None:
+    from conftest import FakeFilePort
+
+    files = FakeFilePort({"notes.txt": "a\r\nb\r\n"})
+    port = FakePort([])
+
+    result = run_editor(
+        port,
+        events=scripted([Key("\x18"), Key("\x03")]),
+        file_port=files,
+        file_path="notes.txt",
+    )
+
+    assert isinstance(result, SessionGenesisV1)
+    assert result.initial_buffer.origin == "existing_file"
+    assert result.initial_buffer.text == "a\nb\n"
+    assert result.initial_buffer.line_ending == "\r\n"
+    assert result.frame == KnownFrame(10, 3)
+    assert port.journal[:4] == [
+        ("write", "DREI:READY\n"),
+        ("flush", None),
+        ("raw", None),
+        ("size", None),
+    ]
+
+
+def test_missing_startup_origin_survives_into_genesis() -> None:
+    from conftest import FakeFilePort
+
+    result = run_editor(
+        FakePort([]),
+        events=scripted([Key("\x18"), Key("\x03")]),
+        file_port=FakeFilePort(),
+        file_path="new.txt",
+    )
+
+    assert isinstance(result, SessionGenesisV1)
+    assert result.initial_buffer.origin == "missing_file"
+
+
+def test_scratch_startup_never_reads_the_file_port() -> None:
+    class NoReadPort:
+        def read(self, path: str) -> str:
+            raise AssertionError("scratch startup must not read")
+
+        def write(self, path: str, text: str) -> None:
+            raise AssertionError("not used")
+
+    result = run_editor(
+        FakePort([]),
+        events=scripted([Key("\x18"), Key("\x03")]),
+        file_port=NoReadPort(),
+    )
+
+    assert isinstance(result, SessionGenesisV1)
+    assert result.initial_buffer.origin == "scratch"
+
+
+def test_explicit_empty_initial_text_remains_provided_genesis() -> None:
+    result = run_editor(
+        FakePort([]),
+        events=scripted([Key("\x18"), Key("\x03")]),
+        initial_text="",
+    )
+
+    assert isinstance(result, SessionGenesisV1)
+    assert result.initial_buffer.origin == "provided"
+    assert result.initial_buffer.text == ""
 
 
 def test_production_run_uses_full_height_and_emits_no_cooperation_bytes(
@@ -288,9 +387,7 @@ def test_c_x_c_c_offers_to_save_a_modified_buffer() -> None:
 
     files = FakeFilePort({"/tmp/notes.txt": "saved"})
     port = _WidePort(["x", "\x18", "\x03", "y"])
-    run_with_keys(
-        port, file_port=files, file_path="/tmp/notes.txt", initial_text="saved"
-    )
+    run_with_keys(port, file_port=files, file_path="/tmp/notes.txt")
 
     # The edit reached disk, and it was asked about first.
     assert files.files["/tmp/notes.txt"] == "xsaved"
@@ -318,7 +415,6 @@ def test_c_x_c_c_does_not_exit_while_the_save_prompt_is_open() -> None:
             events=scripted(keys("x", "\x18", "\x03")),
             file_port=files,
             file_path="/tmp/notes.txt",
-            initial_text="saved",
         )
 
     # Nothing written while the question is still on screen.
@@ -352,7 +448,6 @@ def test_a_failed_save_at_the_exit_prompt_is_readable_on_the_frame() -> None:
             events=scripted(keys("x", "\x18", "\x03", "y")),
             file_port=files,
             file_path="/tmp/notes.txt",
-            initial_text="saved",
         )
 
     # The run did not end (the `y` was answered by the gate, not by an exit),
@@ -390,7 +485,6 @@ def test_the_exit_question_survives_a_narrow_frame_carrying_a_failure() -> None:
             events=scripted(keys("x", "\x18", "\x03", "y")),
             file_port=files,
             file_path="/tmp/notes.txt",
-            initial_text="saved",
         )
 
     echo = _frame_rows(port)[-1][-1]
@@ -818,7 +912,7 @@ def test_cli_opens_existing_file(
 
     main([str(target)])
     assert captured["file_path"] == str(target)
-    assert captured["initial_text"] == "hello"
+    assert "initial_text" not in captured  # run_editor owns shared visit resolution
 
 
 def test_cli_missing_file_opens_empty_visiting_buffer(
@@ -841,7 +935,7 @@ def test_cli_missing_file_opens_empty_visiting_buffer(
 
     main([str(target)])  # must not raise or exit
     assert captured["file_path"] == str(target)
-    assert captured["initial_text"] == ""
+    assert "initial_text" not in captured  # missing-file origin is resolved downstream
 
 
 def test_cli_unreadable_file_exits_2(

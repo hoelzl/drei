@@ -89,13 +89,20 @@ from drei.commands import (
     YankPop,
 )
 from drei.files import (
-    CRLF,
     LF,
     FilePort,
-    detect_line_ending,
+    VisitOpened,
+    VisitRejected,
     normalize_os_error,
-    to_buffer_text,
+    resolve_visit,
     to_file_text,
+)
+from drei.genesis import (
+    KnownFrame,
+    SessionGenesisV1,
+    UnknownFrame,
+    prepare_provided_buffer,
+    provided_genesis,
 )
 from drei.model import Buffer, BufferId, BufferValue
 from drei.process import (
@@ -275,33 +282,7 @@ def _adjust_mark_delete(mark: int | None, start: int, end: int) -> int | None:
     return mark
 
 
-def _shift_index(file_text: str, index: int) -> int:
-    """Map an index in CRLF file text onto the LF-normalized buffer text."""
-    return index - file_text.count(CRLF, 0, index)
-
-
 BufferKind = Literal["ordinary", "generated"]
-
-
-def _visit(value: BufferValue) -> tuple[BufferValue, _BufferState]:
-    """Prepare a buffer value that carries file text, and its state.
-
-    One place decides what visiting a file means, for both entry points (the
-    startup buffer and find-file): remember the file's line ending, hold the
-    text LF-separated in the buffer, and record the text as the clean point
-    unless the value arrived already modified — nothing then proves what the
-    file holds (review 0001 findings 1 and 3).
-    """
-    eol = detect_line_ending(value.text)
-    text = to_buffer_text(value.text, eol)
-    if text != value.text:
-        value = replace(
-            value,
-            text=text,
-            point=_shift_index(value.text, value.point),
-            mark=None if value.mark is None else _shift_index(value.text, value.mark),
-        )
-    return value, _BufferState(None if value.modified else value.text, eol)
 
 
 # The `_minibuffer_kind` values that put the minibuffer in exit mode (plan
@@ -437,18 +418,68 @@ class EditorSession:
         process_port: ProcessPort | None = None,
         frame_size: tuple[int, int] | None = None,
     ) -> None:
-        # The startup buffer arrives holding raw file text (the CLI reads it
-        # through the port); visiting it is the same operation as find-file.
-        initial, initial_state = _visit(buffer.current)
-        buffer.replace(initial)
+        frame = UnknownFrame() if frame_size is None else KnownFrame(*frame_size)
+        self._initialize_from_genesis(
+            provided_genesis(buffer, frame),
+            file_port=file_port,
+            process_port=process_port,
+            shell=buffer,
+        )
+
+    @classmethod
+    def from_genesis(
+        cls,
+        genesis: SessionGenesisV1,
+        *,
+        file_port: FilePort | None = None,
+        process_port: ProcessPort | None = None,
+    ) -> EditorSession:
+        """Construct directly from validated semantic inception evidence."""
+        session = cls.__new__(cls)
+        session._initialize_from_genesis(
+            genesis,
+            file_port=file_port,
+            process_port=process_port,
+            shell=None,
+        )
+        return session
+
+    def _initialize_from_genesis(
+        self,
+        genesis: SessionGenesisV1,
+        *,
+        file_port: FilePort | None,
+        process_port: ProcessPort | None,
+        shell: Buffer | None,
+    ) -> None:
+        self._genesis = genesis
+        initial = genesis.initial_buffer
+        buffer_id = BufferId(initial.buffer_id)
+        value = BufferValue(
+            text=initial.text,
+            point=initial.point,
+            file_path=initial.file_path,
+            modified=initial.modified,
+            mark=initial.mark,
+        )
+        if shell is None:
+            buffer = Buffer(buffer_id, value)
+        else:
+            shell.replace(value)
+            buffer = shell
+        initial_state = _BufferState(
+            saved_text=initial.saved_text,
+            eol=initial.line_ending,
+            kind=initial.kind,
+        )
         self._buffers: dict[BufferId, Buffer] = {buffer.buffer_id: buffer}
         self._current_id: BufferId = buffer.buffer_id
         self._states: dict[BufferId, _BufferState] = {buffer.buffer_id: initial_state}
-        # TODO: [tech-debt] TD-14 — the initial frame size enters the state
-        # with no event, so a replay cannot reproduce a split-or-no-op
-        # decision made before the first FrameResized. See
-        # docs/technical-debt.md.
-        self._frame_size = frame_size
+        self._frame_size = (
+            (genesis.frame.width, genesis.frame.height)
+            if isinstance(genesis.frame, KnownFrame)
+            else None
+        )
         self._files: FilePort = file_port if file_port is not None else _NullFilePort()
         self._processes: ProcessPort = (
             process_port if process_port is not None else _NullProcessPort()
@@ -466,9 +497,12 @@ class EditorSession:
         # empty-input default is index 1 (plan 0012 D7, Emacs other-buffer).
         self._mru: list[str] = [buffer.buffer_id.value]
         self._windows: tuple[WindowValue, ...] = (
-            WindowValue(buffer.buffer_id, buffer.current.point, buffer.current.mark),
+            *(
+                WindowValue(BufferId(window.buffer_id), window.point, window.mark)
+                for window in genesis.initial_windows
+            ),
         )
-        self._focused = 0
+        self._focused = genesis.focused_window
         # Choice-minibuffer state (B.8): when a permission prompt is open,
         # _choice holds the in-flight PermissionRequested and the minibuffer
         # is in choice mode (MinibufferInput maps a key to an option rather
@@ -519,6 +553,11 @@ class EditorSession:
         # a user with an ordinary buffer of the same name would otherwise
         # have agent output appended into their own text.
         self._generated_buffers: dict[str, BufferId] = {}
+
+    @property
+    def genesis(self) -> SessionGenesisV1:
+        """Immutable semantic evidence from which this session began."""
+        return self._genesis
 
     @property
     def buffer(self) -> Buffer:
@@ -1561,6 +1600,7 @@ class EditorSession:
         value: BufferValue,
         events: list[Event],
         kind: BufferKind = "ordinary",
+        prepared_state: _BufferState | None = None,
     ) -> BufferId:
         """Add a new buffer to the set with a unique name (plan 0012 D1).
 
@@ -1578,8 +1618,22 @@ class EditorSession:
             candidate = f"{name}<{suffix}>"
             suffix += 1
         buffer_id = BufferId(candidate)
-        visited, state = _visit(value)
-        state.kind = kind
+        if prepared_state is None:
+            prepared = prepare_provided_buffer(Buffer(buffer_id, value))
+            visited = BufferValue(
+                text=prepared.text,
+                point=prepared.point,
+                file_path=prepared.file_path,
+                modified=prepared.modified,
+                mark=prepared.mark,
+            )
+            state = _BufferState(
+                saved_text=prepared.saved_text,
+                eol=prepared.line_ending,
+            )
+            state.kind = kind
+        else:
+            visited, state = value, prepared_state
         self._buffers[buffer_id] = Buffer(buffer_id, visited)
         self._states[buffer_id] = state
         events.append(BufferCreated(buffer_id.value, visited.file_path))
@@ -1602,30 +1656,27 @@ class EditorSession:
             if buffer.current.file_path == path:
                 self._select_buffer(buffer_id, events)
                 return current
-        # An empty basename (a trailing separator) is refused at the
-        # boundary, before the filesystem: a buffer named "" is unreachable
-        # — C-x b's empty input takes the MRU default and no typed name
-        # matches it — so edits made there were stranded (TD-3, plan 0020
-        # D5). A name judgment, not a read result: deterministic and
-        # OS-independent, unlike the directory arm below.
-        name = path.replace("\\", "/").rsplit("/", 1)[-1]
-        if not name:
-            events.append(OpenFailed(path, "empty-basename"))
+        resolved = resolve_visit(self._files, path)
+        if isinstance(resolved, VisitRejected):
+            events.append(OpenFailed(path, resolved.error))
             return current
-        try:
-            text = self._files.read(path)
-        except FileNotFoundError:
-            text = ""  # missing file (or missing directory): new empty buffer
-        except OSError as error:
-            events.append(OpenFailed(path, normalize_os_error(error)))
-            return current
-        except UnicodeDecodeError:
-            events.append(OpenFailed(path, "io-error"))
-            return current
+        assert isinstance(resolved, VisitOpened)
+        state = _BufferState(
+            saved_text=resolved.saved_text,
+            eol=resolved.line_ending,
+            kind="ordinary",
+        )
         buffer_id = self._create_buffer(
-            name,
-            BufferValue(text=text, point=0, file_path=path, modified=False, mark=None),
+            resolved.buffer_id,
+            BufferValue(
+                text=resolved.text,
+                point=0,
+                file_path=resolved.path,
+                modified=False,
+                mark=None,
+            ),
             events,
+            prepared_state=state,
         )
         # The length is the buffer's, not the file's: CRLF pairs are one
         # newline in the buffer, and the transcript describes buffer state.
