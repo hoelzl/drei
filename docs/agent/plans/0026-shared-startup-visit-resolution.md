@@ -1,9 +1,9 @@
 # Twenty-sixth slice: session genesis and shared startup resolution (TD-9 + TD-12 + TD-14)
 
-**Status:** implemented on the code branch (issue #86). Shared visit resolution,
-complete `SessionGenesisV1` construction, startup rejection, replay properties,
-and shipped ConPTY termination evidence pass with 100% coverage; merge and
-cross-platform CI remain the delivery gate.
+**Status:** implemented and merged by PR #88 (issue #86; merge commit
+`5c4c63c`). Shared visit resolution, complete `SessionGenesisV1` construction,
+startup rejection, replay properties, and shipped ConPTY termination evidence
+passed with 100% coverage; current-head cross-platform CI passed.
 
 **Architecture gate:** design 0006 D1–D10 and both implementation boundaries.
 The owner decided after exact-candidate review to combine TD-14 with TD-9 and
