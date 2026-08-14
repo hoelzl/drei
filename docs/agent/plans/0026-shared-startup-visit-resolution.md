@@ -282,7 +282,8 @@ New discriminating pins:
    saving the CRLF genesis writes CRLF through `FakeFilePort`;
 7. table-driven invalid genesis values reject unsupported version, empty id,
    mismatched window coordinates/reference, invalid origin/path/clean-basis
-   combinations, out-of-bounds point/mark, and invalid geometry;
+   combinations, out-of-bounds point/mark, invalid geometry, zero or multiple
+   windows, invalid focused index, and a non-ordinary initial buffer kind;
 8. scratch genesis is exact, clean, LF, one-window, and causes no filesystem read;
 9. known-small, known-large, and unknown genesis geometry discriminates split and
    display behavior; a later resize supersedes each initial value;
@@ -291,14 +292,20 @@ New discriminating pins:
     and frames; varying line ending or frame height changes the relevant save or
     split result;
 11. every new resolution/genesis record is frozen and slotted in the repository's
-    structural record matrix.
+    structural record matrix;
+12. the legacy `provided` profile maps raw `a\r\nb\r\n`, point 6, mark 3, and
+    `modified=true` to canonical `a\nb\n`, point 4, mark 2, CRLF policy, and
+    unknown saved text before the installer runs; the installer performs no
+    second shift or normalization.
 
 Sabotage evidence must independently restore the old duplicated paths: bypass the
 basename precheck, map a generic/permission failure from raw exception text, and
 make interactive find-file classify without the resolver. It must also bypass
 genesis during construction, redetect canonical CRLF text, ignore genesis frame
-geometry, and remove `frozen=True` from each new record; the relevant focused pin
-must fail for the named disagreement, then pass restored code.
+geometry, move legacy `_visit` preparation after genesis creation, omit the point
+shift, omit the mark shift, and remove `frozen=True` from each new record; the
+relevant focused pin must fail for the named disagreement, then pass restored
+code.
 
 ## 6. Owned deviations (parity-registry rows)
 
@@ -322,8 +329,11 @@ without rereading.
 2. **V2 — direct identity RED → complete genesis-aware construction GREEN.** Pin
    scratch, existing CRLF, and missing-file startup as one exact initial identity
    with no construction event. Add complete frozen/slotted V1 records and invalid
-   matrix. Add one internal genesis installer plus the direct `provided` profile
-   adapter; require no reread/rederivation and edit/save CRLF fidelity.
+   matrix, including the closed one-ordinary-buffer/one-window/focused-index
+   invariants. Add one internal genesis installer plus the direct `provided`
+   profile adapter; pin design 0006 A8's exact CRLF point/mark shift and unknown
+   saved basis before installation, no reread/rederivation, and edit/save CRLF
+   fidelity.
 3. **V3 — geometry/replay RED → GREEN.** Pin known-small, known-large, and unknown
    split/display behavior, resize supersession, and equivalent genesis + inputs +
    fake effects. Route production geometry and the direct/harness profiles through
@@ -403,6 +413,12 @@ without rereading.
 - Every direct/in-process profile creates a complete scratch/file/provided genesis
   with known or explicit unknown geometry before the internal session installer;
   no constructor-only initial condition remains outside immutable evidence.
+- The raw provided-profile A8 value canonicalizes before genesis creation from
+  `a\r\nb\r\n`, point 6, mark 3, modified true to `a\nb\n`, point 4, mark 2,
+  CRLF, unknown saved text; installation does not normalize or shift again.
+- V1 rejects zero/multiple initial windows, invalid focused index, non-ordinary
+  initial kind, mismatched window reference/coordinates, and every other D6
+  invariant violation rather than accepting workspace-like state.
 - Known-small, known-large, and unknown genesis reproduce their respective
   split/display decisions; later `ResizeFrame` evidence supersedes each.
 - Equivalent genesis, fake effects, and subsequent inputs reproduce equivalent
