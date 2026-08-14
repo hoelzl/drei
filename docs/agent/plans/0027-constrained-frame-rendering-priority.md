@@ -294,17 +294,22 @@ reference statement and intentional semantic deviation remain governed in the re
 ## 7. Implementation order (vertical slices, strict TDD)
 
 1. **V1 - prompt/message priority and the 0-5 row matrix.** Write renderer REDs first
-   for the acceptance table, active prompt at one/two rows, transient message at one
-   row, focused idle modeline, width zero, and cursor bounds. Observe the current
-   two-modeline/no-prompt and first-window failures. Implement explicit echo reservation
-   and focused emergency/useful minima without final row truncation.
+   for the genuinely missing cases: active prompt at one/two rows, transient message at
+   one row, the lower-focused idle modeline, and exact cursor ownership. Observe the
+   current two-modeline/no-prompt and first-window failures. Retain the already-green
+   height-zero, width-zero, and generic cursor-bound pins as regression gates rather
+   than reporting them as RED evidence. Implement explicit echo reservation and focused
+   emergency/useful minima without final row truncation.
 2. **V2 - complete pane admission and focus-centered selection.** RED the three-window
    A/B/C matrix and modeline-only non-focused rejection. Add a pure contiguous selector
    and compute complete visible panes before height distribution. Mutation-check that
    selecting earliest windows or admitting a one-row non-focused pane fails.
-3. **V3 - distribution, cursor, and single-window compatibility.** RED uneven surplus
-   cases, bottom remainder, focused cursor offsets, sanitized columns, prompt cursor,
-   and byte-identical ordinary single-window rows. Reuse/extract policy helpers rather
+3. **V3 - distribution, cursor, and single-window compatibility.** RED the genuinely
+   new constrained cases: selected-pane cursor offsets, prompt cursor ownership after
+   selection, and uneven surplus after some semantic panes are hidden. Preserve the
+   already-green all-fit bottom-remainder, sanitized-column, and byte-identical ordinary
+   single-window pins as characterization/regression gates; they must stay green through
+   helper extraction and are not TDD RED evidence. Reuse/extract policy helpers rather
    than keeping independent tiny-height rules in `render` and `render_session`.
 4. **V4 - semantic shrink/focus/grow scenario.** Through `EditorHarness.resize`, create
    two and three windows with distinct points/marks, shrink through the matrix, cycle
@@ -317,10 +322,11 @@ reference statement and intentional semantic deviation remain governed in the re
    direct tests unless a separate probe proves the marker fits reliably; do not loosen
    abort deadlines or treat marker failure as Drei behavior.
 6. **V6 - records and debt removal.** Replace the TD-10 registry row, narrow the hidden
-   window hazard row, update current renderer comments/docstrings and README only where
-   behavior is described, remove TD-10 and its code TODO after evidence passes, and mark
-   only the policy gate/TD-10 boxes in issue #74. Amend this status with the plan honesty
-   record.
+   window hazard row, and update current renderer comments/docstrings. Advance README's
+   status from twenty-six to twenty-seven merged slices and add the slice-27 constrained
+   rendering summary whether or not another README behavior paragraph changes. Remove
+   TD-10 and its code TODO after evidence passes, mark only the policy gate/TD-10 boxes
+   in issue #74, and amend this status with the plan honesty record.
 7. **V7 - full gates -> draft code PR (`Closes #89`) -> fresh exact-candidate adversarial
    review -> fixes/re-gate -> ready and assistant merge.**
 
@@ -374,5 +380,7 @@ reference statement and intentional semantic deviation remain governed in the re
   remain unchanged.
 - The slice-26 plan status accurately records merged PR #88 and current-head CI in the
   same documentation PR that introduces this plan.
+- After the implementation merges, README reports twenty-seven merged slices and
+  summarizes slice 27's constrained-frame rendering behavior.
 - Full local gate from `AGENTS.md` is green, coverage remains 100%, and GitHub CI passes
   on Python 3.12-3.14 across Windows and Linux before the code PR merges.
