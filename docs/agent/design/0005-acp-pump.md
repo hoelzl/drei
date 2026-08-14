@@ -100,9 +100,21 @@ This is what keeps determinism intact under a nondeterministic peer. The
 *interleaving* of keys and agent bytes is genuinely nondeterministic, and no
 design can make it otherwise; what the rules require is that editor semantics
 not depend on the clock, and that replay be well-defined. Both hold, because
-the interleaving is *recorded*: the transcript is the totally ordered sequence
-of commands that actually ran, and replaying it reproduces the state. Tests
-never run a thread — they feed a scripted `InputEvent` list.
+
+> **Amended 2026-08-14 by design 0006:** the following sentence overclaims the
+> transcript as a sufficient replay basis. The accepted contract is
+> `SessionGenesisV1` plus the same ordered subsequent commands and external
+> deliveries; the current event tuple alone is not yet a persisted replayer.
+> The queue/interleaving decision below remains unchanged.
+>
+> **Superseded historical text:** “the interleaving is *recorded*: the
+> transcript is the totally ordered sequence of commands that actually ran,
+> and replaying it reproduces the state.”
+
+The interleaving is captured by the adapter's ordered input sequence. Repeating
+that sequence from the same genesis reproduces semantic evidence under design
+0006's contract; the session transcript remains an event record, not a command
+log. Tests never run a thread — they feed a scripted `InputEvent` list.
 
 Rejected alternatives:
 
