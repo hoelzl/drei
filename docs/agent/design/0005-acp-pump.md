@@ -106,10 +106,15 @@ not depend on the clock, and that replay be well-defined. Both hold, because
 > `SessionGenesisV1` plus the same ordered subsequent commands and external
 > deliveries; the current event tuple alone is not yet a persisted replayer.
 > The queue/interleaving decision below remains unchanged.
+>
+> **Superseded historical text:** “the interleaving is *recorded*: the
+> transcript is the totally ordered sequence of commands that actually ran,
+> and replaying it reproduces the state.”
 
-the interleaving is *recorded*: the transcript is the totally ordered sequence
-of commands that actually ran, and replaying it reproduces the state. Tests
-never run a thread — they feed a scripted `InputEvent` list.
+The interleaving is captured by the adapter's ordered input sequence. Repeating
+that sequence from the same genesis reproduces semantic evidence under design
+0006's contract; the session transcript remains an event record, not a command
+log. Tests never run a thread — they feed a scripted `InputEvent` list.
 
 Rejected alternatives:
 

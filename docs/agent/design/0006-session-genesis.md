@@ -249,9 +249,21 @@ V1 invariants:
 - The initial window references that buffer and has the same point and mark.
 - Point and mark are within the canonical text bounds. Production startup sets
   point to `0`, mark to `None`, and modified to false.
-- For a clean buffer, `saved_text` equals canonical `text`. For a caller-provided
-  modified buffer, `saved_text` is explicitly unknown, preserving the current
-  constructor rule that no read proves what the file holds. No initial
+- Every genesis carries canonical buffer text and buffer-coordinate point/mark;
+  construction never normalizes or shifts an already-created genesis.
+- The accepted origin/clean-basis combinations are closed:
+
+  | Origin | `modified` | `saved_text` |
+  | --- | --- | --- |
+  | `scratch` | false | exactly empty canonical text |
+  | `existing_file` | false | exactly canonical `text` |
+  | `missing_file` | false | exactly empty canonical text |
+  | `provided` | false | exactly canonical `text` |
+  | `provided` | true | `unknown` |
+
+  Every other combination is invalid, including a modified startup origin,
+  unknown saved text on a clean value, known saved text on a modified provided
+  value, or `scratch`/file origins with the wrong clean basis. No initial
   undo/redo history exists.
 - Scratch has id `scratch`, origin `scratch`, no file path, empty text, and LF
   line endings.
@@ -265,6 +277,14 @@ V1 invariants:
   member is supplied and validated; no filesystem read or ambient derivation is
   permitted. Production CLI startup never emits `provided`. It is not a
   workspace-restoration promise.
+- A `provided` genesis is already canonical. During migration, the legacy
+  direct constructor's raw `BufferValue` adapter must perform today's pure
+  `_visit` preparation *before* creating genesis: detect the raw text's line
+  ending, convert uniform CRLF to LF, and shift point/mark across collapsed CRLF
+  pairs. It then emits explicit canonical text/coordinates/line ending and the
+  clean basis from the table above. Genesis construction itself must not repeat
+  that conversion. This preserves current direct-profile behavior while making
+  replay independent of an implicit constructor transform.
 - Known frame width and height are non-negative integers; zero remains valid for
   the deliberately tiny-frame paths already supported by the renderer.
 - Initial transcript, process log, kill ring, prompts, permission queue, agent
@@ -444,6 +464,22 @@ profile. Outcomes, transcript events, session observations, and rendered frames
 must agree. Mutating only a load-bearing genesis member such as line ending or
 known frame height must be shown to change the relevant later save or split
 result, proving the test does not ignore genesis.
+
+### A8. Provided values cross one canonicalization boundary
+
+```text
+legacy direct input:
+    text "a\r\nb\r\n", point 6, mark 3, modified true
+adapter prepares provided genesis:
+    canonical text "a\nb\n", shifted point 4, shifted mark 2
+    line ending CRLF, modified true, saved_text unknown
+construct from that genesis:
+    -> no second normalization or coordinate shift
+```
+
+Table-driven invalid cases must reject every origin/modified/saved-text
+combination not admitted by D6, including modified startup origins and a
+provided modified value with known saved text.
 
 ## Consequences accepted deliberately
 
