@@ -66,9 +66,13 @@ the same visit path the editor uses — which is a small refactor of
 `run_editor`'s initial-buffer construction rather than a change to the error
 arm.
 
-**Suggested approach:** have the CLI hand the path to the session and let
-`_visit` produce the outcome, so there is exactly one open path and one
-vocabulary of failures. The CLI then reports the normalized token.
+**Accepted approach:** [design 0006](agent/design/0006-session-genesis.md)
+places one visit-resolution operation at the startup/application boundary.
+Startup turns a successful resolution into `SessionGenesisV1` and rejects an
+unreadable target with the shared normalized token before readiness or raw
+mode; interactive find-file turns the same rejection into `OpenFailed` inside
+the existing session. The two entry points share classification and vocabulary
+without manufacturing a scratch session or a startup command.
 
 ## TD-10 (plan 0015 V2) — the frame cap drops the echo row before a window pane
 
@@ -129,9 +133,10 @@ hazard TD-3 recorded. Review 0002 caught the paid note overclaiming the class.
 startup read, or route startup through the session's visit path — TD-9's
 fix), but TD-9 already owns "startup bypasses the command boundary", and
 doing the refusal twice invites divergence; the two should be paid together.
-**Suggested approach:** fold into the TD-9 fix; refuse with the same
-`empty-basename` vocabulary (exit 2 with the token on stderr — the startup
-path has no echo row).
+**Accepted approach:** fold into the TD-9 implementation under
+[design 0006](agent/design/0006-session-genesis.md); refuse before filesystem
+access with the same `empty-basename` vocabulary, exit 2 before readiness/raw
+mode, and create no session or scratch fallback.
 
 ## TD-14 (review 0002 finding 7) — the initial frame size is not in the event record
 
@@ -146,11 +151,14 @@ gate and by `DisplayBuffer`'s split — and it enters the state at construction
 with no event. A replay from the event record starts not knowing the frame
 geometry.
 
-**Why deferred:** the fix shape (a `FrameSized` initial event, or making the
-initial size part of the session's genesis record) touches the replay
-contract and deserves the verification-model treatment, not a drive-by.
-**Suggested approach:** record the initial geometry as the transcript's first
-event; pin a replay-reproduces-split-decision property.
+**Why deferred:** the fix shape touched the replay contract and required the
+verification-model decision now accepted in
+[design 0006](agent/design/0006-session-genesis.md).
+**Accepted approach:** represent initial editor geometry as
+`SessionGenesisV1.frame = known(width, height) | unknown`, not as a synthetic
+first event. Later geometry changes remain `FrameResized` events. Pin that the
+same later split/display input has the genesis-governed result and that an
+explicit resize supersedes it.
 
 ## TD-16 (review 0002 finding 17) — out-of-turn permission requests are accepted
 
