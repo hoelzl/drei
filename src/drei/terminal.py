@@ -287,7 +287,7 @@ def run_editor(
     events: EventQueue | None = None,
     file_port: FilePort | None = None,
     file_path: str | None = None,
-    initial_text: str = "",
+    initial_text: str | None = None,
     agent_port: StreamingProcessPort | None = None,
     agent_argv: tuple[str, ...] = DEFAULT_AGENT_ARGV,
     agent_cwd: str | None = None,
@@ -305,7 +305,13 @@ def run_editor(
     ``agent_argv``/``agent_cwd`` configure the child the pump will spawn on the
     first ``C-c a`` — and only then (design 0005 D6), so a machine with no
     agent installed pays nothing for one.
+
+    ``initial_text`` is the explicit direct/in-process profile. Supplying it
+    together with ``file_path`` is ambiguous and rejected before any effect;
+    file startup always obtains its text through the shared visit resolver.
     """
+    if file_path is not None and initial_text is not None:
+        raise ValueError("initial_text cannot be combined with file_path")
     cooperating = "TERMVERIFY_SEED" in os.environ
     opened: VisitOpened | None = None
     if file_path is not None:

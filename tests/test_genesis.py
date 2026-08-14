@@ -140,17 +140,35 @@ def _scratch_buffer() -> InitialBufferGenesis:
     "invalid",
     [
         lambda: replace(_scratch_buffer(), buffer_id=""),
+        lambda: replace(_scratch_buffer(), origin=cast(Any, 1)),
+        lambda: replace(_scratch_buffer(), kind=cast(Any, 1)),
+        lambda: replace(_scratch_buffer(), text=cast(Any, 1)),
         lambda: replace(_scratch_buffer(), buffer_id="other"),
         lambda: replace(_scratch_buffer(), kind=cast(Any, "generated")),
+        lambda: replace(_scratch_buffer(), point=cast(Any, 0.0)),
         lambda: replace(_scratch_buffer(), point=1),
+        lambda: replace(_scratch_buffer(), mark=cast(Any, 0.0)),
         lambda: replace(_scratch_buffer(), mark=-1),
+        lambda: replace(_scratch_buffer(), modified=cast(Any, 0)),
         lambda: replace(_scratch_buffer(), file_path="scratch"),
+        lambda: replace(_scratch_buffer(), file_path=cast(Any, 1)),
         lambda: replace(_scratch_buffer(), text="x"),
         lambda: replace(_scratch_buffer(), modified=True, saved_text=None),
         lambda: replace(_scratch_buffer(), saved_text=None),
+        lambda: replace(_scratch_buffer(), saved_text=cast(Any, 1)),
         lambda: replace(_scratch_buffer(), line_ending=cast(Any, "invalid")),
+        lambda: replace(_scratch_buffer(), line_ending=cast(Any, 1)),
         lambda: replace(_scratch_buffer(), origin=cast(Any, "invalid")),
         lambda: replace(_scratch_buffer(), line_ending="\r\n"),
+        lambda: replace(
+            _scratch_buffer(),
+            origin="existing_file",
+            buffer_id="f",
+            file_path="f",
+            text="a\r\nb\r\n",
+            saved_text="a\r\nb\r\n",
+            line_ending="\r\n",
+        ),
         lambda: replace(
             _scratch_buffer(),
             origin="existing_file",
@@ -174,7 +192,7 @@ def _scratch_buffer() -> InitialBufferGenesis:
 def test_invalid_initial_buffer_combinations_are_rejected(
     invalid: Callable[[], object],
 ) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         invalid()
 
 
@@ -182,11 +200,18 @@ def test_invalid_initial_buffer_combinations_are_rejected(
     "invalid",
     [
         lambda base: replace(base, version=cast(object, 2)),
+        lambda base: replace(base, initial_buffer=cast(Any, object())),
+        lambda base: replace(base, version=cast(Any, True)),
         lambda base: replace(base, initial_windows=()),
+        lambda base: replace(
+            base, initial_windows=cast(Any, list(base.initial_windows))
+        ),
+        lambda base: replace(base, initial_windows=(cast(Any, object()),)),
         lambda base: replace(
             base, initial_windows=(base.initial_windows[0], base.initial_windows[0])
         ),
         lambda base: replace(base, focused_window=1),
+        lambda base: replace(base, focused_window=cast(Any, False)),
         lambda base: replace(
             base,
             initial_windows=(replace(base.initial_windows[0], buffer_id="other"),),
@@ -205,3 +230,35 @@ def test_invalid_closed_session_shape_is_rejected(
 ) -> None:
     with pytest.raises((TypeError, ValueError)):
         invalid(scratch_genesis(UNKNOWN_FRAME))
+
+
+def test_genesis_rejects_mutable_window_aliases() -> None:
+    base = scratch_genesis(UNKNOWN_FRAME)
+    windows = list(base.initial_windows)
+
+    with pytest.raises(TypeError):
+        replace(base, initial_windows=cast(Any, windows))
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        lambda: InitialWindowGenesis("scratch", cast(Any, 0.0), None),
+        lambda: InitialWindowGenesis("scratch", 0, cast(Any, 0.0)),
+        lambda: InitialWindowGenesis(cast(Any, 1), 0, None),
+        lambda: InitialWindowGenesis("scratch", -1, None),
+        lambda: InitialWindowGenesis("scratch", 0, -1),
+    ],
+)
+def test_initial_window_requires_exact_runtime_shapes(
+    invalid: Callable[[], object],
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        invalid()
+
+
+def test_known_genesis_rejects_mismatched_harness_geometry() -> None:
+    genesis = scratch_genesis(KnownFrame(80, 24))
+
+    with pytest.raises(ValueError, match="known genesis geometry"):
+        EditorHarness.from_genesis(genesis, width=80, height=5)

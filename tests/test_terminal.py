@@ -131,6 +131,20 @@ def test_startup_rejection_precedes_terminal_lifecycle() -> None:
     assert not port.restored
 
 
+def test_file_path_and_initial_text_are_rejected_as_ambiguous() -> None:
+    port = FakePort([])
+
+    with pytest.raises(ValueError, match="initial_text.*file_path"):
+        run_editor(
+            port,
+            events=scripted([]),
+            file_path="notes.txt",
+            initial_text="PAYLOAD",
+        )
+
+    assert port.journal == []
+
+
 def test_successful_startup_preserves_lifecycle_and_installs_opened_genesis() -> None:
     from conftest import FakeFilePort
 
@@ -361,9 +375,7 @@ def test_c_x_c_c_offers_to_save_a_modified_buffer() -> None:
 
     files = FakeFilePort({"/tmp/notes.txt": "saved"})
     port = _WidePort(["x", "\x18", "\x03", "y"])
-    run_with_keys(
-        port, file_port=files, file_path="/tmp/notes.txt", initial_text="saved"
-    )
+    run_with_keys(port, file_port=files, file_path="/tmp/notes.txt")
 
     # The edit reached disk, and it was asked about first.
     assert files.files["/tmp/notes.txt"] == "xsaved"
@@ -391,7 +403,6 @@ def test_c_x_c_c_does_not_exit_while_the_save_prompt_is_open() -> None:
             events=scripted(keys("x", "\x18", "\x03")),
             file_port=files,
             file_path="/tmp/notes.txt",
-            initial_text="saved",
         )
 
     # Nothing written while the question is still on screen.
@@ -425,7 +436,6 @@ def test_a_failed_save_at_the_exit_prompt_is_readable_on_the_frame() -> None:
             events=scripted(keys("x", "\x18", "\x03", "y")),
             file_port=files,
             file_path="/tmp/notes.txt",
-            initial_text="saved",
         )
 
     # The run did not end (the `y` was answered by the gate, not by an exit),
@@ -463,7 +473,6 @@ def test_the_exit_question_survives_a_narrow_frame_carrying_a_failure() -> None:
             events=scripted(keys("x", "\x18", "\x03", "y")),
             file_port=files,
             file_path="/tmp/notes.txt",
-            initial_text="saved",
         )
 
     echo = _frame_rows(port)[-1][-1]

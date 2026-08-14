@@ -131,8 +131,11 @@ resolve title/anchor citations; until then, cite rows by title.
 *TD-9, TD-12, and TD-14 were paid together by slice 26 (issue #86, plan
 0026): startup and interactive visits share one resolver and normalized token
 vocabulary; invalid startup targets reject before terminal readiness; and
-`SessionGenesisV1` records canonical initial buffer/window evidence plus known
-or unknown geometry for replay.*
+`SessionGenesisV1` rejects mutable aliases, non-exact scalar shapes, noncanonical
+buffer coordinates/text, and invalid origin/clean-basis combinations before a
+session exists. It records canonical initial buffer/window evidence plus known
+or unknown geometry for replay (`tests/test_startup.py`, `tests/test_genesis.py`,
+`tests/test_session_properties.py`, and `tests/test_terminal.py`).*
 
 *TD-13 (`DisplayBuffer`'s "silent no-op" recorded
 `Message("too-small-for-splitting")` into the transcript although the user

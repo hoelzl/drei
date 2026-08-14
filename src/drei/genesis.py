@@ -56,8 +56,28 @@ class InitialBufferGenesis:
     line_ending: LineEnding
 
     def __post_init__(self) -> None:
-        if not self.buffer_id:
-            raise ValueError("initial buffer id must be non-empty")
+        if type(self.buffer_id) is not str or not self.buffer_id:
+            raise TypeError("initial buffer id must be a non-empty string")
+        if type(self.origin) is not str:
+            raise TypeError("initial buffer origin must be a string")
+        # Dynamic callers can bypass annotations; the malformed-kind test pins
+        # this guard even though mypy treats annotated ``str`` as exact here.
+        if self.kind.__class__ is not str:  # type: ignore[unreachable]
+            raise TypeError("initial buffer kind must be a string")
+        if type(self.text) is not str:
+            raise TypeError("initial buffer text must be a string")
+        if type(self.point) is not int:
+            raise TypeError("initial point must be an integer")
+        if self.mark is not None and type(self.mark) is not int:
+            raise TypeError("initial mark must be an integer or None")
+        if self.file_path is not None and type(self.file_path) is not str:
+            raise TypeError("initial file path must be a string or None")
+        if type(self.modified) is not bool:
+            raise TypeError("initial modified flag must be a boolean")
+        if self.saved_text is not None and type(self.saved_text) is not str:
+            raise TypeError("initial saved text must be a string or None")
+        if type(self.line_ending) is not str:
+            raise TypeError("initial line ending must be a string")
         if self.kind != "ordinary":
             raise ValueError("v1 initial buffer must be ordinary")
         if not 0 <= self.point <= len(self.text):
@@ -66,6 +86,8 @@ class InitialBufferGenesis:
             raise ValueError("initial mark outside canonical text")
         if self.line_ending not in (LF, CRLF):
             raise ValueError("unsupported initial line ending")
+        if self.line_ending == CRLF and CRLF in self.text:
+            raise ValueError("CRLF genesis text must already be canonical")
 
         clean_basis = not self.modified and self.saved_text == self.text
         origin = cast(object, self.origin)
@@ -78,10 +100,10 @@ class InitialBufferGenesis:
                 and self.line_ending == LF
             )
         elif origin == "existing_file":
-            valid = self.file_path is not None and clean_basis
+            valid = bool(self.file_path) and clean_basis
         elif origin == "missing_file":
             valid = (
-                self.file_path is not None
+                bool(self.file_path)
                 and self.text == ""
                 and clean_basis
                 and self.line_ending == LF
@@ -100,6 +122,16 @@ class InitialWindowGenesis:
     point: int
     mark: int | None
 
+    def __post_init__(self) -> None:
+        if type(self.buffer_id) is not str or not self.buffer_id:
+            raise TypeError("initial window buffer id must be a non-empty string")
+        if type(self.point) is not int:
+            raise TypeError("initial window point must be an integer")
+        if self.mark is not None and type(self.mark) is not int:
+            raise TypeError("initial window mark must be an integer or None")
+        if self.point < 0 or (self.mark is not None and self.mark < 0):
+            raise ValueError("initial window coordinates must be non-negative")
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SessionGenesisV1:
@@ -110,10 +142,20 @@ class SessionGenesisV1:
     version: Literal[1] = 1
 
     def __post_init__(self) -> None:
-        if self.version != 1:
+        if type(self.initial_buffer) is not InitialBufferGenesis:
+            raise TypeError("unsupported initial buffer value")
+        if type(self.initial_windows) is not tuple:
+            raise TypeError("initial windows must be an immutable tuple")
+        if any(
+            type(window) is not InitialWindowGenesis for window in self.initial_windows
+        ):
+            raise TypeError("unsupported initial window value")
+        if type(self.version) is not int or self.version != 1:
             raise ValueError("unsupported session genesis version")
         if len(self.initial_windows) != 1:
             raise ValueError("v1 genesis requires exactly one initial window")
+        if type(self.focused_window) is not int:
+            raise TypeError("focused window must be an integer")
         if self.focused_window != 0:
             raise ValueError("v1 focused window must be index zero")
         window = self.initial_windows[0]
@@ -124,7 +166,7 @@ class SessionGenesisV1:
             or window.mark != initial.mark
         ):
             raise ValueError("initial window must match the initial buffer")
-        if not isinstance(self.frame, KnownFrame | UnknownFrame):
+        if type(self.frame) not in (KnownFrame, UnknownFrame):
             raise TypeError("unsupported genesis frame value")
 
 

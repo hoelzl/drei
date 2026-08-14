@@ -84,6 +84,11 @@ class EditorHarness:
         height: int | None = None,
     ) -> EditorHarness:
         harness = cls.__new__(cls)
+        if isinstance(genesis.frame, KnownFrame) and (
+            (width is not None and width != genesis.frame.width)
+            or (height is not None and height != genesis.frame.height)
+        ):
+            raise ValueError("adapter geometry must match known genesis geometry")
         harness._session = EditorSession.from_genesis(genesis, file_port=file_port)
         frame_width = (
             genesis.frame.width if isinstance(genesis.frame, KnownFrame) else 80
