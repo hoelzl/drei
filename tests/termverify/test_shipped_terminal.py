@@ -377,6 +377,51 @@ def test_shipped_editor_resizes_while_find_file_prompt_is_open(
         assert final.outcome == RunFinished(ExitStatus("code", 0)), final
 
 
+def test_shipped_split_editor_keeps_prompt_at_two_editor_rows(tmp_path: Path) -> None:
+    """Constrained shipped rendering reserves prompt space before extra panes."""
+    adapter = _adapter(tmp_path)
+    focused_path = "focused.txt"
+
+    with _reaped(adapter):
+        started = adapter.start("drei-constrained-prompt-resize", _configuration())
+        assert type(started) is Started, started
+
+        # Split and focus the lower pane, then give it a distinct buffer so
+        # the constrained modeline proves focus ownership rather than merely
+        # proving that some pane survived.
+        inputs = (
+            KeyInput(ManualTime(0), ("Control", "x")),
+            TextInput(ManualTime(0), "2"),
+            KeyInput(ManualTime(0), ("Control", "x")),
+            TextInput(ManualTime(0), "o"),
+            KeyInput(ManualTime(0), ("Control", "x")),
+            KeyInput(ManualTime(0), ("Control", "f")),
+        )
+        for input_event in inputs:
+            completed = adapter.dispatch(input_event)
+            assert type(completed) is EpochCompleted, completed
+        for char in focused_path:
+            completed = adapter.dispatch(TextInput(ManualTime(0), char))
+            assert type(completed) is EpochCompleted, completed
+        visited = adapter.dispatch(KeyInput(ManualTime(0), ("Enter",)))
+        assert type(visited) is EpochCompleted, visited
+
+        prefix = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "x")))
+        assert type(prefix) is EpochCompleted, prefix
+        prompted = adapter.dispatch(KeyInput(ManualTime(0), ("Control", "f")))
+        assert type(prompted) is EpochCompleted, prompted
+
+        resized = adapter.dispatch(Resize(ManualTime(0), _COLUMNS, 3))
+        assert type(resized) is EpochCompleted, resized
+        resized_lines = _frame_lines(resized.observation)
+        assert len(resized_lines) == 2
+        assert resized_lines[0].startswith("Drei: focused.txt --"), resized_lines
+        assert resized_lines[1].startswith("Find file:"), resized_lines
+
+        stopped = adapter.stop(Stop(ManualTime(0)))
+        assert isinstance(stopped.outcome, RunFinished), stopped
+
+
 def test_shipped_editor_save_scenario(tmp_path: Path) -> None:
     """Open a file via CLI arg, edit, C-x C-s, assert content on disk.
 

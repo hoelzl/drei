@@ -56,6 +56,31 @@ def test_height_one_is_modeline_only() -> None:
     assert frame.cursor == (0, 0)
 
 
+def test_height_one_active_minibuffer_owns_the_only_row() -> None:
+    frame = render(
+        BufferObservation(
+            buffer_id="scratch",
+            text="x",
+            point=1,
+            minibuffer="ab",
+            minibuffer_prompt="Find file: ",
+        ),
+        width=14,
+        height=1,
+        echo="Quit",
+    )
+
+    assert frame.rows == ("Find file: ab ",)
+    assert frame.cursor == (0, 13)
+
+
+def test_height_one_transient_message_owns_the_only_row() -> None:
+    frame = render(obs("x", 1), width=10, height=1, echo="Quit")
+
+    assert frame.rows == ("Quit      ",)
+    assert frame.cursor == (0, 0)
+
+
 def test_height_zero() -> None:
     frame = render(obs("x", 1), width=10, height=0)
     assert frame.rows == ()

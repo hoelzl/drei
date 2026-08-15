@@ -1,14 +1,15 @@
-"""A.2 step 5: SessionObservation + multi-pane render (plan 0012 D5).
+"""SessionObservation rendering (plans 0012 D5 and 0027).
 
-render(BufferObservation) is untouched (the existing render tests are the
-byte-identical oracle); render_session draws one pane per window with a
-modeline each, one shared echo row, and the cursor in the focused pane.
+Ordinary one-window frames retain the ``render(BufferObservation)`` shape.
+Constrained multi-window frames reserve the shared echo row, project a
+focus-centered subset of complete panes, and keep the cursor with focus.
 """
 
 from __future__ import annotations
 
 from conftest import FakeFilePort
 
+import drei.render as render_module
 from drei.commands import (
     ForwardChar,
     SessionObservation,
@@ -106,6 +107,146 @@ def test_render_session_minibuffer_uses_the_shared_echo_row() -> None:
     assert frame.cursor[1] == min(len("Find file: "), 10 - 1)
 
 
+def test_height_one_active_minibuffer_outranks_every_window() -> None:
+    from drei.commands import FindFile
+
+    session = _session()
+    session.dispatch(SplitWindow())
+    session.dispatch(FindFile())
+
+    frame = render_session(session.session_observation(), width=12, height=1)
+
+    assert frame.rows == ("Find file:  ",)
+    assert frame.cursor == (0, 11)
+
+
+def test_height_one_permission_prompt_owns_the_only_row() -> None:
+    from drei.acp.machine import PermissionRequested
+    from drei.commands import PromptPermission
+
+    session = _session()
+    session.dispatch(
+        PromptPermission(
+            PermissionRequested(
+                request_id=1,
+                params={
+                    "sessionId": "s1",
+                    "toolCall": {"toolCallId": "tc-1", "title": "run tests"},
+                    "options": [
+                        {
+                            "kind": "allow_once",
+                            "name": "Allow once",
+                            "optionId": "yes",
+                        }
+                    ],
+                },
+            )
+        )
+    )
+
+    frame = render_session(session.session_observation(), width=20, height=1)
+
+    assert frame.rows == ("Allow run tests? [y]",)
+    assert frame.cursor == (0, 19)
+
+
+def test_height_one_exit_prompt_owns_the_only_row() -> None:
+    from drei.commands import ExitEditor, InsertText
+
+    session = _session()
+    session.dispatch(InsertText("x"))
+    session.dispatch(ExitEditor())
+
+    frame = render_session(session.session_observation(), width=20, height=1)
+
+    assert frame.rows == ("Modified buffers exi",)
+    assert frame.cursor == (0, 19)
+
+
+def test_height_one_width_zero_preserves_prompt_ownership() -> None:
+    from drei.commands import FindFile
+
+    session = _session()
+    session.dispatch(FindFile())
+
+    frame = render_session(session.session_observation(), width=0, height=1)
+
+    assert frame.rows == ("",)
+    assert frame.cursor == (0, 0)
+
+
+def test_height_one_transient_message_outranks_the_focused_modeline() -> None:
+    session = _session()
+    session.dispatch(SplitWindow())
+
+    frame = render_session(
+        session.session_observation(), width=12, height=1, echo="Quit"
+    )
+
+    assert frame.rows == ("Quit        ",)
+    assert frame.cursor == (0, 0)
+
+
+def test_height_one_idle_frame_shows_the_focused_lower_modeline() -> None:
+    from dataclasses import replace as dc_replace
+
+    session = _session()
+    session.dispatch(SplitWindow())
+    obs = session.session_observation()
+    lower = dc_replace(
+        obs.windows[1],
+        buffer=dc_replace(obs.windows[1].buffer, buffer_id="lower"),
+    )
+    obs = dc_replace(obs, windows=(obs.windows[0], lower), focused=1)
+
+    frame = render_session(obs, width=14, height=1)
+
+    assert frame.rows == ("Drei: lower --",)
+    assert frame.cursor == (0, 0)
+
+
+def test_height_two_reserves_echo_below_the_focused_modeline() -> None:
+    from dataclasses import replace as dc_replace
+
+    session = _session()
+    session.dispatch(SplitWindow())
+    obs = session.session_observation()
+    lower = dc_replace(
+        obs.windows[1],
+        buffer=dc_replace(obs.windows[1].buffer, buffer_id="lower"),
+    )
+    obs = dc_replace(
+        obs,
+        windows=(obs.windows[0], lower),
+        focused=1,
+        minibuffer="",
+        minibuffer_prompt="Find file: ",
+    )
+
+    frame = render_session(obs, width=14, height=2)
+
+    assert frame.rows == ("Drei: lower --", "Find file:    ")
+    assert frame.cursor == (1, 11)
+
+
+def test_height_three_gives_the_focused_lower_pane_body_and_modeline() -> None:
+    from dataclasses import replace as dc_replace
+
+    session = _session()
+    session.dispatch(SplitWindow())
+    obs = session.session_observation()
+    lower = dc_replace(
+        obs.windows[1],
+        buffer=dc_replace(obs.windows[1].buffer, buffer_id="lower"),
+    )
+    obs = dc_replace(obs, windows=(obs.windows[0], lower), focused=1)
+
+    frame = render_session(obs, width=14, height=3)
+
+    assert frame.rows == ("hello world   ", "Drei: lower --", "              ")
+    assert frame.cursor == (0, 0)
+
+
 def test_render_session_minibuffer_without_prompt_uses_empty_prompt() -> None:
     """minibuffer_prompt=None (a minibuffer opened without a prompt string)
     falls back to an empty prompt in the session renderer."""
@@ -121,20 +262,17 @@ def test_render_session_minibuffer_without_prompt_uses_empty_prompt() -> None:
     assert frame.cursor == (3, 1)
 
 
-def test_window_heights_clamp_the_bottom_pane_when_windows_exceed_rows() -> None:
-    """More windows than body rows: each pane keeps its modeline row and the
-    bottom pane clamps to 1 (M2 — the clamp IS reachable, e.g. 4 windows in
-    2 body rows)."""
+def test_window_heights_distribute_admitted_panes_with_remainder_to_bottom() -> None:
     from drei.render import _window_heights
 
-    assert _window_heights(2, 4) == (1, 1, 1, 1)
-    assert _window_heights(3, 6) == (1, 1, 1, 1, 1, 1)
+    assert _window_heights(4, 2) == (2, 2)
+    assert _window_heights(5, 2) == (2, 3)
+    assert _window_heights(7, 3) == (2, 2, 3)
 
 
-def test_render_session_row_count_clamps_to_the_frame_height() -> None:
-    """A hand-built observation with more windows than rows (possible when
-    frame_size=None removed the split gate) must not overflow the Frame
-    contract: at most `height` rows, cursor inside (M1)."""
+def test_render_session_admits_only_complete_panes_within_the_frame_height() -> None:
+    """A hand-built overcommitted observation still reserves the echo row and
+    never admits a modeline-only non-focused pane."""
     session = _session()
     obs = session.session_observation()
     from dataclasses import replace as dc_replace
@@ -142,7 +280,9 @@ def test_render_session_row_count_clamps_to_the_frame_height() -> None:
     window = obs.windows[0]
     obs = dc_replace(obs, windows=(window, window, window, window, window))
     frame = render_session(obs, width=10, height=4)
-    assert len(frame.rows) <= 4
+    assert len(frame.rows) == 4
+    assert _modelines(frame) == 1
+    assert frame.rows[-1] == "          "
     assert frame.cursor[0] < len(frame.rows)
 
 
@@ -152,6 +292,93 @@ def test_render_session_height_zero_is_an_empty_frame() -> None:
     assert frame.rows == ()
     assert frame.cursor == (0, 0)
     assert frame.height == 0
+
+
+def test_visible_window_selection_is_contiguous_and_focus_centered() -> None:
+    assert render_module._visible_window_indices(3, focused=0, visible_count=2) == (
+        0,
+        1,
+    )
+    assert render_module._visible_window_indices(3, focused=1, visible_count=2) == (
+        1,
+        2,
+    )
+    assert render_module._visible_window_indices(3, focused=2, visible_count=2) == (
+        1,
+        2,
+    )
+
+
+def test_three_window_render_uses_the_focus_centered_visible_subset() -> None:
+    from dataclasses import replace as dc_replace
+
+    session = _session()
+    window = session.session_observation().windows[0]
+    windows = tuple(
+        dc_replace(
+            window,
+            buffer=dc_replace(window.buffer, buffer_id=name, text=name),
+        )
+        for name in ("A", "B", "C")
+    )
+    obs = dc_replace(session.session_observation(), windows=windows)
+
+    for focused, expected in ((0, ("A", "B")), (1, ("B", "C")), (2, ("B", "C"))):
+        frame = render_session(dc_replace(obs, focused=focused), width=12, height=5)
+        modelines = tuple(
+            row.removeprefix("Drei: ").split()[0]
+            for row in frame.rows
+            if row.startswith("Drei:")
+        )
+        assert modelines == expected
+        assert frame.rows[-1] == "            "
+
+
+def test_cursor_uses_the_selected_focused_pane_offset() -> None:
+    from dataclasses import replace as dc_replace
+
+    session = _session()
+    window = session.session_observation().windows[0]
+    windows = tuple(
+        dc_replace(
+            window,
+            buffer=dc_replace(window.buffer, buffer_id=name, text=f"{name}text"),
+            point=2,
+        )
+        for name in ("A", "B", "C")
+    )
+    obs = dc_replace(session.session_observation(), windows=windows, focused=1)
+
+    frame = render_session(obs, width=12, height=5)
+
+    assert frame.rows[0] == "Btext       "
+    assert frame.cursor == (0, 2)
+
+
+def test_surplus_row_goes_to_the_bottom_selected_pane() -> None:
+    from dataclasses import replace as dc_replace
+
+    session = _session()
+    window = session.session_observation().windows[0]
+    windows = tuple(
+        dc_replace(
+            window,
+            buffer=dc_replace(window.buffer, buffer_id=name, text=f"{name}0\n{name}1"),
+        )
+        for name in ("A", "B", "C")
+    )
+    obs = dc_replace(session.session_observation(), windows=windows, focused=1)
+
+    frame = render_session(obs, width=12, height=6)
+
+    assert frame.rows == (
+        "B0          ",
+        "Drei: B --  ",
+        "C0          ",
+        "C1          ",
+        "Drei: C --  ",
+        "            ",
+    )
 
 
 def _modelines(frame: Frame) -> int:
@@ -181,26 +408,22 @@ def test_shrink_below_the_split_minimum_degrades_in_stages() -> None:
     """Plan 0015 D7, render half: the shrink is absorbed by the renderer in
     stages, and the session keeps both windows through all of them.
 
-    Below the *split* minimum (4 < (2+1)*3+1 = 10) both panes still render;
-    the top one loses its body rows and keeps its modeline. Squeezed further,
-    the frame cap starts cutting from the bottom — first the shared echo row
-    (see TD-10), then the lower panes. No stage touches window state, which
-    is what makes the resize reversible.
+    Below the *split* minimum, presentation sheds complete non-focused panes
+    before sacrificing focused content or the shared echo row. No stage
+    touches window state, which is what makes the resize reversible.
     """
     harness = _split_harness(height=8)
     assert _modelines(harness.frame) == 2
 
     harness.resize(10, 4)
     assert len(_windows(harness)) == 2  # nothing deleted to make it fit
-    assert _modelines(harness.frame) == 2  # both panes present, top bodyless
+    assert _modelines(harness.frame) == 1  # spare row enlarges the focused body
 
     harness.resize(10, 2)
     assert len(_windows(harness)) == 2  # still nothing deleted
     assert len(harness.frame.rows) == 2  # the Frame contract holds
-    # TD-10: the echo row is what the cap takes first, so both modelines
-    # survive and the echo area does not. Pinned as the current truth, not
-    # endorsed — see docs/technical-debt.md.
-    assert _modelines(harness.frame) == 2
+    assert _modelines(harness.frame) == 1
+    assert harness.frame.rows[-1] == "          "  # shared echo survives
 
     harness.resize(10, 1)
     assert len(_windows(harness)) == 2  # still nothing deleted
@@ -218,7 +441,7 @@ def test_growing_the_frame_back_restores_both_panes() -> None:
     harness.send("C-f")  # and move its point off zero
     before = _windows(harness)
 
-    harness.resize(10, 1)  # the lower pane goes off-frame entirely
+    harness.resize(10, 1)  # focused lower pane anchors the projection
     assert _modelines(harness.frame) == 1
 
     harness.resize(10, 8)
