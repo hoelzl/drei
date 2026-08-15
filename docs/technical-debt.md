@@ -20,7 +20,7 @@ Rules for this file:
 TD-2 through TD-9 were found by [adversarial review
 0001](agent/reviews/0001-adversarial-review-2026-07-24.md) (2026-07-24) and
 deferred in that review's triage on the same date; their finding numbers are
-that review's. TD-10 and TD-11 name the slice that found them. TD-12 through
+that review's. TD-11 names the slice that found it. TD-12 through
 TD-17 were found by [adversarial review
 0002](agent/reviews/0002-adversarial-review-2026-07-27.md) (2026-07-27) and
 deferred in that review's triage; their finding numbers are that review's.
@@ -48,46 +48,6 @@ and the benefit is currently zero.
 **Suggested approach:** freeze at the parse boundary — convert inbound JSON
 into an immutable mapping type once in the codec, so every downstream alias
 is safe by construction, rather than copying at each hand-off.
-
-## TD-10 (plan 0015 V2) — the frame cap drops the echo row before a window pane
-
-**Location:** `src/drei/render.py` — `rows = rows[:height]` at the end of
-`render_session`.
-**Severity:** low; reachable only at absurd frame heights, but newly
-reachable *in production* rather than only from a hand-built observation.
-
-`render_session` builds every pane, appends the shared echo row last, then
-truncates the row list to the frame height. Truncation therefore cuts from
-the bottom, and the echo row is the bottom. With two windows in a
-two-row frame the result is two modelines and **no echo row**: the minibuffer
-prompt is invisible while the minibuffer is open, and the cursor — placed at
-`height - 1` for an open minibuffer — lands on a modeline instead of on the
-prompt it is supposed to be editing.
-
-Emacs prioritizes the other way round: the echo area is the last thing it
-gives up, and windows are deleted to make room.
-
-This was found while implementing plan 0015 D7. Before `ResizeFrame` existed,
-the truncation branch was reachable only by constructing a `SessionObservation`
-by hand, because the `C-x 2` gate prevented a real session from over-
-subscribing its frame. A resize can now shrink a live split frame to any
-height, so the path ships.
-
-**Why deferred:** fixing it is a *rendering priority* decision (which row
-wins when rows are scarce: echo, modeline, or body), not a resize decision.
-It deserves its own reasoning and a parity row of its own, and slice 15's
-subject is the input boundary. Pinning the wrong-but-current behavior is
-deliberate: `test_shrink_below_the_split_minimum_degrades_in_stages` asserts
-the echo row is the first casualty, so the fix will show up as a failing
-test rather than as a silent change.
-
-**Suggested approach:** reserve the echo row before distributing body rows —
-compute pane heights against `height - 1` and let the *panes* absorb the
-shortfall, dropping whole panes from the bottom while the echo row is
-retained. Then decide, with a parity row, whether a frame too short for even
-one pane keeps the echo row or renders empty.
-
----
 
 ## TD-16 (review 0002 finding 17) — out-of-turn permission requests are accepted
 
@@ -127,6 +87,15 @@ or a `#`-slug convention) and extend `tests/test_parity_registry.py` to
 resolve title/anchor citations; until then, cite rows by title.
 
 ## Paid and removed
+
+*TD-10 (the final row cap dropped an active prompt before excess panes) was
+paid by slice 27 (issue #89, plan 0027). Rendering now reserves the shared echo
+row from height two upward, gives a one-row frame to prompt, non-empty message,
+or focused modeline in that order, admits the focused pane before complete
+non-focused panes, and projects a contiguous focus-centered subset without
+mutating semantic windows. Direct row/cursor matrices, shrink/focus/grow harness
+evidence, and `test_shipped_split_editor_keeps_prompt_at_two_editor_rows` over a
+40x3 cooperating ConPTY pin the policy.*
 
 *TD-9, TD-12, and TD-14 were paid together by slice 26 (issue #86, plan
 0026): startup and interactive visits share one resolver and normalized token

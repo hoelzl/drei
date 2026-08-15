@@ -24,8 +24,14 @@ def render(
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
 
     if height == 1:
-        modeline = _clip(_modeline(observation), width)
-        return Frame(rows=(modeline,), cursor=(0, 0), width=width, height=height)
+        return _render_single_row(
+            observation,
+            width,
+            echo=echo,
+            note=note,
+            minibuffer=observation.minibuffer,
+            minibuffer_prompt=observation.minibuffer_prompt,
+        )
 
     body_rows = _render_body(observation.text, width, height - 2)
     modeline = _clip(_modeline(observation), width)
@@ -60,12 +66,14 @@ def render_session(
 ) -> Frame:
     """Draw one pane per window (design 0003 §A.2, plan 0012 D5).
 
-    The frame is N stacked windows (each with its own modeline) plus one
-    shared echo row. Window heights are distributed evenly (remainder to the
-    bottom window, Emacs-style). The cursor lives in the focused window at
-    its window-point; while the minibuffer is open it sits at the end of the
-    prompt on the shared echo row. A single window renders byte-identically
-    to :func:`render` of the focused window's buffer observation.
+    The frame is a focus-centered contiguous projection of complete stacked
+    windows plus one shared echo row. The focused pane is admitted first;
+    non-focused panes appear only when body and modeline both fit. Window
+    heights are distributed evenly (remainder to the bottom visible window,
+    Emacs-style). The cursor lives in the focused window at its window-point;
+    while the minibuffer is open it sits at the end of the prompt on the
+    shared echo row. A single window renders byte-identically to :func:`render`
+    of the focused window's buffer observation.
     """
     if height == 0:
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
@@ -76,9 +84,22 @@ def render_session(
     if window_count == 0:  # pragma: no cover — defensive fallback
         return Frame(rows=(), cursor=(0, 0), width=width, height=height)
 
-    body_height = height - 1  # shared echo row
-    # Each window needs at least its modeline; body rows distribute evenly.
-    heights = _window_heights(body_height, window_count)
+    if height == 1:
+        focused_buffer = observation.windows[observation.focused].buffer
+        return _render_single_row(
+            focused_buffer,
+            width,
+            echo=echo,
+            note=note,
+            minibuffer=observation.minibuffer,
+            minibuffer_prompt=observation.minibuffer_prompt,
+        )
+    pane_budget = height - 1  # reserve the shared echo row
+    visible_count = min(window_count, max(pane_budget // 2, 1))
+    visible_indices = _visible_window_indices(
+        window_count, observation.focused, visible_count
+    )
+    heights = _window_heights(pane_budget, visible_count)
 
     if observation.minibuffer is not None:
         prompt = _noted_prompt(observation.minibuffer_prompt or "", note)
@@ -93,15 +114,14 @@ def render_session(
 
     rows: list[str] = []
     row_offset = 0
-    for index, (window, pane_height) in enumerate(
-        zip(observation.windows, heights, strict=True)
-    ):
+    for semantic_index, pane_height in zip(visible_indices, heights, strict=True):
+        window = observation.windows[semantic_index]
         pane_body = pane_height - 1  # one modeline per window
         body_rows = _render_body(window.buffer.text, width, pane_body)
         modeline = _clip(_modeline(window.buffer), width)
         rows.extend(body_rows)
         rows.append(modeline)
-        if index == observation.focused and observation.minibuffer is None:
+        if semantic_index == observation.focused and observation.minibuffer is None:
             cursor_row, cursor_col = _cursor_position(
                 window.buffer, width, pane_body, point=window.point
             )
@@ -109,18 +129,6 @@ def render_session(
         row_offset += pane_height
 
     rows.append(echo_row)
-    # TODO: [tech-debt] TD-10 — this cap cuts from the bottom, so the shared
-    # echo row is the first casualty and a two-row split frame renders two
-    # modelines and no minibuffer prompt. Rendering priority is its own
-    # decision; see docs/technical-debt.md.
-    # The Frame contract caps rows at `height`: with more windows than rows,
-    # drop the lower panes. A live session reaches this since plan 0015 D7 —
-    # the split gate only refuses *new* splits at the current size, and a
-    # resize can shrink a frame below the size its existing split needed.
-    # Dropping a pane is how that shrink stays non-destructive: the window is
-    # still in the session, so growing the frame back renders it again.
-    rows = rows[:height]
-    cursor_row = min(cursor_row, max(len(rows) - 1, 0))
     return Frame(
         rows=tuple(rows), cursor=(cursor_row, cursor_col), width=width, height=height
     )
@@ -141,21 +149,50 @@ def _noted_prompt(prompt: str, note: str) -> str:
     return f"{prompt}[{note}]" if note else prompt
 
 
+def _render_single_row(
+    observation: BufferObservation,
+    width: int,
+    *,
+    echo: str,
+    note: str,
+    minibuffer: str | None,
+    minibuffer_prompt: str | None,
+) -> Frame:
+    if minibuffer is not None:
+        prompt = _noted_prompt(minibuffer_prompt or "", note)
+        content = prompt + minibuffer
+        cursor_col = min(len(_sanitize(content)), max(width - 1, 0))
+        return Frame(
+            rows=(_clip(content, width),),
+            cursor=(0, cursor_col),
+            width=width,
+            height=1,
+        )
+    content = echo or _modeline(observation)
+    return Frame(rows=(_clip(content, width),), cursor=(0, 0), width=width, height=1)
+
+
 def _window_heights(body_height: int, window_count: int) -> tuple[int, ...]:
-    """Stacked window heights (each ≥1: the modeline row), remainder to the
-    bottom window. Never returns a zero-height pane."""
+    """Heights for already-admitted panes, remainder to the bottom pane."""
     if window_count <= 0:  # pragma: no cover — guarded by the caller
         return ()
-    base = max(body_height // window_count, 1)
+    base = body_height // window_count
     heights = [base] * window_count
-    # Give any leftover rows to the bottom window (Emacs rounds down to the
-    # last window when the frame doesn't divide evenly).
     heights[-1] += body_height - base * window_count
-    if heights[-1] < 1:
-        # More windows than body rows: the bottom pane still gets its
-        # modeline row (the caller caps the total rows at the frame height).
-        heights[-1] = 1
     return tuple(heights)
+
+
+def _visible_window_indices(
+    window_count: int, focused: int, visible_count: int
+) -> tuple[int, ...]:
+    """Choose a contiguous, focus-centered stack slice.
+
+    For an even visible count, focus occupies the upper-middle slot when
+    boundaries permit, favoring the following semantic window.
+    """
+    focus_slot = (visible_count - 1) // 2
+    start = min(max(focused - focus_slot, 0), window_count - visible_count)
+    return tuple(range(start, start + visible_count))
 
 
 def _modeline(observation: BufferObservation) -> str:

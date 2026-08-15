@@ -337,29 +337,78 @@ class TestHarnessResize:
         harness.send("2")
         assert WindowSplit(3) not in harness.outcomes[-1].events
 
-    def test_focus_still_cycles_into_a_window_the_frame_cannot_show(self) -> None:
-        """The hazard D7 owns: while shrunk, a window exists that the frame
-        does not render. It is not lost — C-x o reaches it and typing lands
-        in it — which is exactly why keeping it is safe rather than confusing
-        state with nothing behind it.
-        """
+    def test_focus_reprojects_shrunk_frame_without_losing_hidden_windows(
+        self,
+    ) -> None:
+        """A constrained frame anchors presentation on semantic focus while
+        preserving every hidden window and its independent point."""
         harness = EditorHarness(width=20, height=24, initial_text="ab")
         harness.send("C-x")
         harness.send("2")
-        harness.resize(20, 1)  # only the top pane's modeline fits
+        harness.resize(20, 1)
         harness.send("C-x")
-        harness.send("o")  # focus the pane that is off-frame
+        harness.send("o")
         assert WindowFocusChanged(1, "scratch") in harness.outcomes[-1].events
 
-        # The invisible window is a real window, not a bookkeeping entry: it
-        # carries its own point, and editing moves *its* point rather than
-        # the visible window's. Asserting on the buffer text alone would not
-        # show this — both windows share one buffer, so the text is the same
-        # whichever window has focus.
         harness.send("C-f")
         session = harness._session  # noqa: SLF001 - layout has no public reader
         assert session.windows[1].point == 1
         assert session.windows[0].point == 0
+
+        harness.resize(20, 3)
+        assert harness.frame.rows[0].startswith("ab")
+        assert harness.frame.cursor == (0, 1)
+        assert len(session.windows) == 2
+
+    def test_three_distinct_windows_survive_focus_shrink_edit_and_growth(self) -> None:
+        harness = EditorHarness(width=20, height=24, initial_text="abcd")
+        harness.send("C-x")
+        harness.send("2")
+        harness.send("C-f")
+        harness.send("C-@")  # window 0: point/mark 1
+        harness.send("C-x")
+        harness.send("o")
+        harness.send("C-f")
+        harness.send("C-f")
+        harness.send("C-@")  # window 1: point/mark 2
+        harness.send("C-x")
+        harness.send("2")  # window 2 clones focused point/mark
+        harness.send("C-x")
+        harness.send("o")
+        harness.send("C-f")
+        harness.send("C-@")  # window 2: point/mark 3
+
+        session = harness._session  # noqa: SLF001 - layout has no public reader
+        before = session.windows
+        assert tuple((window.point, window.mark) for window in before) == (
+            (1, 1),
+            (2, 2),
+            (3, 3),
+        )
+
+        harness.resize(20, 5)
+        assert sum(row.startswith("Drei:") for row in harness.frame.rows) == 2
+        harness.resize(20, 3)
+        assert sum(row.startswith("Drei:") for row in harness.frame.rows) == 1
+        assert harness.frame.cursor == (0, 3)
+
+        harness.send("C-x")
+        harness.send("o")  # focus wraps from window 2 to window 0
+        harness.send("C-f")
+        assert harness.frame.cursor == (0, 2)
+        assert tuple((window.point, window.mark) for window in session.windows) == (
+            (2, 1),
+            (2, 2),
+            (3, 3),
+        )
+
+        harness.resize(20, 24)
+        assert len(session.windows) == 3
+        assert tuple((window.point, window.mark) for window in session.windows) == (
+            (2, 1),
+            (2, 2),
+            (3, 3),
+        )
 
     def test_resize_does_not_clear_a_pending_echo_message(self) -> None:
         """A resize is not a user action and must not wipe the echo area:

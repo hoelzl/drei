@@ -1,6 +1,10 @@
 # Twenty-seventh slice: constrained-frame rendering priority (TD-10)
 
-**Status:** ready (issue #89).
+**Status:** implemented on the code branch (issue #89). The renderer now reserves
+the shared echo row before pane admission, selects a contiguous focus-centered
+subset, preserves complete non-focused panes only, and carries exact direct,
+harness, and 40x3 ConPTY evidence. Delivery SHA/PR and final review evidence are
+recorded when the code candidate is pushed.
 
 **Architecture gate:** design 0002 decisions 2 and 5 (immutable semantic observations
 are the verification boundary; presentation does not redefine the live model), plan
